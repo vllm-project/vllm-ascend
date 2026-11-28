@@ -9,7 +9,6 @@ from vllm.triton_utils import HAS_TRITON, tl, triton
 
 _FUSED_INDEX_HEAD_DIM = 128
 _FUSED_ROPE_DIM = 64
-_FUSED_COMPRESS_RATIO = 4
 _FUSED_MROPE_SECTIONS = (11, 11, 10)
 
 
@@ -406,6 +405,34 @@ def qsa_store_cache_rows(
     )
 
 
+def can_fuse_qsa_compress_norm_store(
+    raw_keys: torch.Tensor,
+    norm_weight: torch.Tensor,
+    compressed_cache: torch.Tensor,
+) -> bool:
+    """Check the tensor contract shared by fusion dispatch and the wrapper.
+
+    The caller selects compatible RoPE semantics; the wrapper checks its rotary
+    table and compression metadata. Any positive ratio fitting the state ring
+    uses the same parameterized pooling loop in both kernel modes.
+    """
+    if raw_keys.dtype != torch.bfloat16:
+        return False
+    return (
+        raw_keys.ndim == 3
+        and raw_keys.shape[1:] == (1, _FUSED_INDEX_HEAD_DIM)
+        and norm_weight.shape == (_FUSED_INDEX_HEAD_DIM,)
+        and norm_weight.is_contiguous()
+        and norm_weight.dtype == raw_keys.dtype
+        and norm_weight.device == raw_keys.device
+        and compressed_cache.ndim == 4
+        and compressed_cache.shape[2:] == (1, _FUSED_INDEX_HEAD_DIM)
+        and all(compressed_cache.shape)
+        and compressed_cache.dtype == raw_keys.dtype
+        and compressed_cache.device == raw_keys.device
+    )
+
+
 def qsa_compress_groups_with_ratio(
     raw_keys: torch.Tensor,
     raw_positions: torch.Tensor,
@@ -425,9 +452,10 @@ def qsa_compress_groups_with_ratio(
 ) -> tuple[torch.Tensor, torch.Tensor] | None:
     """Pool groups, optionally normalizing and storing directly into the cache.
 
-    The fused ABI is BF16, head_dim=128, ratio=4, rotary_dim=64 and
+    The fused ABI is BF16, head_dim=128, rotary_dim=64 and
     interleaved MRoPE sections [11, 11, 10]. Raw rings remain read-only in
     this launch: their updates must follow completion of all group readers.
+    Both modes support positive compression ratios up to the state-ring size.
     """
     if raw_keys.device.type != "npu" or not HAS_TRITON:
         raise RuntimeError("QSA NPU compression requires Triton")
@@ -468,14 +496,11 @@ def qsa_compress_groups_with_ratio(
     if compressed_cache is not None:
         if norm_weight is None or rotary_cache is None:
             raise ValueError("QSA fused compression requires norm weight and rotary cache")
-        if (
-            raw_keys.dtype != torch.bfloat16
-            or raw_keys.shape[2] != _FUSED_INDEX_HEAD_DIM
-            or compress_ratio != _FUSED_COMPRESS_RATIO
-        ):
-            raise ValueError("QSA fused compression requires BF16 width 128 and ratio 4")
-        if norm_weight.shape != (_FUSED_INDEX_HEAD_DIM,) or not norm_weight.is_contiguous():
-            raise ValueError("QSA fused compression requires a contiguous 128-element norm weight")
+        if not can_fuse_qsa_compress_norm_store(raw_keys, norm_weight, compressed_cache):
+            raise ValueError(
+                "QSA fused compression requires BF16 width 128, a contiguous matching norm weight "
+                "and a nonempty matching compressed-key cache"
+            )
         if (
             rotary_cache.ndim != 2
             or rotary_cache.shape[0] == 0
@@ -483,17 +508,8 @@ def qsa_compress_groups_with_ratio(
             or rotary_cache.stride(1) != 1
         ):
             raise ValueError("QSA fused compression requires a rotary cache with width 64")
-        if (
-            compressed_cache.ndim != 4
-            or compressed_cache.shape[2:] != (1, _FUSED_INDEX_HEAD_DIM)
-            or not all(compressed_cache.shape)
-        ):
-            raise ValueError("QSA fused compression requires a nonempty compressed-key cache")
-        if any(
-            t.dtype != raw_keys.dtype or t.device != raw_keys.device
-            for t in (norm_weight, rotary_cache, compressed_cache)
-        ):
-            raise ValueError("QSA fused compression tensors must share BF16 dtype and device")
+        if rotary_cache.dtype != raw_keys.dtype or rotary_cache.device != raw_keys.device:
+            raise ValueError("QSA fused compression rotary cache must share the raw-key BF16 dtype and device")
         # Unused pointers/strides in the fused specialization; allocate no intermediates.
         pooled, first_positions = raw_keys, raw_positions[:, 0]
     else:
@@ -568,6 +584,7 @@ def qsa_compress_groups_with_ratio(
 
 
 __all__ = [
+    "can_fuse_qsa_compress_norm_store",
     "pack_qsa_group_indices_npu",
     "qsa_compress_groups_with_ratio",
     "qsa_store_cache_rows",

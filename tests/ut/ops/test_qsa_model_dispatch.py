@@ -19,7 +19,14 @@ def _load_dispatch(class_name, methods, base, **dependencies):
     cls = next(n for n in tree.body if isinstance(n, ast.ClassDef) and n.name == class_name)
     cls.bases = [ast.Name(id="Base", ctx=ast.Load())]
     cls.body = [n for n in cls.body if isinstance(n, ast.FunctionDef) and n.name in methods]
-    helpers = [n for n in tree.body if isinstance(n, ast.FunctionDef) and n.name == "_compress_qsa_groups"]
+    ops_path = path.parents[2] / "ops/triton/qwen4_exp/qsa.py"
+    ops_tree = ast.parse(ops_path.read_text(encoding="utf-8"))
+    helpers = [
+        n
+        for n in ops_tree.body
+        if (isinstance(n, ast.FunctionDef) and n.name == "can_fuse_qsa_compress_norm_store")
+        or (isinstance(n, ast.Assign) and all(isinstance(t, ast.Name) and t.id.isupper() for t in n.targets))
+    ]
     module = ast.fix_missing_locations(
         ast.Module(
             body=[ast.ImportFrom(module="__future__", names=[ast.alias(name="annotations")], level=0), *helpers, cls],
@@ -116,7 +123,7 @@ def test_compression_dispatch_and_ring_order(head_dim, case, with_position_ring)
         "AscendQSAIndexer",
         {"_fused_norm_rope_eligible", "_update_and_compress"},
         object,
-        qsa_compress_groups_with_ratio_fused=compression,
+        qsa_compress_groups_with_ratio=compression,
         _store_qsa_cache_rows=stores,
         qsa_indexer=SimpleNamespace(canonical_qsa_rope_positions=canonical),
     )
@@ -183,7 +190,7 @@ def test_compression_dispatch_and_ring_order(head_dim, case, with_position_ring)
     assert args[0].shape == (2, 1, head_dim)  # Exclude graph-padding rows.
     assert args[8] == layer.compress_ratio
     assert args[9] is position_ring
-    if head_dim == 128 and case == "eligible":
+    if head_dim == 128 and case in ("eligible", "ratio"):
         assert kwargs["compressed_cache"] is compressed_cache
         assert kwargs["norm_weight"] is layer.k_layernorm.weight
         layer.normalize_compressed_keys.assert_not_called()

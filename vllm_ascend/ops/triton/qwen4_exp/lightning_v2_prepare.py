@@ -72,9 +72,10 @@ def prepare_qsa_lightning_v2_inputs(
     score_weight = math.ldexp(
         round(math.ldexp(1.0 / math.sqrt(_HEAD_DIM), _WEIGHT_FRACTION_BITS)), -_WEIGHT_FRACTION_BITS
     )
-    # One vector tile covers small request batches; larger query weights scale
-    # through the grid. Counts are runtime arguments, but the backend may still
-    # specialize on their types and default scalar specialization classes.
+    # Each program covers BLOCK_SIZE flat indices shared by all four outputs.
+    # Lengths, request boundaries and (token, head) weights have independent
+    # masks, so the grid only needs to cover the longest output range.
+    # BLOCK_SIZE controls vector tiling, independently of the compression ratio.
     block_size = 256
     grid = (triton.cdiv(max(requests + 1, weights.numel()), block_size),)
     _prepare_qsa_lightning_v2_inputs_kernel[grid](

@@ -332,7 +332,7 @@ def test_pcp_indexer_compresses_complete_groups_across_ranks(monkeypatch) -> Non
     all_gather = Mock(return_value=(gathered, None))
     monkeypatch.setattr(qsa, "get_pcp_group", lambda: group)
     monkeypatch.setattr(qsa, "all_gather_async", all_gather)
-    monkeypatch.setattr(qsa, "_compress_qsa_groups", compress)
+    monkeypatch.setattr(qsa, "qsa_compress_groups_with_ratio", compress)
     monkeypatch.setattr(qsa, "_store_qsa_cache_rows", store)
 
     indexer._update_and_compress(local_keys, torch.tensor([0, 3, 0]), raw, compressed)
@@ -627,7 +627,7 @@ def test_qsa_kv_store_keeps_page_stride_with_multiple_heads(monkeypatch) -> None
     def store(cache_view, slot_mapping, flat_rows):
         cache_view[slot_mapping // 4, slot_mapping % 4, 0] = flat_rows
 
-    monkeypatch.setattr(qsa, "qsa_store_cache_rows_fused", store)
+    monkeypatch.setattr(qsa, "qsa_store_cache_rows", store)
     qsa._store_qsa_cache_rows(cache, slots, rows)
 
     torch.testing.assert_close(cache[1, 1], rows[0])

@@ -25,7 +25,7 @@
 | `compressor_state_block_table` | Input | 2D per-request ring block IDs |
 | `token_to_req`, `query_start_loc` | Input | Row owners and cumulative request boundaries |
 | `logical_positions`, `compressed_slots` | Input | One position and output slot per row |
-| `compress_ratio` | Attribute | Positive pooling ratio; fused mode requires 4 |
+| `compress_ratio` | Attribute | Positive pooling ratio, no larger than the state ring |
 | `rope_cache` | Optional input | int64 `[blocks, ring_size, 1, 3]`; absent means logical positions |
 | `norm_weight`, `rotary_cache` | Optional inputs | BF16 `[128]` and `[cache_rows, 64]`; required in fused mode |
 | `compressed_cache` | Optional input/output | BF16 `[pages, page_size, 1, 128]`, written in place |
@@ -34,8 +34,12 @@
 
 ## Constraints
 
-- Fused mode requires BF16, head dimension 128, ratio 4, rotary dimension 64,
+- Fused mode requires BF16, head dimension 128, rotary dimension 64,
   and interleaved MRoPE sections `[11, 11, 10]`.
+- Both modes use the same ratio-parameterized pooling loop. The model uses
+  `can_fuse_qsa_compress_norm_store` for the tensor contract and its existing
+  Norm/RoPE predicate for rotary semantics; other valid layouts retain the
+  decomposed normalization/store path.
 - Norm weights are contiguous; the rotary table is nonempty with contiguous
   width. Weights, rotary table and output cache share the raw-key dtype/device.
   Cache strides are passed explicitly; metadata follows the model's device-local

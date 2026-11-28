@@ -45,10 +45,9 @@ from vllm_ascend.distributed.kv_transfer.kv_pool.ascend_store.attention_fence im
 from vllm_ascend.distributed.utils import all_gather_async
 from vllm_ascend.ops.triton.linearnorm import qsa_rmsnorm_mrope as _qsa_rmsnorm_mrope  # noqa: F401
 from vllm_ascend.ops.triton.qwen4_exp.qsa import (
-    qsa_compress_groups_with_ratio as qsa_compress_groups_with_ratio_fused,
-)
-from vllm_ascend.ops.triton.qwen4_exp.qsa import (
-    qsa_store_cache_rows as qsa_store_cache_rows_fused,
+    can_fuse_qsa_compress_norm_store,
+    qsa_compress_groups_with_ratio,
+    qsa_store_cache_rows,
 )
 
 from .attention_dispatch import build_qsa_request_plan, dispatch_qsa_attention
@@ -105,36 +104,7 @@ def _store_qsa_cache_rows(
         cache = cache.view(cache.shape[0], cache.shape[1], 1, -1)
         rows = rows.flatten(1)
     flat_slots = slot_mapping.reshape(-1)
-    qsa_store_cache_rows_fused(cache, flat_slots, rows)
-
-
-def _compress_qsa_groups(
-    raw_keys: torch.Tensor,
-    raw_positions: torch.Tensor,
-    compressor_state_cache: torch.Tensor,
-    compressor_state_block_table: torch.Tensor,
-    token_to_req: torch.Tensor,
-    query_start_loc: torch.Tensor,
-    logical_positions: torch.Tensor,
-    compressed_slots: torch.Tensor,
-    compress_ratio: int,
-    rope_cache: torch.Tensor | None,
-) -> tuple[torch.Tensor, torch.Tensor]:
-    """Pool completed groups with the fused QSA compression kernel."""
-    result = qsa_compress_groups_with_ratio_fused(
-        raw_keys,
-        raw_positions,
-        compressor_state_cache,
-        compressor_state_block_table,
-        token_to_req,
-        query_start_loc,
-        logical_positions,
-        compressed_slots,
-        compress_ratio,
-        rope_cache,
-    )
-    assert result is not None
-    return result
+    qsa_store_cache_rows(cache, flat_slots, rows)
 
 
 def _qsa_cache_is_bound(kv_cache: QSAKVCache) -> bool:
@@ -417,18 +387,11 @@ class AscendQSAIndexer(upstream_indexer.QSAIndexer):
                 device=raw_key_cache.device
             )
         compressed_cache = self.compressed_key_cache.kv_cache
-        if (
-            self._fused_norm_rope_eligible(token_k, positions)
-            and self.compress_ratio == 4
-            and self.k_layernorm.weight.is_contiguous()
-            and compressed_cache.dtype == token_k.dtype
-            and compressed_cache.device == token_k.device
-            and compressed_cache.ndim == 4
-            and compressed_cache.shape[2:] == (1, self.index_head_dim)
-            and all(compressed_cache.shape)
+        if self._fused_norm_rope_eligible(token_k, positions) and can_fuse_qsa_compress_norm_store(
+            token_k, self.k_layernorm.weight, compressed_cache
         ):
             rotary_cache = self.rotary_emb._match_cos_sin_cache_dtype(token_k)  # noqa: SLF001
-            qsa_compress_groups_with_ratio_fused(
+            qsa_compress_groups_with_ratio(
                 token_k[:num_tokens],
                 position_rows,
                 raw_key_cache,
@@ -445,7 +408,7 @@ class AscendQSAIndexer(upstream_indexer.QSAIndexer):
                 norm_eps=self.k_layernorm.variance_epsilon,
             )
         else:
-            pooled, first_positions = _compress_qsa_groups(
+            result = qsa_compress_groups_with_ratio(
                 token_k[:num_tokens],
                 position_rows,
                 raw_key_cache,
@@ -457,6 +420,8 @@ class AscendQSAIndexer(upstream_indexer.QSAIndexer):
                 self.compress_ratio,
                 rope_position_cache,
             )
+            assert result is not None
+            pooled, first_positions = result
             normalized = self.normalize_compressed_keys(
                 pooled,
                 first_positions,
