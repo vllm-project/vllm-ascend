@@ -77,5 +77,5 @@ def rejection_greedy_sample_pytorch(
     if torch.any(needs_bonus):
         bonus_rows = torch.where(needs_bonus)[0]
         bonus_cols = draft_tokens_per_req[bonus_rows]
-        bonus_token_ids = bonus_token_ids.squeeze(1)
+        bonus_token_ids = bonus_token_ids.squeeze(1).to(output_token_ids.dtype)
         output_token_ids[bonus_rows, bonus_cols] = bonus_token_ids[bonus_rows]
