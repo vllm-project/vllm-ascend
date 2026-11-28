@@ -1,0 +1,4 @@
+pr: 23139
+entries:
+  - category: bugfix
+    text: Fixed grouped MoE inference to fall back when expert groups exceed the fused gating operator's capacity, avoiding a CANN tiling error.

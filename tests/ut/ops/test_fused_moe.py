@@ -53,6 +53,50 @@ from vllm_ascend.quantization.quant_type import QuantType
 from vllm_ascend.utils import vllm_version_is
 
 
+@pytest.mark.parametrize(
+    ("hidden_size", "num_experts", "num_groups", "topk_group", "uses_fused_op"),
+    [
+        pytest.param(250, 64, 8, 4, True, id="hidden-size-not-divisible"),
+        pytest.param(240, 64, 8, 4, True, id="top-k-fits-in-selected-groups"),
+        pytest.param(1280, 1040, 80, 1, False, id="aligned-experts-exceed-kernel-limit"),
+    ],
+)
+def test_fused_grouped_topk_checks_expert_groups(
+    monkeypatch, hidden_size, num_experts, num_groups, topk_group, uses_fused_op
+):
+    hidden_states = torch.zeros(2, hidden_size)
+    router_logits = torch.arange(num_experts, dtype=torch.float32).repeat(2, 1) / num_experts
+    weights = torch.ones(2, 8, dtype=torch.float32)
+    ids = torch.zeros(2, 8, dtype=torch.int32)
+    gating_op = MagicMock(return_value=(weights, ids, None))
+    monkeypatch.setattr(fused_topk_router_module.torch_npu, "npu_moe_gating_top_k", gating_op, raising=False)
+    monkeypatch.setattr(fused_topk_router_module, "get_current_hardware_profile", lambda: None)
+    router = AscendFusedTopKRouter(
+        top_k=8,
+        global_num_experts=num_experts,
+        use_grouped_topk=True,
+        num_expert_group=num_groups,
+        topk_group=topk_group,
+    )
+
+    actual_weights, actual_ids = router._compute_routing(hidden_states, router_logits, torch.int32)
+
+    if uses_fused_op:
+        gating_op.assert_called_once()
+        assert gating_op.call_args.args[0] is router_logits
+        assert gating_op.call_args.kwargs["k_group"] == topk_group
+        assert gating_op.call_args.kwargs["group_count"] == num_groups
+        assert actual_weights is weights
+        assert actual_ids is ids
+    else:
+        gating_op.assert_not_called()
+        expected_weights, expected_ids = AscendGroupedTopKRouter._compute_routing(
+            router, hidden_states, router_logits, torch.int32
+        )
+        torch.testing.assert_close(actual_weights, expected_weights)
+        torch.testing.assert_close(actual_ids, expected_ids)
+
+
 def test_prepared_linear_input_import_does_not_cycle_through_moe():
     """Both modules must use the leaf contract, even when imports are cached."""
     leaf_module = "vllm_ascend.quantization.prepared_linear_input"
