@@ -2416,7 +2416,7 @@ Select the tab that matches the deployment hardware and its Prefill topology.
 
     Complete [MemCache backend setup](../../user_guide/feature_guide/kv_cache_pool_ascend_store.md#scenario-2-memcache-backend) first, including the metadata service, dependencies and per-node configuration. Export `MMC_LOCAL_CONFIG_PATH` to the actual configuration file on every node and make the installed MemCache libraries available to the vLLM Python runtime.
 
-    This source uses **W4A4C8 MXFP4**, a 1,048,576-token limit, and layerwise pooling (`use_layerwise=true`) through MultiConnector, MooncakeConnectorV2 and AscendStoreConnector. It is not the A3 198k non-layerwise configuration. Both roles enable prefix caching. The source does not explicitly set `use_ascend_direct` for pooling; verify the selected build's default and backend transport rather than assuming the non-pooled setting. Decode needs four nodes with four TP2 ranks per node. Do not infer 1M capacity from the earlier single-node short-request W4A4C8 test.
+    This GLM-5.3 **W8A8C8 MXFP8** example uses one PP2/TP8 Prefill instance across P0/P1 and a DP16/TP1 Decode group across D0/D1. Each node has eight devices. Only P0 exposes the Prefill API; P1 is headless. Both roles use Model Runner V1, a 135,000-token limit, prefix caching and direct Mooncake transfer. AscendStore uses MemCache with `use_layerwise=true` on Prefill and `false` on Decode.
 
     ###### Prepare the Scripts
 
@@ -2457,6 +2457,7 @@ Select the tab that matches the deployment hardware and its Prefill topology.
             export GLOO_SOCKET_IFNAME=$nic_name
             export TP_SOCKET_IFNAME=$nic_name
             export HCCL_SOCKET_IFNAME=$nic_name
+            export VLLM_HOST_IP=$local_ip
 
             export HCCL_ALGO=level0:fullmesh
 
@@ -2477,6 +2478,7 @@ Select the tab that matches the deployment hardware and its Prefill topology.
             export TASK_QUEUE_ENABLE=1
 
             export VLLM_USE_FASTOKENS=1
+            export VLLM_DISABLE_COMPILE_CACHE=1
             export VLLM_USE_V2_MODEL_RUNNER=0
             export ASCEND_LOCAL_COMM_RES='{"version":"1.3"}'
             export VLLM_PP_LAYER_PARTITION="42,36"
@@ -2492,11 +2494,11 @@ Select the tab that matches the deployment hardware and its Prefill topology.
               --master-port 7060 \
               --nnodes 2 \
               --node-rank 0 \
-              --max-model-len 1048576 \
-              --max-num-batched-tokens 4096 \
+              --max-model-len 135000 \
+              --max-num-batched-tokens 16384 \
               --served-model-name glm \
-              --gpu-memory-utilization 0.95 \
-              --max-num-seqs 8 \
+              --gpu-memory-utilization 0.9 \
+              --max-num-seqs 500 \
               --trust-remote-code \
               --enforce-eager \
               --quantization ascend \
@@ -2519,15 +2521,16 @@ Select the tab that matches the deployment hardware and its Prefill topology.
                             "kv_role": "kv_producer",
                             "kv_port": "30000",
                             "kv_connector_extra_config": {
+                            "use_ascend_direct": true,
                             "prefill": {
                                     "dp_size": 1,
-               "tp_size": 8,
+                                    "tp_size": 8,
                                     "pp_size": 2,
                                     "pp_layer_partition": "42,36"
                             },
                             "decode": {
                                     "dp_size": 16,
-                                    "tp_size": 2
+                                    "tp_size": 1
                             }
                             }
                         },
@@ -2545,7 +2548,7 @@ Select the tab that matches the deployment hardware and its Prefill topology.
                 }' \
               --kv-cache-dtype fp8 \
               --attention_config.indexer_kv_dtype fp8 \
-              --additional-config '{"enable_cpu_binding": true, "recompute_scheduler_enable": true, "enable_dsa_cp": true, "enable_flashcomm1": true, "enable_fused_mc2": 1}'
+              --additional-config '{"enable_cpu_binding": true, "multistream_overlap_shared_expert": true, "recompute_scheduler_enable": true, "enable_dsa_cp": true, "enable_flashcomm1": true, "enable_fused_mc2": 2}'
             ```
 
         2. Prefill node 1
@@ -2579,6 +2582,7 @@ Select the tab that matches the deployment hardware and its Prefill topology.
             export GLOO_SOCKET_IFNAME=$nic_name
             export TP_SOCKET_IFNAME=$nic_name
             export HCCL_SOCKET_IFNAME=$nic_name
+            export VLLM_HOST_IP=$local_ip
 
             export HCCL_ALGO=level0:fullmesh
 
@@ -2599,6 +2603,7 @@ Select the tab that matches the deployment hardware and its Prefill topology.
             export TASK_QUEUE_ENABLE=1
 
             export VLLM_USE_FASTOKENS=1
+            export VLLM_DISABLE_COMPILE_CACHE=1
             export VLLM_USE_V2_MODEL_RUNNER=0
             export ASCEND_LOCAL_COMM_RES='{"version":"1.3"}'
             export VLLM_PP_LAYER_PARTITION="42,36"
@@ -2614,11 +2619,11 @@ Select the tab that matches the deployment hardware and its Prefill topology.
               --master-port 7060 \
               --nnodes 2 \
               --node-rank 1 \
-              --max-model-len 1048576 \
-              --max-num-batched-tokens 4096 \
+              --max-model-len 135000 \
+              --max-num-batched-tokens 16384 \
               --served-model-name glm \
-              --gpu-memory-utilization 0.95 \
-              --max-num-seqs 8 \
+              --gpu-memory-utilization 0.9 \
+              --max-num-seqs 500 \
               --trust-remote-code \
               --enforce-eager \
               --quantization ascend \
@@ -2641,15 +2646,16 @@ Select the tab that matches the deployment hardware and its Prefill topology.
                             "kv_role": "kv_producer",
                             "kv_port": "30000",
                             "kv_connector_extra_config": {
+                            "use_ascend_direct": true,
                             "prefill": {
                                     "dp_size": 1,
-               "tp_size": 8,
+                                    "tp_size": 8,
                                     "pp_size": 2,
                                     "pp_layer_partition": "42,36"
                             },
                             "decode": {
                                     "dp_size": 16,
-                                    "tp_size": 2
+                                    "tp_size": 1
                             }
                             }
                         },
@@ -2667,11 +2673,11 @@ Select the tab that matches the deployment hardware and its Prefill topology.
                 }' \
               --kv-cache-dtype fp8 \
               --attention_config.indexer_kv_dtype fp8 \
-              --additional-config '{"enable_cpu_binding": true, "recompute_scheduler_enable": true, "enable_dsa_cp": true, "enable_flashcomm1": true, "enable_fused_mc2": 1}' \
+              --additional-config '{"enable_cpu_binding": true, "multistream_overlap_shared_expert": true, "recompute_scheduler_enable": true, "enable_dsa_cp": true, "enable_flashcomm1": true, "enable_fused_mc2": 2}' \
               --headless
             ```
 
-        3. Decode nodes 0–3
+        3. Decode nodes 0–1
 
             ```shell
             #!/usr/bin/env bash
@@ -2700,6 +2706,7 @@ Select the tab that matches the deployment hardware and its Prefill topology.
             export GLOO_SOCKET_IFNAME=$nic_name
             export TP_SOCKET_IFNAME=$nic_name
             export HCCL_SOCKET_IFNAME=$nic_name
+            export VLLM_HOST_IP=$local_ip
 
             export HCCL_ALGO=level0:fullmesh
 
@@ -2707,7 +2714,7 @@ Select the tab that matches the deployment hardware and its Prefill topology.
             export VLLM_EXECUTE_MODEL_TIMEOUT_SECONDS=30000
             export HCCL_EXEC_TIMEOUT=1800
             export HCCL_CONNECT_TIMEOUT=1800
-            export HCCL_BUFFSIZE=900
+            export HCCL_BUFFSIZE=1600
 
             export OMP_PROC_BIND=false
             export OMP_NUM_THREADS=10
@@ -2718,6 +2725,7 @@ Select the tab that matches the deployment hardware and its Prefill topology.
             export ASCEND_RT_VISIBLE_DEVICES=$1
             export VLLM_USE_FASTOKENS=1
 
+            export VLLM_DISABLE_COMPILE_CACHE=1
             export VLLM_USE_V2_MODEL_RUNNER=0
             export ASCEND_LOCAL_COMM_RES='{"version":"1.3"}'
 
@@ -2729,12 +2737,12 @@ Select the tab that matches the deployment hardware and its Prefill topology.
               --data-parallel-address $5 \
               --data-parallel-rpc-port $6 \
               --tensor-parallel-size $7 \
-              --max-model-len 1048576 \
-              --max-num-batched-tokens 60 \
+              --max-model-len 135000 \
+              --max-num-batched-tokens 240 \
               --served-model-name glm \
               --gpu-memory-utilization 0.95 \
               --enable-expert-parallel \
-              --max-num-seqs 10 \
+              --max-num-seqs 40 \
               --trust-remote-code \
               --quantization ascend \
               --enable-auto-tool-choice \
@@ -2757,15 +2765,16 @@ Select the tab that matches the deployment hardware and its Prefill topology.
                             "kv_role": "kv_consumer",
                             "kv_port": "30300",
                             "kv_connector_extra_config": {
+                            "use_ascend_direct": true,
                             "prefill": {
                                     "dp_size": 1,
-               "tp_size": 8,
+                                    "tp_size": 8,
                                     "pp_size": 2,
                                     "pp_layer_partition": "42,36"
                             },
                             "decode": {
                                     "dp_size": 16,
-                                    "tp_size": 2
+                                    "tp_size": 1
                             }
                             }
                         },
@@ -2775,7 +2784,7 @@ Select the tab that matches the deployment hardware and its Prefill topology.
                             "kv_connector_extra_config": {
                                 "lookup_rpc_port":"0",
                                 "backend": "memcache",
-                                "use_layerwise": true
+                                "use_layerwise": false
                             }
                         }
                         ]
@@ -2808,25 +2817,13 @@ Select the tab that matches the deployment hardware and its Prefill topology.
     3. Decode node 0
 
         ```shell
-        python launch_online_dp.py --dp-size 16 --tp-size 2 --dp-size-local 4 --dp-rank-start 0 --dp-address "$D0_IP" --dp-rpc-port 16600 --vllm-start-port 8000
+        python launch_online_dp.py --dp-size 16 --tp-size 1 --dp-size-local 8 --dp-rank-start 0 --dp-address "$D0_IP" --dp-rpc-port 16600 --vllm-start-port 8000
         ```
 
     4. Decode node 1
 
         ```shell
-        python launch_online_dp.py --dp-size 16 --tp-size 2 --dp-size-local 4 --dp-rank-start 4 --dp-address "$D0_IP" --dp-rpc-port 16600 --vllm-start-port 8000
-        ```
-
-    5. Decode node 2
-
-        ```shell
-        python launch_online_dp.py --dp-size 16 --tp-size 2 --dp-size-local 4 --dp-rank-start 8 --dp-address "$D0_IP" --dp-rpc-port 16600 --vllm-start-port 8000
-        ```
-
-    6. Decode node 3
-
-        ```shell
-        python launch_online_dp.py --dp-size 16 --tp-size 2 --dp-size-local 4 --dp-rank-start 12 --dp-address "$D0_IP" --dp-rpc-port 16600 --vllm-start-port 8000
+        python launch_online_dp.py --dp-size 16 --tp-size 1 --dp-size-local 8 --dp-rank-start 8 --dp-address "$D0_IP" --dp-rpc-port 16600 --vllm-start-port 8000
         ```
 
     ###### Start the Proxy
@@ -2837,18 +2834,16 @@ Select the tab that matches the deployment hardware and its Prefill topology.
     P0_IP="<P0_IP>"
     D0_IP="<D0_IP>"
     D1_IP="<D1_IP>"
-    D2_IP="<D2_IP>"
-    D3_IP="<D3_IP>"
 
     python /vllm-workspace/vllm-ascend/examples/disaggregated_prefill_v1/load_balance_proxy_server_example.py \
         --host 0.0.0.0 --port 8000 \
         --prefiller-hosts "$P0_IP" --prefiller-ports 8000 \
         --decoder-hosts "$D0_IP" "$D0_IP" "$D0_IP" "$D0_IP" \
+            "$D0_IP" "$D0_IP" "$D0_IP" "$D0_IP" \
             "$D1_IP" "$D1_IP" "$D1_IP" "$D1_IP" \
-            "$D2_IP" "$D2_IP" "$D2_IP" "$D2_IP" \
-            "$D3_IP" "$D3_IP" "$D3_IP" "$D3_IP" \
-        --decoder-ports 8000 8001 8002 8003 8000 8001 8002 8003 \
-            8000 8001 8002 8003 8000 8001 8002 8003
+            "$D1_IP" "$D1_IP" "$D1_IP" "$D1_IP" \
+        --decoder-ports 8000 8001 8002 8003 8004 8005 8006 8007 \
+            8000 8001 8002 8003 8004 8005 8006 8007
     ```
 
 
@@ -2860,26 +2855,28 @@ Select the tab that matches the deployment hardware and its Prefill topology.
     - `--pipeline-parallel-size 2` and `--tensor-parallel-size 8` define
       Prefill across two nodes, with `VLLM_PP_LAYER_PARTITION="42,36"`.
       Only PP rank 0 exposes the Prefill API.
-    - The Decode launcher uses `--dp-size 16`, `--tp-size 2`, and
-      `--dp-size-local 4` across four nodes. Each node exposes API ports
-      `8000-8003`; register all 16 endpoints with the proxy.
-    - Both roles use `--max-model-len 1048576`. Prefill sets
-      `--max-num-seqs 8` and `--max-num-batched-tokens 4096`;
-      Decode sets `10` and `60`, respectively, per engine.
+    - The Decode launcher uses `--dp-size 16`, `--tp-size 1`, and
+      `--dp-size-local 8` across two nodes. Each node exposes API ports
+      `8000-8007`; register all 16 endpoints with the proxy.
+    - Both roles use `--max-model-len 135000`. Prefill sets
+      `--max-num-seqs 500` and `--max-num-batched-tokens 16384`;
+      Decode sets `40` and `240`, respectively, per engine.
     - Both roles enable prefix caching and FP8 attention and indexer KV
       caches. MTP uses an eager draft with one speculative token on
       Prefill and five on Decode. Prefill runs in eager mode; Decode uses
       `FULL_DECODE_ONLY` graph mode.
     - `MultiConnector` combines `MooncakeConnectorV2` for P-to-D transfer
       with `AscendStoreConnector` for KV pooling. Both roles declare
-      Prefill DP1/PP2/TP8 and Decode DP16/TP2, and set `use_layerwise: true`.
+      Prefill DP1/PP2/TP8 and Decode DP16/TP1 with `use_ascend_direct: true`.
+      AscendStore uses `use_layerwise: true` on Prefill and `false` on Decode.
       Mooncake base KV ports are `30000` on Prefill and `30300` on Decode.
     - `MMC_LOCAL_CONFIG_PATH` selects each node's MemCache configuration.
       Prepare the backend before starting the engines and verify shared
       pool reuse through its hit/load metrics.
-    - Prefill enables DSA CP, FlashComm1 and `enable_fused_mc2: 1`.
-      Decode enables MLAPO and shared-expert multistream overlap.
-      Both roles enable recomputation scheduling.
+    - Prefill enables DSA CP, FlashComm1 and `enable_fused_mc2: 2`.
+      Decode enables MLAPO. Both roles enable shared-expert multistream
+      overlap and recomputation scheduling. Prefill uses `HCCL_BUFFSIZE=1200`
+      and memory utilization `0.9`; Decode uses `1600` and `0.95`.
 
 === "A3 series"
 
@@ -4797,8 +4794,8 @@ scheduler limits; do not apply the multi-node rows to those examples.
 | Colocated | 950DT | Shared | 8 | 1 | 1 | 2 | 1 | 500 | 16384 | 135000 | 5 |
 | Ordinary PD | 950DT | Prefill (2 instances) | 8 | 1 | 1 | 2 | 1 | 500 | 16384 | 135000 | 1 |
 | Ordinary PD | 950DT | Decode | 1 | 16 | 8 | 1 | 1 | 10 | 60 | 135000 | 5 |
-| Pooled PD | 950DT | Prefill | 8 | 1 | 1 | 2 | 1 | 8 | 4096 | 1048576 | 1 |
-| Pooled PD | 950DT | Decode | 2 | 16 | 4 | 1 | 1 | 10 | 60 | 1048576 | 5 |
+| Pooled PD | 950DT | Prefill | 8 | 1 | 1 | 2 | 1 | 500 | 16384 | 135000 | 1 |
+| Pooled PD | 950DT | Decode | 1 | 16 | 8 | 1 | 1 | 40 | 240 | 135000 | 5 |
 | 1M PD | 950DT | Prefill | 8 | 2 | 1 | 1 | 1 | 64 | 32768 | 1046576 | 1 |
 | 1M PD | 950DT | Decode | 8 | 2 | 1 | 1 | 8 | 32 | 192 | 1048576 | 5 |
 | Colocated | A3 | Shared | 4 | 8 | 4 | 1 | 1 | 6 | 4096 | 202752 | 3 |
