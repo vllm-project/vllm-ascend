@@ -62,6 +62,7 @@ extend-ignore-words-re = []
 extend-ignore-re = []
 
 [type.py.extend-identifiers]
+Nd2NzParams = "Nd2NzParams"
 arange = "arange"
 NDArray = "NDArray"
 EOFError = "EOFError"
