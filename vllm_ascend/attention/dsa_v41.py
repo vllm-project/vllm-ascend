@@ -43,6 +43,7 @@ from vllm_ascend.core.kv_cache_interface import (
 )
 from vllm_ascend.device.device_op import DeviceOperator
 from vllm_ascend.models.deepseek_v41.cache_config import STATE_RING_ROWS
+from vllm_ascend.models.deepseek_v41.long_kv import pack_long_kv_int8
 from vllm_ascend.ops.rope_dsv4 import (
     get_cos_and_sin_dsa,
     get_full_cos_and_sin_dsa_for_layer,
@@ -348,6 +349,31 @@ def pad_sparse_indices(indices: torch.Tensor, topk: int) -> torch.Tensor:
     return indices.unsqueeze(1).contiguous().int()
 
 
+class H8GroupedInt8KV:
+    """One fixed-address buffer shared by a worker's sequential H8 layer groups."""
+
+    TOPK = 512
+    MAX_TOKENS = 256
+    WRITE = 71
+    READ = 72
+    # Each selected latent contains 512 INT8 values and eight FP32 scales.
+    WORDS_PER_QUERY = TOPK * (512 + 8 * 4) // 4
+
+    def __init__(self, topk_indices: torch.Tensor):
+        self.max_tokens = min(topk_indices.shape[0], self.MAX_TOKENS)
+        self.buffer = topk_indices.new_empty(2 * V41_METADATA_BUFFER_SIZE + self.max_tokens * self.WORDS_PER_QUERY)
+
+    def metadata(self, header: torch.Tensor, ratio: int, num_tokens: int, mode: int) -> torch.Tensor:
+        # The native ABI expects the payload after ratio * 1024 int32 words.
+        # Both C1 and C2 views end at the same byte and expose exactly the active rows.
+        start = (2 - ratio) * V41_METADATA_BUFFER_SIZE
+        end = 2 * V41_METADATA_BUFFER_SIZE + num_tokens * self.WORDS_PER_QUERY
+        view = self.buffer[start:end]
+        if mode == self.WRITE:
+            view[:V41_METADATA_BUFFER_SIZE].copy_(header)
+        return view
+
+
 class AscendDSAV41Impl:
     """V4.1 execution boundary backed by fused Ascend operators.
 
@@ -364,6 +390,8 @@ class AscendDSAV41Impl:
         self.role = role
         self.topology = topology
         self.swa_prefix = f"{prefix}.swa_cache"
+        self.grouped_int8_kv: H8GroupedInt8KV | None = None
+        self.topk_value_mode = 1
         self.long_kv_source_prefix = long_kv_source_prefix
         self.index_k_source_prefix = index_k_source_prefix
         self.compressor_state_prefix = (
@@ -668,11 +696,11 @@ class AscendDSAV41Impl:
                 kind="cmp",
             )
         else:
-            scatter_cache_sk(
-                attn.long_kv_cache.kv_cache,
-                long_slots,
-                latent.squeeze(1),
-            )
+            cache = attn.long_kv_cache.kv_cache
+            rows = latent.squeeze(1)
+            if cache.dtype == torch.int8:
+                rows = pack_long_kv_int8(rows)
+            scatter_cache_sk(cache, long_slots, rows)
 
     def _select_sparse_indices(self, attn, positions, metadata, *, prepared_indexer):
         num_tokens = positions.shape[0]
@@ -762,6 +790,10 @@ class AscendDSAV41Impl:
             DeviceMetadataStage.ATTENTION,
             id(op_metadata),
         )
+        topk_value_mode = 1
+        if self.grouped_int8_kv is not None and q.shape[0] <= self.grouped_int8_kv.max_tokens:
+            op_metadata = self.grouped_int8_kv.metadata(op_metadata, ratio, q.shape[0], self.topk_value_mode)
+            topk_value_mode = self.topk_value_mode
         swa_cache = attn.dsa_attn.swa_cache_layer.kv_cache
         if metadata.swa.replay_block_table is not None:
             # Rebase only SWA: A3 CSA cannot mask its missing prefix with
@@ -793,7 +825,7 @@ class AscendDSAV41Impl:
             ori_win_right=metadata.swa.ori_win_right,
             layout_q="TND",
             layout_kv="PA_BBND",
-            topk_value_mode=1,
+            topk_value_mode=topk_value_mode,
             return_softmax_lse=False,
         )
         return output

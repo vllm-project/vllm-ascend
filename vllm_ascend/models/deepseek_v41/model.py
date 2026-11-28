@@ -68,6 +68,7 @@ from vllm_ascend.ascend_forward_context import MoECommType, select_moe_comm_meth
 from vllm_ascend.attention.dsa_v1 import AscendDSAImpl, OProjBufferPool
 from vllm_ascend.attention.dsa_v41 import (
     DeepseekV41CacheLayer,
+    H8GroupedInt8KV,
     scatter_cache_sk,
 )
 from vllm_ascend.core.kv_cache_interface import resolve_bounded_replay
@@ -690,7 +691,12 @@ class V41PPCacheHandler(PPDependencyTransport):
         for source in sorted(set(incoming.cache_sources + outgoing.cache_sources)):
             ratio = config.compress_ratios[source]
             block_size = vllm_config.cache_config.block_size
-            long_spec = make_mla_cache_spec(block_size=block_size, head_size=config.head_dim, compress_ratio=ratio)
+            long_spec = make_mla_cache_spec(
+                block_size=block_size,
+                head_size=config.head_dim,
+                compress_ratio=ratio,
+                int8_long_kv=get_ascend_config().dsv41_int8_long_kv,
+            )
             index_spec = make_index_cache_spec(
                 block_size=block_size, head_size=config.index_head_dim, compress_ratio=ratio
             )
@@ -926,6 +932,7 @@ class DeepseekV41Attention(DeepseekV41SWAAttention):
                     block_size=block_size,
                     head_size=width,
                     compress_ratio=role.compress_ratio,
+                    int8_long_kv=get_ascend_config().dsv41_int8_long_kv,
                 ),
             )
         self.compressor = (
@@ -1405,6 +1412,7 @@ class DeepseekV41Model(nn.Module, EagleModelMixin):
                 static_forward_context[self.decoder_replay_layer_name] = self.decoder_replay_layers
 
             self._init_routing_input_ids_cache(vllm_config)
+            self._configure_grouped_int8_kv(vllm_config)
             rollback.pop_all()
 
     @property
@@ -1448,6 +1456,32 @@ class DeepseekV41Model(nn.Module, EagleModelMixin):
                     self.register_buffer(f"routing_input_ids_{start}", buffer, persistent=False)
                     router.is_routing_input_ids_producer = True
                 router.routing_input_ids_buffer = buffer
+
+    def _configure_grouped_int8_kv(self, vllm_config):
+        # Overlapping microbatches cannot share the same writeable payload.
+        if not get_ascend_config().dsv41_int8_long_kv or vllm_config.parallel_config.use_ubatching:
+            return
+        previous_group = None
+        workspace = None
+        for idx in range(self.start_layer, self.end_layer):
+            attn = self.layers[idx].self_attn
+            role = attn.role
+            if (
+                role.compress_ratio not in (1, 2)
+                or attn.n_local_heads != 8
+                or attn.topology.index_topk != H8GroupedInt8KV.TOPK
+            ):
+                previous_group = None
+                continue
+            if workspace is None:
+                workspace = H8GroupedInt8KV(self.topk_indices_buffer)
+            group = (role.kv_source_layer, role.index_source_layer, role.compress_ratio)
+            # Decoder replay may compact/reorder query rows in the middle of a group.
+            # The first local PP layer also needs to publish its own payload.
+            write = group != previous_group or idx == self.decoder_replay_start
+            attn.v41_impl.grouped_int8_kv = workspace
+            attn.v41_impl.topk_value_mode = H8GroupedInt8KV.WRITE if write else H8GroupedInt8KV.READ
+            previous_group = group
 
     def _make_empty_intermediate_tensors(self, batch_size, dtype, device):
         # Profiling executes receiving stages before real PP activations exist.

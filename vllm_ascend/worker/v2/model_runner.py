@@ -22,6 +22,7 @@ import logging
 from collections.abc import Mapping
 from contextlib import AbstractContextManager, contextmanager, nullcontext
 from copy import deepcopy
+from dataclasses import replace
 from typing import TYPE_CHECKING, Any
 
 import numpy as np
@@ -108,7 +109,11 @@ from vllm_ascend.hisparse.host_mirror import HostMirrorConnector, overlap_target
 from vllm_ascend.hisparse.pcp import adapt_pcp_hisparse_connector
 from vllm_ascend.kv_trace.kv_trace_runner import install_trace
 from vllm_ascend.model_executor.offloader import create_offloader
-from vllm_ascend.models.deepseek_v41.cache_config import uses_a5_packed_cache
+from vllm_ascend.models.deepseek_v41.cache_config import (
+    LayerPackedKVCacheConfig,
+    is_deepseek_v41_cache,
+    uses_a5_packed_cache,
+)
 from vllm_ascend.models.host_offload import track_host_offload_owners
 from vllm_ascend.observability.runtime_guard.hooks import (
     runtime_guard_sample_tokens,
@@ -149,6 +154,7 @@ from vllm_ascend.worker.v2.states import AscendRequestState
 from vllm_ascend.worker.v2.utils import (
     AscendV2KVBlockZeroer,
     C8KVBlockZeroer,
+    LayerPackedKVBlockOps,
     communicator_switch,
     prepare_v41_dummy_ring_state,
     prepare_v41_source_rope,
@@ -438,6 +444,15 @@ class NPUModelRunner(GPUModelRunner):
 
     def _init_kv_zero_meta(self) -> None:
         """Use a tuple-aware zeroer for Ascend V1-compatible cache protocols."""
+        if isinstance(self.kv_cache_config, LayerPackedKVCacheConfig):
+            self.kv_block_zeroer = LayerPackedKVBlockOps(
+                self.kv_cache_config,
+                (g for groups in self.attn_groups for g in groups),
+                self.kernel_block_sizes,
+                self.compilation_config.static_forward_context,
+                self.device,
+            )
+            return
         offload_manager = getattr(self, "sparse_kv_offload_manager", None)
         excluded_cache_components = (
             offload_manager.get_topk_cache_components() if offload_manager is not None else set()
@@ -458,10 +473,20 @@ class NPUModelRunner(GPUModelRunner):
                 self.kv_block_zeroer, self._c8_mxfp_v_scale_caches, fill_mxfp_v_scale_cache
             )
 
+    def update_requests(self, scheduler_output: SchedulerOutput) -> None:
+        if scheduler_output.kv_cache_block_copies and isinstance(self.kv_block_zeroer, LayerPackedKVBlockOps):
+            # The parent stages requests and clears newly allocated pages first.
+            super().update_requests(replace(scheduler_output, kv_cache_block_copies=None))
+            self.kv_block_zeroer.copy_blocks(scheduler_output.kv_cache_block_copies)
+        else:
+            super().update_requests(scheduler_output)
+
     def _initialize_kv_cache_upstream(
         self,
         kv_cache_config: KVCacheConfig,
         kv_cache_allocation_context: AbstractContextManager | None,
+        *,
+        is_profiling: bool = False,
     ) -> None:
         # Upstream initialize_kv_cache builds the attention metadata builders
         # via init_attn_backend; the DSA builder registers its fused Q-RMS
@@ -476,6 +501,7 @@ class NPUModelRunner(GPUModelRunner):
             super().initialize_kv_cache(
                 kv_cache_config,
                 kv_cache_allocation_context=kv_cache_allocation_context,
+                is_profiling=is_profiling,
             )
 
     def _has_target_flashmla_attention(self) -> bool:
@@ -493,6 +519,8 @@ class NPUModelRunner(GPUModelRunner):
         self,
         kv_cache_config: KVCacheConfig,
         kv_cache_allocation_context: AbstractContextManager | None = None,
+        *,
+        is_profiling: bool = False,
     ) -> None:
         # Match V1's physical buffer plan without mutating the scheduler's
         # logical cache configuration. Allocation must honor zero-stride aliases.
@@ -531,7 +559,9 @@ class NPUModelRunner(GPUModelRunner):
         if is_hisparse_ascendstore_enabled(self.vllm_config, kv_cache_config):
             allocation_config = aligned_hisparse_allocation_config(kv_cache_config)
         with graph_manager_wrapper(self):
-            self._initialize_kv_cache_upstream(allocation_config, kv_cache_allocation_context)
+            self._initialize_kv_cache_upstream(
+                allocation_config, kv_cache_allocation_context, is_profiling=is_profiling
+            )
             # PCP owns the local-row capacity; FIA may append one padding
             # request for either target or draft metadata.
             max_metadata_reqs = (
@@ -677,6 +707,8 @@ class NPUModelRunner(GPUModelRunner):
         if isinstance(zeroer, C8KVBlockZeroer):
             zeroer.entries.clear()
             self.kv_block_zeroer = zeroer.delegate
+        if isinstance(zeroer, LayerPackedKVBlockOps):
+            self.kv_block_zeroer = None
         self._shared_engram_shutdown_pending = shared_embeddings
         if not getattr(self, "_shared_engram_parent_stopped", False):
             super().shutdown()
@@ -1244,6 +1276,17 @@ class NPUModelRunner(GPUModelRunner):
     def prepare_dummy_attn(
         self, input_batch: AscendInputBatch, valid_state_slots: bool = False
     ) -> tuple[tuple[torch.Tensor, ...], torch.Tensor]:
+        if isinstance(self.kv_cache_config, LayerPackedKVCacheConfig) and self.pcp_manager is not None:
+            # PCP dummy metadata masks persistent ring updates. Use its local
+            # tables and rank-major slot buffer, leaving all live pages intact.
+            return (
+                self.pcp_manager.get_dummy_block_tables(input_batch.num_reqs),
+                self.pcp_manager.get_dummy_slot_mappings(input_batch.num_tokens_after_padding),
+            )
+        # Upstream assigns 1..N to every group for recurrent state. V4.1
+        # installs C2 slots below; its attention tables must stay in range.
+        if valid_state_slots and is_deepseek_v41_cache(self.kv_cache_config.kv_cache_groups):
+            valid_state_slots = False
         block_tables, slot_mappings = super().prepare_dummy_attn(
             input_batch,
             valid_state_slots=valid_state_slots,

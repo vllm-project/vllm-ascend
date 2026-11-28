@@ -1221,6 +1221,19 @@ def test_prepare_dummy_attn_without_pcp_uses_upstream(valid_state_slots):
     prepare_ring.assert_called_once_with(runner, dummy.num_reqs)
 
 
+def test_v41_dummy_attn_keeps_generic_state_slots_out_of_attention_tables():
+    runner = _make_runner()
+    runner.kv_cache_config = SimpleNamespace(kv_cache_groups=[SimpleNamespace(model_version="deepseek_v41")])
+    dummy = SimpleNamespace(num_reqs=4, num_tokens=4, num_tokens_after_padding=4)
+    with (
+        patch.object(GPUModelRunner, "prepare_dummy_attn", return_value=((), None)) as parent,
+        patch("vllm_ascend.worker.v2.model_runner.prepare_v41_dummy_ring_state") as prepare_ring,
+    ):
+        runner.prepare_dummy_attn(dummy, valid_state_slots=True)
+    parent.assert_called_once_with(dummy, valid_state_slots=False)
+    prepare_ring.assert_called_once_with(runner, 4)
+
+
 @pytest.mark.parametrize("promised,padded,expected", [(6, 16, 6), (6, 1, 6), (None, 16, 1)])
 def test_default_model_state_preserves_varlen_capture_query_bound(monkeypatch, promised, padded, expected):
     from vllm_ascend.worker.v2.model_states import default
@@ -1652,7 +1665,8 @@ def test_initialize_kv_cache_installs_aclgraph_factory_and_pcp(a5, architecture)
         kv_cache_groups=[],
     )
 
-    def _super(self, kv_cache_config, kv_cache_allocation_context=None):
+    def _super(self, kv_cache_config, kv_cache_allocation_context=None, *, is_profiling=False):
+        assert not is_profiling
         self.kv_cache_config = kv_cache_config
         self.attn_groups = []
         self.block_tables = SimpleNamespace(block_tables=[])
@@ -1698,7 +1712,8 @@ def test_initialize_kv_cache_installs_aclgraph_factory_and_pcp(a5, architecture)
     assert runner.model_state.pcp_manager is runner.pcp_manager
 
 
-def test_initialize_kv_cache_forwards_allocation_context():
+@pytest.mark.parametrize("is_profiling", [False, True])
+def test_initialize_kv_cache_forwards_allocation_context(is_profiling):
     """Forward allocation context before preparing KDA state-copy plans."""
     runner = _make_runner()
     runner.compilation_config = SimpleNamespace(static_forward_context={})
@@ -1747,11 +1762,14 @@ def test_initialize_kv_cache_forwards_allocation_context():
             return_value="kvpp",
         ),
     ):
-        runner.initialize_kv_cache(kv_cache_config, kv_cache_allocation_context=allocation_context)
+        runner.initialize_kv_cache(
+            kv_cache_config, kv_cache_allocation_context=allocation_context, is_profiling=is_profiling
+        )
 
     prepare_kda.assert_called_once_with(runner.compilation_config.static_forward_context, 8)
     assert called is True
     assert captured_kwargs["kv_cache_allocation_context"] is allocation_context
+    assert captured_kwargs["is_profiling"] is is_profiling
 
 
 @pytest.mark.parametrize("moe_type", [MoECommType.MC2, MoECommType.FUSED_MC2])

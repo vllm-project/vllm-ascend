@@ -59,6 +59,23 @@ from vllm_ascend.device.hardware_profile import get_hardware_profile
 from vllm_ascend.utils import clear_enable_sp, enable_sp, shared_expert_dp_enabled
 
 
+def test_layer_packed_kv_accepts_pcp4_tp2_but_rejects_kv_transfer():
+    import pytest
+
+    config = VllmConfig(device_config=DeviceConfig(device="cpu"))
+    config.parallel_config.prefill_context_parallel_size = 4
+    config.parallel_config.tensor_parallel_size = 2
+    enabled = AscendConfig(
+        dsv41_int8_long_kv=True,
+        sparse_kv_offload_config=SparseKVOffloadConfig(),
+    )
+    enabled.derive_and_validate(config)
+    assert enabled.dsv41_int8_long_kv
+    config.kv_transfer_config = KVTransferConfig(kv_connector="ExampleConnector", kv_role="kv_both")
+    with pytest.raises(ValueError, match="KV transfer"):
+        enabled.derive_and_validate(config)
+
+
 def test_shared_engram_config_schema():
     import pytest
     from pydantic import TypeAdapter

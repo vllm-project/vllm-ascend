@@ -2,11 +2,12 @@
 # SPDX-FileCopyrightText: Copyright contributors to the vLLM project
 """Framework-side V4.1 cache placements within a shared allocation."""
 
-from dataclasses import replace
+from dataclasses import dataclass, replace
 from itertools import chain, zip_longest
 
 import torch
 from vllm.config import VllmConfig
+from vllm.logger import logger
 
 # Both supported versions expose planning helpers in kv_cache_planning.
 from vllm.v1.kv_cache_interface import (
@@ -26,7 +27,9 @@ from vllm_ascend.device.hardware_profile import (
     HardwareCapability,
     get_current_hardware_profile,
 )
+from vllm_ascend.models.deepseek_v41.long_kv import LONG_KV_INT8_GROUP
 
+LAYER_PACKED_SLOTS = 2
 STATE_RING_ROWS = 32
 
 # Fixed dimensions accepted by the packaged mixed-quant attention ABI.
@@ -63,8 +66,15 @@ def make_swa_cache_spec(*, block_size, window_size, head_size, dtype, cache_dtyp
     )
 
 
-def make_mla_cache_spec(*, block_size, head_size, compress_ratio):
-    if uses_a5_packed_cache():
+def make_mla_cache_spec(*, block_size, head_size, compress_ratio, int8_long_kv=False):
+    if int8_long_kv:
+        if uses_a5_packed_cache() or head_size != MLA_HEAD_DIM:
+            raise ValueError("INT8 G64 long KV requires A2/A3 and a 512-channel V4.1 head")
+        head_size += (head_size // LONG_KV_INT8_GROUP) * torch.float32.itemsize
+        dtype = torch.int8
+        # The FP32 scales occupy the last 32 bytes of the same row.
+        scale_dtype = torch.float32
+    elif uses_a5_packed_cache():
         if head_size != MLA_HEAD_DIM:
             raise ValueError(f"A5 DeepSeek V4.1 requires head size {MLA_HEAD_DIM}, got {head_size}")
         # Two FP4 values per byte, followed by one BF16 scale per 16 values.
@@ -82,6 +92,7 @@ def make_mla_cache_spec(*, block_size, head_size, compress_ratio):
         tokens_per_state=compress_ratio,
         model_version="deepseek_v41",
         scale_dtype=scale_dtype,
+        layer_packed=int8_long_kv,
     )
 
 
@@ -185,8 +196,67 @@ def get_layer_tuples(specs):
     return page_sizes, layer_tuples
 
 
+@dataclass(kw_only=True)
+class LayerPackedKVCacheConfig(KVCacheConfig):
+    # Each owner starts at byte zero of its physical slot.
+    page_owners: tuple[str, ...]
+
+
+def dummy_ring_pages_per_group(num_blocks: int, num_reqs: int, num_ring_groups: int) -> int:
+    """Budget disjoint writable IDs across packed ring groups, reserving block 0."""
+    if num_blocks < 1:
+        raise ValueError("Layer-packed dummy attention requires at least the null block")
+    return min(num_reqs, (num_blocks - 1) // num_ring_groups)
+
+
+def _is_layer_packed(specs):
+    return any(isinstance(spec, AscendMLAAttentionSpec) and spec.layer_packed for spec in specs.values())
+
+
+def _long_index_pairs(specs):
+    sources = sorted((n for n in specs if n.endswith(".long_kv_cache")), key=_layer_number)
+    return [(src, src.rsplit(".", 1)[0] + ".indexer.k_cache") for src in sources]
+
+
+def _layer_packed_groups(specs):
+    rings = sorted((n for n, s in specs.items() if isinstance(s, CircularBufferSpec)), key=_layer_number)
+    swa = [n for n, s in specs.items() if isinstance(s, AscendSlidingWindowMLASpec)]
+    target = sorted((n for n in swa if ".mtp." not in f".{n}"), key=_layer_number)
+    draft = sorted((n for n in swa if ".mtp." in f".{n}"), key=_draft_layer_number)
+    # Preserve the long-KV source as the representative spec for the scheduler.
+    groups = [list(chain.from_iterable(_long_index_pairs(specs)))]
+    for names in (rings, target, draft):
+        groups.extend(names[i : i + LAYER_PACKED_SLOTS] for i in range(0, len(names), LAYER_PACKED_SLOTS))
+    return [UniformTypeKVCacheSpecs.from_specs({n: specs[n] for n in names}) for names in groups]
+
+
+def _layer_packed_slots(specs, groups):
+    # Keep each source beside its index. Place the largest pair first so one
+    # C1 and three C2 sources fit below the two full-size SWA pages.
+    pairs = _long_index_pairs(specs)
+
+    def pair_bytes(pair):
+        return sum(specs[n].unpadded_page_size_bytes for n in pair)
+
+    slots = [[] for _ in range(LAYER_PACKED_SLOTS)]
+    sizes = [0] * LAYER_PACKED_SLOTS
+    for pair in sorted(pairs, key=lambda p: (-pair_bytes(p), _layer_number(p[0]))):
+        slot = min(range(LAYER_PACKED_SLOTS), key=sizes.__getitem__)
+        slots[slot].extend(pair)
+        sizes[slot] += pair_bytes(pair)
+    for group in groups:
+        if isinstance(group.kv_cache_spec.first_spec, AscendMLAAttentionSpec):
+            continue
+        for slot, name in enumerate(group.layer_names):
+            slots[slot].append(name)
+            sizes[slot] = max(sizes[slot], specs[name].unpadded_page_size_bytes)
+    return [size for size in sizes if size], [slot for slot in slots if slot]
+
+
 def group_cache_specs(specs):
     """Merge full-context resources and pad layer tuples without mutating inputs."""
+    if _is_layer_packed(specs):
+        return _layer_packed_groups(specs)
     if specs and all(isinstance(spec, AscendSlidingWindowMLASpec) for spec in specs.values()):
         return [UniformTypeKVCacheSpecs.from_specs({name: spec}) for name, spec in specs.items()]
     page_sizes, layer_tuples = get_layer_tuples(specs)
@@ -258,6 +328,8 @@ def _specs_from_groups(groups):
 def _get_worker_layer_tuples(groups):
     """Pack scheduler groups whose width may exceed the stage's KV source count."""
     specs = _specs_from_groups(groups)
+    if _is_layer_packed(specs):
+        return _layer_packed_slots(specs, groups)
     if specs and all(isinstance(spec, AscendSlidingWindowMLASpec) for spec in specs.values()):
         # Preserve main's independent slots for SWA-only backbones and drafts.
         _, slots = get_layer_tuples(specs)
@@ -317,9 +389,15 @@ def get_deepseek_v41_kv_cache_config(
             if is_mla:
                 component_offset += spec.unpadded_page_size_bytes
         slot_offset += num_blocks * page_size
-    return KVCacheConfig(
+    fields = dict(
         num_blocks=num_blocks,
         kv_cache_tensors=tensors,
         kv_cache_groups=groups,
         prefix_cache_retention_interval=vllm_config.cache_config.prefix_cache_retention_interval,
     )
+    if _is_layer_packed(specs):
+        logger.info(
+            "V4.1 layer-packed KV: %d shared blocks, %s bytes per slot, %d groups", num_blocks, page_sizes, len(groups)
+        )
+        return LayerPackedKVCacheConfig(**fields, page_owners=tuple(names[0] for names in layer_tuples))
+    return KVCacheConfig(**fields)

@@ -49,6 +49,7 @@ public:
                                                 const GlobalTensor<KV_T> &cmpKvGm,
                                                 const GlobalTensor<int32_t> &oriBlockTableGm,
                                                 const GlobalTensor<int32_t> &cmpBlockTableGm);
+    __aicore__ inline void InitSharedPackedRows(__gm__ int8_t *rows) { sharedPackedGm_.SetGlobalBuffer(rows); }
     __aicore__ inline void InitVec1GlobalTensor(GlobalTensor<MM1_OUT_T> mm1ResGm, GlobalTensor<KV_T> vec1ResGm,
                                                 GlobalTensor<int32_t> actualSeqLengthsQGm,
                                                 GlobalTensor<int32_t> actualSeqLengthsKVGm,
@@ -81,6 +82,17 @@ public:
                                              int64_t mergeMte3Idx, const RunInfo &runInfo);
     __aicore__ inline void CopyInSingleKv(int64_t &mte2Size, int64_t mte3Size, int64_t mergeMte3Idx, int64_t realS2Idx,
                                           int64_t keyBNBOffset, int64_t s2IdLimit, const RunInfo &runInfo);
+    struct PackedBatch {
+        uint32_t bank;
+        uint32_t rows;
+        int64_t dstRow;
+    };
+    __aicore__ inline void CopyPackedPair(PackedBatch &batch, int64_t first, int64_t second);
+    template <int Mode>
+    __aicore__ inline void ProcessPackedGather(const RunInfo &info, int64_t topkBase, int64_t begin, int64_t end);
+    __aicore__ inline void FinishPackedBatch(const PackedBatch &batch, const RunInfo &info);
+    __aicore__ inline void WriteGatheredRows(int64_t bank, int64_t dstRow, int64_t rows, const RunInfo &info);
+    __aicore__ inline void UnpackInt8Rows(int64_t bank, int64_t count);
     // ================================Vector1==========================================
     __aicore__ inline void ProcessVec1SingleBuf(const RunInfo &info, const MSplitInfo &mSplitInfo);
     __aicore__ inline void DealBmm1ResBaseBlock(const RunInfo &info, const MSplitInfo &mSplitInfo, uint32_t startRow,
@@ -138,8 +150,20 @@ private:
     static constexpr uint64_t SYNC_OUTPUT_BUF2_FLAG = 5;
     static constexpr uint64_t SYNC_SINKS_BUF_FLAG = 6;
     static constexpr uint64_t SYNC_INPUT_V0BUF_FLAG = 7;
+    // The two event IDs are independent in each producer/consumer direction.
+    static constexpr uint64_t PACKED_BANK_EVENT = 6;
     static constexpr uint32_t INPUT1_BUFFER_OFFSET = ConstInfo::BUFFER_SIZE_BYTE_32K;
     static constexpr uint32_t INPUT2_BUFFER_OFFSET = ConstInfo::BUFFER_SIZE_BYTE_16K;
+    static constexpr uint32_t KV_DIM = 512;
+    static constexpr uint32_t GROUP_WIDTH = 64;
+    static constexpr uint32_t GROUP_COUNT = KV_DIM / GROUP_WIDTH;
+    static constexpr uint32_t PACKED_BYTES = KV_DIM + GROUP_COUNT * sizeof(float);
+    static constexpr uint32_t PACKED_BATCH_ROWS = 8;
+    static constexpr uint32_t RAW_OFFSET = PACKED_BATCH_ROWS * KV_DIM * sizeof(KV_T);
+    static constexpr uint32_t FLOAT_BATCH_SIZE = PACKED_BATCH_ROWS * KV_DIM;
+    static_assert(RAW_OFFSET + PACKED_BATCH_ROWS * PACKED_BYTES <= INPUT2_BUFFER_OFFSET);
+    static_assert(FLOAT_BATCH_SIZE * sizeof(float) + PACKED_BATCH_ROWS * GROUP_COUNT * BYTE_BLOCK <=
+                  ConstInfo::BUFFER_SIZE_BYTE_32K);
     static constexpr uint32_t SOFTMAX_TMP_BUFFER_OFFSET = ConstInfo::BUFFER_SIZE_BYTE_1K;
     static constexpr uint32_t BASE_BLOCK_MAX_ELEMENT_NUM = ConstInfo::BUFFER_SIZE_BYTE_32K / sizeof(T); // 32768/4=8096
     static constexpr uint32_t BLOCK_ELEMENT_NUM = BYTE_BLOCK / sizeof(T);                               // 32/4=8
@@ -152,6 +176,7 @@ private:
 
     const SparseFlashMlaTilingData *__restrict tilingData;
 
+    bool packedInt8 = false;
     uint32_t pingpongFlag = 0U;
     ConstInfo constInfo = {};
 
@@ -175,6 +200,8 @@ private:
     GlobalTensor<int32_t> topkGm_;
     GlobalTensor<KV_T> oriKvGm_;
     GlobalTensor<KV_T> cmpKvGm_;
+    GlobalTensor<int8_t> packedCmpGm_;
+    GlobalTensor<int8_t> sharedPackedGm_;
     GlobalTensor<int32_t> oriBlockTableGm_;
     GlobalTensor<int32_t> cmpBlockTableGm_;
 
@@ -271,6 +298,7 @@ __aicore__ inline void SMLAVectorBlock<SMLAT>::InitParams(const struct ConstInfo
 {
     this->constInfo = constInfo;
     this->tilingData = tilingData;
+    packedInt8 = tilingData->cmpParams.cmpPackedInt8;
 }
 
 template <typename SMLAT>
@@ -283,6 +311,9 @@ __aicore__ inline void SMLAVectorBlock<SMLAT>::InitVec0GlobalTensor(const Global
     this->kvMergeGm_ = kvMergeGm;
     this->oriKvGm_ = oriKvGm;
     this->cmpKvGm_ = cmpKvGm;
+    if (packedInt8) {
+        packedCmpGm_.SetGlobalBuffer((__gm__ int8_t *)cmpKvGm.GetPhyAddr());
+    }
     this->oriBlockTableGm_ = oriBlockTableGm;
     this->cmpBlockTableGm_ = cmpBlockTableGm;
 }
@@ -319,8 +350,15 @@ __aicore__ inline void SMLAVectorBlock<SMLAT>::AllocEventID()
 {
     SetFlag<AscendC::HardEvent::V_MTE2>(SYNC_INPUT_BUF1_FLAG);
     SetFlag<AscendC::HardEvent::V_MTE2>(SYNC_INPUT_BUF1_PONG_FLAG);
-    SetFlag<AscendC::HardEvent::MTE3_MTE2>(SYNC_INPUT_BUF2_FLAG);
-    SetFlag<AscendC::HardEvent::MTE3_MTE2>(SYNC_INPUT_BUF2_PONG_FLAG);
+    if (packedInt8) {
+        for (uint32_t bank = 0; bank < 2; ++bank) {
+            SetFlag<AscendC::HardEvent::V_MTE2>(PACKED_BANK_EVENT + bank);
+            SetFlag<AscendC::HardEvent::MTE3_V>(PACKED_BANK_EVENT + bank);
+        }
+    } else {
+        SetFlag<AscendC::HardEvent::MTE3_MTE2>(SYNC_INPUT_BUF2_FLAG);
+        SetFlag<AscendC::HardEvent::MTE3_MTE2>(SYNC_INPUT_BUF2_PONG_FLAG);
+    }
     SetFlag<AscendC::HardEvent::MTE3_V>(SYNC_OUTPUT_BUF1_FLAG);
     SetFlag<AscendC::HardEvent::MTE3_V>(SYNC_OUTPUT_BUF2_FLAG);
 }
@@ -330,8 +368,15 @@ __aicore__ inline void SMLAVectorBlock<SMLAT>::FreeEventID()
 {
     WaitFlag<AscendC::HardEvent::V_MTE2>(SYNC_INPUT_BUF1_FLAG);
     WaitFlag<AscendC::HardEvent::V_MTE2>(SYNC_INPUT_BUF1_PONG_FLAG);
-    WaitFlag<AscendC::HardEvent::MTE3_MTE2>(SYNC_INPUT_BUF2_FLAG);
-    WaitFlag<AscendC::HardEvent::MTE3_MTE2>(SYNC_INPUT_BUF2_PONG_FLAG);
+    if (packedInt8) {
+        for (uint32_t bank = 0; bank < 2; ++bank) {
+            WaitFlag<AscendC::HardEvent::V_MTE2>(PACKED_BANK_EVENT + bank);
+            WaitFlag<AscendC::HardEvent::MTE3_V>(PACKED_BANK_EVENT + bank);
+        }
+    } else {
+        WaitFlag<AscendC::HardEvent::MTE3_MTE2>(SYNC_INPUT_BUF2_FLAG);
+        WaitFlag<AscendC::HardEvent::MTE3_MTE2>(SYNC_INPUT_BUF2_PONG_FLAG);
+    }
     WaitFlag<AscendC::HardEvent::MTE3_V>(SYNC_OUTPUT_BUF1_FLAG);
     WaitFlag<AscendC::HardEvent::MTE3_V>(SYNC_OUTPUT_BUF2_FLAG);
 }
@@ -641,7 +686,7 @@ __aicore__ inline int64_t SMLAVectorBlock<SMLAT>::GetKeyGmOffset(int64_t realS2I
         realKeyGmOffset =
             cmpBlockTableGm_.GetValue(runInfo.bIdx * constInfo.cmpMaxBlockNumPerBatch + blkTableIdx) *
                 static_cast<int64_t>(constInfo.cmpKvStride0) +
-            blkTableOffset * static_cast<int64_t>(constInfo.kvHeadNum) * static_cast<int64_t>(constInfo.headDim);
+            blkTableOffset * static_cast<int64_t>(constInfo.kvHeadNum) * (packedInt8 ? PACKED_BYTES : constInfo.headDim);
 
     } else if constexpr (KV_LAYOUT_T == SMLA_LAYOUT::BSND) {
         int64_t batchStride = (constInfo.cmpKvStride0 == 0) ? static_cast<int64_t>(constInfo.cmpSeqSize) *
@@ -761,6 +806,34 @@ __aicore__ inline void SMLAVectorBlock<SMLAT>::CopyInKvFromPhysicalCache(int64_t
 }
 
 template <typename SMLAT>
+__aicore__ inline void SMLAVectorBlock<SMLAT>::UnpackInt8Rows(int64_t bank, int64_t count)
+{
+    auto bytes = inputBuff2.Get<int8_t>()[bank * INPUT2_BUFFER_OFFSET];
+    auto output = kvMergUb_[bank * INPUT2_BUFFER_OFFSET / sizeof(KV_T)];
+    // The output bank holds halves until the widening Cast consumes them. Vec1/Vec2 use
+    // tmpBuff1 at other stages; no intermediate from this batch survives the final Cast.
+    auto halves = output.template ReinterpretCast<half>();
+    auto floats = tmpBuff1.Get<float>();
+    auto scales = floats[FLOAT_BATCH_SIZE];
+    for (int64_t row = 0; row < count; ++row) {
+        auto raw = bytes[RAW_OFFSET + row * PACKED_BYTES];
+        Cast(halves[row * KV_DIM], raw, AscendC::RoundMode::CAST_NONE, KV_DIM);
+        Brcb(scales[row * GROUP_COUNT * BLOCK_ELEMENT_NUM], raw[KV_DIM].template ReinterpretCast<float>(), 1,
+             {1, GROUP_COUNT});
+    }
+    PipeBarrier<PIPE_V>();
+    // No following vector operation reads the packed area. MTE2 can refill it
+    // while the output area in the same bank is still held by V or MTE3.
+    SetFlag<AscendC::HardEvent::V_MTE2>(PACKED_BANK_EVENT + bank);
+    Cast(floats, halves, AscendC::RoundMode::CAST_NONE, count * KV_DIM);
+    PipeBarrier<PIPE_V>();
+    Mul(floats, floats, scales, GROUP_WIDTH, count * GROUP_COUNT, {1, 1, 0, 8, 8, 1});
+    PipeBarrier<PIPE_V>();
+    Cast(output, floats, AscendC::RoundMode::CAST_RINT, count * KV_DIM);
+    PipeBarrier<PIPE_V>();
+}
+
+template <typename SMLAT>
 __aicore__ inline void SMLAVectorBlock<SMLAT>::CopyOutMrgeResult(int64_t mte2Size, int64_t mte3Size,
                                                                  int64_t s2GmStartOffset, int64_t mergeMte3Idx,
                                                                  const RunInfo &runInfo)
@@ -768,18 +841,147 @@ __aicore__ inline void SMLAVectorBlock<SMLAT>::CopyOutMrgeResult(int64_t mte2Siz
     if (mte2Size <= mte3Size) {
         return;
     }
-    SetFlag<AscendC::HardEvent::MTE2_MTE3>(mergeMte3Idx % 2 + SYNC_INPUT_BUF2_FLAG);
-    WaitFlag<AscendC::HardEvent::MTE2_MTE3>(mergeMte3Idx % 2 + SYNC_INPUT_BUF2_FLAG);
+    const int64_t bank = mergeMte3Idx % 2;
+    SetFlag<AscendC::HardEvent::MTE2_MTE3>(bank + SYNC_INPUT_BUF2_FLAG);
+    WaitFlag<AscendC::HardEvent::MTE2_MTE3>(bank + SYNC_INPUT_BUF2_FLAG);
+    WriteGatheredRows(bank, s2GmStartOffset + mte3Size, mte2Size - mte3Size, runInfo);
+}
 
+template <typename SMLAT>
+__aicore__ inline void SMLAVectorBlock<SMLAT>::WriteGatheredRows(int64_t bank, int64_t dstRow, int64_t rows,
+                                                                 const RunInfo &info)
+{
     DataCopyExtParams dataCopyParams;
-    dataCopyParams.blockCount = mte2Size - mte3Size;
+    dataCopyParams.blockCount = rows;
     dataCopyParams.blockLen = constInfo.headDim * sizeof(KV_T);
     dataCopyParams.srcStride = 0;
     dataCopyParams.dstStride = 0;
 
-    DataCopyPad(kvMergeGm_[runInfo.cmpLoop % MERGE_CACHE_GM_BUF_NUM * 512 * 512 +
-                           (s2GmStartOffset + mte3Size) * constInfo.headDim],
-                kvMergUb_[mergeMte3Idx % 2 * INPUT2_BUFFER_OFFSET / sizeof(KV_T)], dataCopyParams);
+    DataCopyPad(kvMergeGm_[info.cmpLoop % MERGE_CACHE_GM_BUF_NUM * 512 * 512 + dstRow * constInfo.headDim],
+                kvMergUb_[bank * INPUT2_BUFFER_OFFSET / sizeof(KV_T)], dataCopyParams);
+}
+
+template <typename SMLAT>
+__aicore__ inline void SMLAVectorBlock<SMLAT>::CopyPackedPair(PackedBatch &batch, int64_t first, int64_t second)
+{
+    if (first < 0 && second < 0) {
+        return;
+    }
+    if (batch.rows == 0) {
+        WaitFlag<AscendC::HardEvent::V_MTE2>(PACKED_BANK_EVENT + batch.bank);
+    }
+    auto raw = inputBuff2.Get<int8_t>()[batch.bank * INPUT2_BUFFER_OFFSET + RAW_OFFSET];
+    const int64_t gap = second - first - static_cast<int64_t>(PACKED_BYTES);
+    if (first >= 0 && gap >= 0 && gap <= INT32_MAX) {
+        DataCopyExtParams pair{2, PACKED_BYTES, static_cast<uint32_t>(gap), 0, 0};
+        DataCopyPadExtParams<int8_t> noPadding{false, 0, 0, 0};
+        DataCopyPad(raw[batch.rows * PACKED_BYTES], packedCmpGm_[first], pair, noPadding);
+        batch.rows += 2;
+        return;
+    }
+    if (first >= 0) {
+        DataCopy(raw[batch.rows * PACKED_BYTES], packedCmpGm_[first], PACKED_BYTES);
+        ++batch.rows;
+    }
+    if (second >= 0) {
+        DataCopy(raw[batch.rows * PACKED_BYTES], packedCmpGm_[second], PACKED_BYTES);
+        ++batch.rows;
+    }
+}
+
+template <typename SMLAT>
+__aicore__ inline void SMLAVectorBlock<SMLAT>::FinishPackedBatch(const PackedBatch &batch, const RunInfo &info)
+{
+    const uint64_t event = PACKED_BANK_EVENT + batch.bank;
+    WaitFlag<AscendC::HardEvent::MTE2_V>(event);
+    WaitFlag<AscendC::HardEvent::MTE3_V>(event);
+    UnpackInt8Rows(batch.bank, batch.rows);
+    SetFlag<AscendC::HardEvent::V_MTE3>(event);
+    WaitFlag<AscendC::HardEvent::V_MTE3>(event);
+    WriteGatheredRows(batch.bank, batch.dstRow, batch.rows, info);
+    if (info.streamPackedQk && batch.dstRow < PACKED_QK_PREFIX_ROWS &&
+        batch.dstRow + batch.rows >= PACKED_QK_PREFIX_ROWS) {
+        AscendC::CrossCoreSetFlag<ConstInfo::SMLA_SYNC_MODE2, PIPE_MTE3>(PACKED_QK_PREFIX_READY);
+    }
+    SetFlag<AscendC::HardEvent::MTE3_V>(event);
+}
+
+template <typename SMLAT>
+template <int Mode>
+__aicore__ inline void SMLAVectorBlock<SMLAT>::ProcessPackedGather(const RunInfo &info, int64_t topkBase,
+                                                                   int64_t begin, int64_t end)
+{
+    // The second vector subblock owns rows [256,512) and has no writes to the first panel.
+    if (info.streamPackedQk && begin != 0) {
+        AscendC::CrossCoreSetFlag<ConstInfo::SMLA_SYNC_MODE2, PIPE_MTE3>(PACKED_QK_PREFIX_READY);
+    }
+    if constexpr (Mode == 71) {
+        // A raw UB bank may be refilled only after both vector and the INT8 write have consumed it.
+        for (uint32_t bank = 0; bank < 2; ++bank) {
+            SetFlag<AscendC::HardEvent::MTE3_MTE2>(PACKED_BANK_EVENT + bank);
+        }
+    }
+    PackedBatch pending{};
+    int64_t dstRow = begin;
+    for (int64_t pos = begin; pos < end;) {
+        PackedBatch batch{mergeMte3Idx % 2, 0, dstRow};
+        const uint64_t event = PACKED_BANK_EVENT + batch.bank;
+        auto raw = inputBuff2.Get<int8_t>()[batch.bank * INPUT2_BUFFER_OFFSET + RAW_OFFSET];
+        if constexpr (Mode == 72) {
+            batch.rows = static_cast<uint32_t>(Min(end - pos, static_cast<int64_t>(PACKED_BATCH_ROWS)));
+            WaitFlag<AscendC::HardEvent::V_MTE2>(event);
+            DataCopy(raw, sharedPackedGm_[(topkBase + pos) * PACKED_BYTES], batch.rows * PACKED_BYTES);
+            pos += batch.rows;
+        } else {
+            if constexpr (Mode == 71) {
+                WaitFlag<AscendC::HardEvent::MTE3_MTE2>(event);
+            }
+            while (pos < end && batch.rows + 2 <= PACKED_BATCH_ROWS) {
+                int64_t first, second;
+                GetRealS2Idx(pos, first, topkBase, info);
+                if (first < 0) {
+                    pos = end;
+                    break;
+                }
+                GetRealS2Idx(pos + 1, second, topkBase, info);
+                CopyPackedPair(batch, GetKeyGmOffset(first, info, info.cmpS2IdLimit),
+                               GetKeyGmOffset(second, info, info.cmpS2IdLimit));
+                pos += 2;
+            }
+            if constexpr (Mode == 71) {
+                if (batch.rows != 0) {
+                    SetFlag<AscendC::HardEvent::MTE2_MTE3>(event);
+                    WaitFlag<AscendC::HardEvent::MTE2_MTE3>(event);
+                    DataCopy(sharedPackedGm_[(topkBase + batch.dstRow) * PACKED_BYTES], raw,
+                             batch.rows * PACKED_BYTES);
+                }
+                SetFlag<AscendC::HardEvent::MTE3_MTE2>(event);
+            }
+        }
+        if (batch.rows == 0) {
+            break;
+        }
+        SetFlag<AscendC::HardEvent::MTE2_V>(PACKED_BANK_EVENT + batch.bank);
+        // Enqueue this gather before submitting the preceding batch to vector.
+        if (pending.rows != 0) {
+            FinishPackedBatch(pending, info);
+        }
+        pending = batch;
+        dstRow += batch.rows;
+        ++mergeMte3Idx;
+    }
+    if (pending.rows != 0) {
+        FinishPackedBatch(pending, info);
+    }
+    if constexpr (Mode == 71) {
+        for (uint32_t bank = 0; bank < 2; ++bank) {
+            WaitFlag<AscendC::HardEvent::MTE3_MTE2>(PACKED_BANK_EVENT + bank);
+        }
+    }
+    if (info.streamPackedQk && dstRow < PACKED_QK_PREFIX_ROWS) {
+        // A padded TopK may terminate before filling the panel.
+        AscendC::CrossCoreSetFlag<ConstInfo::SMLA_SYNC_MODE2, PIPE_MTE3>(PACKED_QK_PREFIX_READY);
+    }
 }
 
 // b s1 k
@@ -793,6 +995,17 @@ __aicore__ inline void SMLAVectorBlock<SMLAT>::ProcessVec0L(const RunInfo &runIn
     int64_t s2GmLimit = GetSubBlockIdx() == 0 ? s2SplitPoint : s2ProcessSize;
     if (s2GmLimit > s2ProcessSize) {
         s2GmLimit = s2ProcessSize;
+    }
+    if (packedInt8) {
+        const int64_t topkGmBaseOffset = runInfo.topKBaseOffset + runInfo.v0S2Start;
+        if (runInfo.streamPackedQk && tilingData->baseParams.topkValueMode == 71) {
+            ProcessPackedGather<71>(runInfo, topkGmBaseOffset, s2GmStartOffset, s2GmLimit);
+        } else if (runInfo.streamPackedQk && tilingData->baseParams.topkValueMode == 72) {
+            ProcessPackedGather<72>(runInfo, topkGmBaseOffset, s2GmStartOffset, s2GmLimit);
+        } else {
+            ProcessPackedGather<1>(runInfo, topkGmBaseOffset, s2GmStartOffset, s2GmLimit);
+        }
+        return;
     }
     if (s2GmStartOffset >= s2GmLimit) {
         return;
@@ -843,7 +1056,7 @@ __aicore__ inline void SMLAVectorBlock<SMLAT>::ProcessVec0LImpl(
             GetRealS2Idx(s2GmOffsetArray + constInfo.sparseBlockSize, s2IdxArray1, topkGmBaseOffset, runInfo);
             CopyInKv(mte2Size, mte3Size, mergeMte3Idx, s2IdxArray0, s2IdxArray1, runInfo);
         }
-        if ((mte2Size - mte3Size + 2 * constInfo.sparseBlockSize > 16) ||
+        if ((mte2Size - mte3Size + 2 * constInfo.sparseBlockSize > INPUT2_BUFFER_OFFSET / (KV_DIM * sizeof(KV_T))) ||
             s2GmOffsetArray + 2 * constInfo.sparseBlockSize >= s2GmLimit) {
             CopyOutMrgeResult(mte2Size, mte3Size, s2GmStartOffset, mergeMte3Idx, runInfo);
             mte3Size = mte2Size;

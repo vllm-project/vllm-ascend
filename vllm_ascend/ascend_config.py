@@ -666,6 +666,8 @@ class AscendConfig:
     enable_prefill_mc2: bool = False
     multistream_overlap_shared_expert: bool = False
     enable_kv_nz: bool = False
+    dsv41_int8_long_kv: bool = False
+    """Store G64 INT8 long KV in the V4.1 worker-local, layer-packed cache on A2/A3."""
     kv_trace: KVTraceConfig = dataclasses.field(default_factory=KVTraceConfig)
     kv_pool_range_debug: bool = False
     enable_mc2_hierarchy_comm: bool = False  # deprecated, will be replaced by mc2_comm_alg = "hierarchy"
@@ -797,6 +799,18 @@ class AscendConfig:
         from vllm.compilation.breakable_cudagraph import is_breakable_cudagraph_enabled
 
         vc = vllm_config
+        if self.dsv41_int8_long_kv:
+            parallel = vc.parallel_config
+            if (
+                parallel.pipeline_parallel_size != 1
+                or parallel.decode_context_parallel_size != 1
+                or vc.kv_transfer_config is not None
+                or self.kvpp_config.size > 1
+                or self.sparse_kv_offload_config.enabled
+            ):
+                raise ValueError(
+                    "Layer-packed KV requires worker-local KV without PP, DCP, KV transfer, KVPP or sparse KV offload."
+                )
         validate_expert_offload_config(self.expert_offload_config, vc, self)
         if self.shared_engram is not None and self.shared_engram.backend in ("a2", "a5"):
             if getattr(vc, "shutdown_timeout", 0) <= 0:

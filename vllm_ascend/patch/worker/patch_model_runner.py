@@ -7,8 +7,14 @@ from vllm.config.compilation import CUDAGraphMode
 from vllm.v1.kv_cache_interface import KVCacheConfig
 from vllm.v1.worker.gpu import model_runner as upstream
 from vllm.v1.worker.gpu.dp_utils import dispatch_cg_and_sync_dp as _dispatch_cg_and_sync_dp
+from vllm.v1.worker.gpu.input_batch import set_dummy_context as _set_dummy_context
 
 from vllm_ascend.ascend_config import get_ascend_config
+from vllm_ascend.core.kv_cache_interface import is_circular_kv_cache_spec
+from vllm_ascend.models.deepseek_v41.cache_config import (
+    dummy_ring_pages_per_group,
+    is_deepseek_v41_cache,
+)
 from vllm_ascend.utils import pad_num_tokens
 from vllm_ascend.worker.utils import copy_kv_cache_blocks_inplace
 
@@ -33,6 +39,17 @@ def dispatch_cg_and_sync_dp(cudagraph_manager, num_reqs, num_tokens, uniform_tok
             get_ascend_config().enable_shared_expert_dp,
         )
     return _dispatch_cg_and_sync_dp(cudagraph_manager, num_reqs, num_tokens, uniform_token_count, *args, **kwargs)
+
+
+def set_dummy_context(input_batch, block_tables, context_len, num_kv_blocks, max_model_len, input_block_tables=None):
+    ring_groups = getattr(block_tables, "v41_shared_ring_groups", ())
+    if ring_groups:
+        tables = block_tables.input_block_tables if input_block_tables is None else input_block_tables
+        attention_tables = [t[:, :0] if gid in ring_groups else t for gid, t in enumerate(tables)]
+        live = dummy_ring_pages_per_group(num_kv_blocks, input_batch.num_reqs, len(ring_groups))
+        read_blocks = num_kv_blocks - live * len(ring_groups)
+        return _set_dummy_context(input_batch, block_tables, context_len, read_blocks, max_model_len, attention_tables)
+    return _set_dummy_context(input_batch, block_tables, context_len, num_kv_blocks, max_model_len, input_block_tables)
 
 
 # Adapted from vLLM ced6857afa GPUModelRunner.initialize_kv_cache.
@@ -135,6 +152,12 @@ def initialize_kv_cache(
         cp_interleave=self.cp_interleave,
         **block_tables_kwargs,
     )
+    if is_deepseek_v41_cache(kv_cache_config.kv_cache_groups):
+        self.block_tables.v41_shared_ring_groups = tuple(
+            gid
+            for gid, group in enumerate(kv_cache_config.kv_cache_groups)
+            if is_circular_kv_cache_spec(group.kv_cache_spec)
+        )
     self.pcp_manager = upstream.pcp.maybe_build_pcp_manager(
         self.vllm_config,
         self.device,
@@ -244,6 +267,7 @@ def initialize_kv_cache(
             self.aux_output_connector.initialize_output_storage(kv_cache_config)
 
 
+upstream.set_dummy_context = set_dummy_context
 upstream.copy_kv_cache_blocks_inplace = copy_kv_cache_blocks_inplace
 
 upstream.dispatch_cg_and_sync_dp = dispatch_cg_and_sync_dp

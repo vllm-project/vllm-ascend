@@ -211,6 +211,9 @@ class AscendMLAAttentionSpec(MLAAttentionSpec):
     # TP ranks hold the full latent vector, including quantization scales.
     max_tp_shards: int | None = 1
 
+    # V4.1 long sources carry the placement choice from the worker to the Core planner.
+    layer_packed: bool = False
+
     # Per-rank query heads used by FlashMLA layout selection. Auxiliary MLA
     # caches without query heads use the one-latent-head cache contract.
     num_heads: int = 1

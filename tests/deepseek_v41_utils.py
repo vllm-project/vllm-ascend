@@ -18,6 +18,7 @@ from vllm_ascend.models.deepseek_v41.cache_config import (
     get_deepseek_v41_kv_cache_config,
     group_cache_specs,
     make_cache_groups,
+    make_mla_cache_spec,
 )
 from vllm_ascend.models.deepseek_v41.model import build_layer_plan
 
@@ -266,7 +267,7 @@ def hc_post_reference(x, residual, post, comb):
     return y.to(x.dtype)
 
 
-def make_cache_config(num_blocks, *, block_size=128, head_size=512, index_size=128, draft_layers=0):
+def make_cache_config(num_blocks, *, block_size=128, head_size=512, index_size=128, draft_layers=0, layer_packed=False):
     config = SimpleNamespace(
         num_hidden_layers=40,
         compress_ratios=[0, 0] + [2] * 18 + [1] * 20,
@@ -289,6 +290,15 @@ def make_cache_config(num_blocks, *, block_size=128, head_size=512, index_size=1
         )
     )
     specs = build_v41_cache_specs(config, runtime)
+    if layer_packed:
+        for name, spec in specs.items():
+            if name.endswith(".long_kv_cache"):
+                specs[name] = make_mla_cache_spec(
+                    block_size=block_size,
+                    head_size=head_size,
+                    compress_ratio=spec.tokens_per_state,
+                    int8_long_kv=True,
+                )
     for stage in range(draft_layers):
         specs[f"mtp.{stage}.self_attn.swa_cache"] = AscendSlidingWindowMLASpec(
             block_size=block_size,
@@ -324,3 +334,34 @@ def allocate_cache_views(config, device="cpu"):
     for name, cache in caches.items():
         layers[name].bind_kv_cache(cache)
     return [raw], {name: layer.kv_cache for name, layer in layers.items()}
+
+
+def pack_test_caches(caches, layers, device_table, swa_table, swa_pages):
+    # Assign disjoint block IDs to the long group and each pair of SWA layers.
+    long_pages = device_table.numel()
+    blocks = 1 + long_pages + 20 * swa_pages
+    cfg = make_cache_config(blocks, layer_packed=True)
+    (backing,), packed = allocate_cache_views(cfg, device=device_table.device)
+    assert backing.numel() == blocks * (256 << 10) and len(cfg.page_owners) == 2
+    packed_long_table = device_table + 1
+    packed_sources = {}
+    for owner, (cache, slots, latent) in caches.items():
+        view = packed[f"model.layers.{owner}.self_attn.long_kv_cache"]
+        view[1 : 1 + long_pages].copy_(cache)
+        mapped_slots = slots.clone()
+        mapped_slots[:, 0] = torch.where(slots[:, 0] >= 0, slots[:, 0] + 1, slots[:, 0])
+        packed_sources[owner] = (view, mapped_slots, latent)
+    packed_swa = {}
+    start = 1 + long_pages
+    for group in cfg.kv_cache_groups:
+        if not group.layer_names[0].endswith(".swa_cache"):
+            continue
+        table = swa_table + start
+        for name in group.layer_names:
+            layer = int(name.split(".")[2])
+            if layer in layers:
+                packed[name][start : start + swa_pages].copy_(layers[layer][3])
+                packed_swa[layer] = (packed[name], table)
+        start += swa_pages
+    assert start == blocks
+    return packed_sources, packed_long_table, packed_swa

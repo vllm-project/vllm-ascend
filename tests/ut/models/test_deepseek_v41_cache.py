@@ -278,6 +278,40 @@ def test_twelve_groups_share_four_layer_slots(config, runtime):
         slot_offset += blocks * page_size
 
 
+@pytest.mark.parametrize("block_size", [32, 64, 128])
+@pytest.mark.parametrize("int8_long_kv", [False, True])
+def test_long_kv_page_allocation(config, runtime, monkeypatch, block_size, int8_long_kv):
+    from vllm_ascend.models.deepseek_v41 import cache_config
+
+    monkeypatch.setattr(cache_config, "uses_a5_packed_cache", lambda: False)
+    config.head_dim, config.index_head_dim = 512, 128
+    runtime.cache_config.block_size = block_size
+    specs = collect_specs(runtime)
+    for name, spec in list(specs.items()):
+        if name.endswith(".long_kv_cache"):
+            specs[name] = make_mla_cache_spec(
+                block_size=block_size,
+                head_size=512,
+                compress_ratio=spec.tokens_per_state,
+                int8_long_kv=int8_long_kv,
+            )
+    groups = make_cache_groups(group_cache_specs(specs))
+    total = get_deepseek_v41_pool_bytes_per_block(groups)
+    cache = get_deepseek_v41_kv_cache_config(runtime, groups, total * 2)
+    _, views = allocate_cache_views(cache)
+    for name, tensor in views.items():
+        if name.endswith(".long_kv_cache"):
+            index_k, index_scale = views[name.removesuffix(".long_kv_cache") + ".indexer.k_cache"]
+            physical_rows = block_size // specs[name].tokens_per_state
+            assert specs[name].layer_packed == int8_long_kv
+            assert tensor.shape == (2, physical_rows, 1, 544 if int8_long_kv else 512)
+            assert tensor.dtype == (torch.int8 if int8_long_kv else torch.bfloat16)
+            assert index_k.data_ptr() - tensor.data_ptr() == physical_rows * tensor.shape[-1] * tensor.element_size()
+            assert index_scale.dtype == torch.float16
+        elif name.endswith(".swa_cache"):
+            assert tensor.shape[-1] == 512 and tensor.dtype == torch.bfloat16
+
+
 def test_candidate_source_folded_index_cache_is_in_same_physical_slot(runtime):
     specs = collect_specs(runtime)
     name = "model.layers.20.self_attn.indexer.k_cache_folded"

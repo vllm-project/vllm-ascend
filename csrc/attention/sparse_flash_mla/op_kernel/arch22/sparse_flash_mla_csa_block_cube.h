@@ -334,6 +334,7 @@ __aicore__ inline void SMLACubeBlock<SMLAT>::ComputeMm1(const RunInfo &info, con
     uint32_t mL1SizeAlign = SMLAAlign(M_SPLIT_SIZE, 16);
     uint32_t mL1Loops = CeilDiv(mSize, M_SPLIT_SIZE);
 
+    static_assert(N_SPLIT_SIZE == PACKED_QK_PREFIX_ROWS);
     uint32_t nSize = info.actualSingleProcessSInnerSize;
     uint32_t nL1Size = N_SPLIT_SIZE;
     uint32_t nL1SizeAlign = SMLAAlign(N_SPLIT_SIZE, 16);
@@ -350,6 +351,9 @@ __aicore__ inline void SMLACubeBlock<SMLAT>::ComputeMm1(const RunInfo &info, con
 
     // L1 切n切k
     for (uint32_t nL1 = 0; nL1 < nL1Loops; nL1++) {
+        if (info.streamPackedQk && mSplitInfo.nBufferStartM == 0 && nL1 == 1) {
+            CrossCoreWaitFlag(constInfo.syncV0C1);
+        }
         if (nL1 == (nL1Loops - 1)) {
             // 尾块重新计算size
             nL1Size = nSize - (nL1Loops - 1) * N_SPLIT_SIZE;
