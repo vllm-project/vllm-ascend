@@ -53,8 +53,34 @@ The wrapper keeps grid selection and routing outside the kernel. Fusion requires
 Actual K2048 deployment shapes include T48/DCP16 and T128/DCP8. Shared tests also cover generic K, partial tiles, non-power-of-two DCP, ties, near-ULP scores, invalid owners, strided input, exact score bits, the local-ID limit `2**20 - 1`, large mapped global IDs and changing-input graph replay. BF16 and FP32 tests poison empty-history and padding rows and change their visibility on graph replay. The QLI accuracy tests cover A3 BF16 output with initialization enabled and disabled.
 
 ```bash
+pytest -q tests/e2e/nightly/single_node/ops/singlecard_ops/triton/test_owner_prefix_adaptive.py
 pytest -q tests/ut/attention/test_sharded_indexer.py
 pytest -q tests/e2e/nightly/single_node/ops/singlecard_ops/triton/test_dcp_candidates.py
 pytest -q tests/e2e/nightly/single_node/ops/singlecard_ops/triton/test_candidate_radix.py
 pytest -q tests/e2e/nightly/single_node/ops/singlecard_ops/triton/test_dcp_pre_post.py -k local_lengths
 ```
+
+## Owner-prefix scan
+
+A single-rank group uses the serial specialization. Every multi-rank group
+uses parallel peer scans, including single-row queries. Within that
+specialization, a row with a dominant peer can still scan serially.
+
+For each owner pivot, the parallel scan counts the peer entries that rank ahead
+of it (higher score, then lower global ID). If the pivot wins, that count becomes
+a lower bound for later owner candidates. If a valid pivot loses, the count
+becomes an upper bound for earlier candidates. Each peer therefore only needs
+to count entries between its saved bounds. The kernel loads one shared tile
+across peers and masks positions outside each peer's interval.
+
+The serial scan stops reading a sorted peer after the first partial tile. For
+the first owner candidate, finding K better entries proves that the owner has
+no winners and the scan can skip the remaining peers.
+
+The public wrapper derives the compile-time peer strategy and tile from the
+group size. The parallel tile width accounts for padded rank lanes so that
+non-power-of-two groups fit the on-chip buffer. The kernel accepts a dynamic row count and uses lazy compilation.
+
+The owner test compares exact local IDs and padding with an independent CPU
+global Top-K followed by owner compaction. It also checks output guards and
+replays a captured graph after changing the candidate values.
