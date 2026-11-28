@@ -24,7 +24,7 @@ from vllm.v1.outputs import LogprobsTensors
 from vllm_ascend.ops.triton.sample.fill_logprob_token_idx import fill_logprob_token_ids
 from vllm_ascend.ops.triton.triton_utils import get_vectorcore_num
 
-_LOG_SOFTMAX_VOCAB_BLOCK = 12944  # Tuned for the UB budget with multibuffer disabled.
+_LOG_SOFTMAX_VOCAB_BLOCK = 15 * 1024  # Tuned for the UB budget with multibuffer disabled.
 _MAX_TOPK_BLOCK = 8192
 
 
@@ -44,19 +44,16 @@ def _topk_log_softmax_kernel(
     row_ptr = logits_ptr + req_idx * logits_stride
 
     max_val = float("-inf")
-    for i in range(0, vocab_size, BLOCK_SIZE):
-        block = i + tl.arange(0, BLOCK_SIZE)
-        logits = tl.load(row_ptr + block, mask=block < vocab_size, other=float("-inf"))
-        max_val = tl.max(tl.maximum(logits, max_val, propagate_nan=tl.PropagateNan.ALL))
-    max_val = max_val.to(tl.float32)  # type: ignore
-
     se = 0.0
     for i in range(0, vocab_size, BLOCK_SIZE):
         block = i + tl.arange(0, BLOCK_SIZE)
         logits = tl.load(row_ptr + block, mask=block < vocab_size, other=float("-inf"))
         logits = logits.to(tl.float32)
-        e = tl.exp(logits - max_val)
-        se += tl.sum(e)
+        new_max = tl.maximum(max_val, tl.max(logits), propagate_nan=tl.PropagateNan.ALL)
+        # An all-masked prefix contributes zero until a finite tile arrives.
+        safe_max = tl.where(new_max == -float("inf"), 0.0, new_max)
+        se = se * tl.exp(max_val - safe_max) + tl.sum(tl.exp(logits - safe_max))
+        max_val = new_max
     lse = tl.log(se)
 
     for candidate_start in range(0, topk, TOPK_BLOCK_SIZE):
