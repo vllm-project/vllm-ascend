@@ -29,6 +29,23 @@ from vllm_ascend.models.minimax_m3.minimax_m3 import (
 )
 
 
+class TestMiniMaxM3LoRAAdmission(unittest.TestCase):
+    def test_unsupported_factor_layouts_fail_before_model_allocation(self):
+        from vllm_ascend.models.minimax_m3.minimax_m3 import MiniMaxM3SparseForCausalLM
+
+        for flag in ("fully_sharded_loras", "enable_moe_shared_loras"):
+            with self.subTest(flag=flag):
+                lora = SimpleNamespace(fully_sharded_loras=False, enable_moe_shared_loras=False)
+                setattr(lora, flag, True)
+                config = SimpleNamespace(
+                    model_config=SimpleNamespace(hf_text_config=SimpleNamespace()),
+                    quant_config=None,
+                    lora_config=lora,
+                )
+                with self.assertRaisesRegex(ValueError, flag):
+                    MiniMaxM3SparseForCausalLM(vllm_config=config)
+
+
 class _FakeQKVProj(nn.Module):
     def forward(self, hidden_states: torch.Tensor) -> tuple[torch.Tensor, None]:
         num_tokens = hidden_states.shape[0]

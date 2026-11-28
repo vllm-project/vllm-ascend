@@ -1289,13 +1289,18 @@ class MiniMaxM3Model(nn.Module, EagleModelMixin):
         self._set_aux_hidden_state_layers(layers)
 
     def get_expert_mapping(self) -> list[tuple[str, str, int, str]]:
-        return fused_moe_make_expert_params_mapping(
+        mapping = fused_moe_make_expert_params_mapping(
             self,
             ckpt_gate_proj_name="w1",
             ckpt_down_proj_name="w2",
             ckpt_up_proj_name="w3",
             num_experts=self.config.num_local_experts,
         )
+        # Checkpoint names remain unwrapped when LoRA adds base_layer modules.
+        return [
+            (param.replace("base_layer.", ""), weight.replace("base_layer.", ""), expert_id, shard_id)
+            for param, weight, expert_id, shard_id in mapping
+        ]
 
     def load_weights(self, weights: Iterable[tuple[str, torch.Tensor]]) -> set[str]:
         stacked_params_mapping: list[tuple[str, str, int | str]] = [
@@ -1316,6 +1321,9 @@ class MiniMaxM3Model(nn.Module, EagleModelMixin):
         expert_params_mapping = self.get_expert_mapping()
 
         params_dict = dict(self.named_parameters())
+        for name in list(params_dict):
+            if ".base_layer." in name:
+                params_dict.setdefault(name.replace(".base_layer.", "."), params_dict[name])
         loaded_params: set[str] = set()
         loaded_tensors = 0
         skipped_tensors = 0
@@ -1501,6 +1509,19 @@ class MiniMaxM3SparseForCausalLM(
         quant_config = vllm_config.quant_config
         self.config = config
         self.quant_config = quant_config
+        if vllm_config.lora_config is not None and quant_config is None:
+            if vllm_config.lora_config.fully_sharded_loras:
+                raise ValueError("MiniMax M3 LoRA does not support fully_sharded_loras.")
+            if vllm_config.lora_config.enable_moe_shared_loras:
+                raise ValueError("MiniMax M3 LoRA does not support enable_moe_shared_loras; use per-expert factors.")
+            from vllm_ascend.lora.moe_manager import AscendMoEWorkerLoRAManager
+
+            self.lora_worker_manager_cls = AscendMoEWorkerLoRAManager
+            # LoRA sees all five sparse projections; quantization keeps the class mapping.
+            self.packed_modules_mapping = {
+                **self.packed_modules_mapping,
+                "qkv_proj": ["q_proj", "k_proj", "v_proj", "index_q_proj", "index_k_proj"],
+            }
         if hasattr(vllm_config.model_config, "max_model_len"):
             self.config.max_model_len = vllm_config.model_config.max_model_len
         self.model = MiniMaxM3Model(vllm_config=vllm_config, prefix=maybe_prefix(prefix, "model"))
