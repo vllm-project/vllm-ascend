@@ -1766,15 +1766,17 @@ def _setup_worker_and_scheduler(
 
 
 def _swa_bounded_replay_unsupported_mode(ascend_config) -> str | None:
-    """Name the Ascend mode that cannot honor SWA bounded replay.
+    """Name the Ascend mode that currently downgrades SWA bounded replay.
 
-    Upstream implements the rewind inside ``Scheduler.schedule()``. Four Ascend
-    modes replace that method with a verbatim copy of an older upstream body, so
-    they neither rewind a prefix hit nor realize that the chunk they scheduled
-    is a replay; activating any of them therefore has to turn the switch off.
+    Upstream implements the rewind inside ``Scheduler.schedule()``. The three
+    copied Ascend schedulers (``recompute_scheduler_enable``,
+    ``dyntra_lb_config``, and ``enable_balance_scheduling``) now track
+    vllm-ascend's pinned vLLM main commit, which includes the rewind logic, but
+    this downgrade is intentionally kept in place until SWA bounded replay is
+    verified end-to-end under those modes on NPU.
 
-    The other two modes reach upstream's ``schedule()`` and inherit the rewind:
-    ``batch_job_aware_scheduler`` calls ``super()``, and
+    The other two modes reach upstream's ``schedule()`` directly and inherit
+    the rewind: ``batch_job_aware_scheduler`` calls ``super()``, and
     ``short_request_first_scheduler`` does not override ``schedule()`` at all --
     it only installs a request queue. Note that ``enable_balance_scheduling`` is
     a fork despite being a monkeypatch rather than a ``scheduler_cls``, and that

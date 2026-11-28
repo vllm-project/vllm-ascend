@@ -117,7 +117,9 @@ def test_dyntra_lb_recompute_prefetch_restores_ready_cpu_kv():
     assert request.num_computed_tokens == 8
     assert request in scheduler.kv_holding_waiting
     assert request not in scheduler.waiting
-    assert request in scheduler._inflight_prefills
+    assert request in scheduler._parked_reservations
+    assert request not in scheduler._inflight_prefills
+    assert scheduler._inflight_prefill_reserved_blocks() == scheduler._request_remaining_blocks(request)
     scheduler.connector.update_state_after_alloc.assert_called_once()
     update_request, allocated_blocks, external_tokens = scheduler.connector.update_state_after_alloc.call_args.args
     assert update_request is request

@@ -1,0 +1,17 @@
+pr: 23057
+entries:
+  - category: feature
+    text: >-
+      Users can now set `--max-num-inflight-kv-loads` to cap concurrent async
+      KV-cache loads with the Balance, DyntraLB, and recompute schedulers
+      (`scheduler_config.enable_balance_scheduling`,
+      `scheduler_config.dyntra_lb_config.enabled`,
+      `scheduler_config.recompute_scheduler_enable`). The limit is off by
+      default.
+  - category: bugfix
+    text: >-
+      With `--no-enable-chunked-prefill`, the Balance, DyntraLB, and recompute
+      schedulers no longer split a prompt across steps when
+      `--long-prefill-token-threshold` is set or the encoder cache is
+      temporarily full. Pooling models with CLS or MEAN pooling could fail on
+      such prompts with "partial prefill is not supported".
