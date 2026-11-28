@@ -98,6 +98,7 @@ class TestTokenDispatcherWithMC2(TestBase):
         mock_config.speculative_config = None
 
         mock_config.parallel_config.tensor_parallel_size = 1
+        mock_config.parallel_config.enable_fault_tolerance = False
 
         self.mock_get_config.return_value = mock_config
         self.mc2_tokens_capacity = 128

@@ -710,6 +710,8 @@ class AscendConfig:
     msmonitor_use_daemon: bool = False
     enable_transpose_kv_cache_by_block: bool = True
     weight_nz_mode: int = 1
+    # NPU operator execution timeout in seconds (default: 60; values below 1 are invalid).
+    npu_op_timeout: int = 60
 
     # ---- sub-configs (no vllm_config dep): pydantic dict→dataclass coercion ----
     ascend_compilation_config: AscendCompilationConfig = dataclasses.field(default_factory=AscendCompilationConfig)
@@ -1059,6 +1061,10 @@ class AscendConfig:
             # Breakable skips model compilation. The worker only compiles static kernels
             # during graph warmup when enable_npugraph_ex is False.
             self.ascend_compilation_config.enable_npugraph_ex = False
+
+        # Reject 0 because HCCL treats it as no timeout.
+        if vc.parallel_config.enable_fault_tolerance and self.npu_op_timeout < 1:
+            raise ValueError(f"npu_op_timeout must be an integer of at least 1 second, got {self.npu_op_timeout}")
         return self
 
     @property

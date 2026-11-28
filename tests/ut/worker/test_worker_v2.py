@@ -135,6 +135,7 @@ class TestNPUWorkerV2(TestBase):
         worker.vllm_config = MagicMock()
         worker.vllm_config.model_config.enable_sleep_mode = False
         worker.vllm_config.weight_transfer_config = None
+        worker.worker_sentinel = None
         return worker
 
     def test_init_device_selects_mm_encoder_runner_under_cuda_wrapper(self):

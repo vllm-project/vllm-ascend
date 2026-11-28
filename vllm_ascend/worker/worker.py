@@ -70,6 +70,7 @@ from vllm.v1.kv_cache_interface import (
 from vllm.v1.outputs import AsyncModelRunnerOutput, ModelRunnerOutput
 from vllm.v1.utils import report_usage_stats
 from vllm.v1.worker import gpu_worker
+from vllm.v1.worker.gpu.async_utils import AsyncOutput
 from vllm.v1.worker.gpu_worker import AsyncIntermediateTensors
 from vllm.v1.worker.gpu_worker import Worker as GPUWorker
 from vllm.v1.worker.startup_plan import (
@@ -111,6 +112,8 @@ from vllm_ascend.distributed.kv_transfer.utils.mooncake_transfer_engine import g
 from vllm_ascend.distributed.parallel_state import init_ascend_model_parallel
 from vllm_ascend.observability.runtime_guard.hooks import runtime_guard_idle_step
 from vllm_ascend.ops.triton.triton_utils import init_device_properties_triton
+from vllm_ascend.patch.worker.patch_async_output import AscendAsyncOutput
+from vllm_ascend.platform import NPUPlatform
 from vllm_ascend.profiler.torch_npu_profiler import TorchNPUProfilerWrapper
 from vllm_ascend.utils import (
     check_ascend_device_type,
@@ -122,6 +125,7 @@ from vllm_ascend.utils import (
     setup_ascend_local_comm_res,
     shared_expert_tp_enable,
 )
+from vllm_ascend.worker.sentinel.npu_worker_sentinel import WorkerSentinel, fault_barrier_wrapper
 
 if TYPE_CHECKING:
     from vllm.model_executor.model_loader.tensorizer import TensorizerConfig
@@ -213,8 +217,10 @@ class NPUWorker(GPUWorker):
         configure_ascend_file_logging(ascend_config.ascend_log_path)
         check_ascend_device_type()
 
-        if getattr(vllm_config.parallel_config, "enable_fault_tolerance", False):
-            raise NotImplementedError("Ascend does not support the GPU fault-tolerance sentinel.")
+        # Keep FT off around super(): GPUWorker builds a GPU sentinel that rejects
+        # Ascend.
+        ft_enabled = vllm_config.parallel_config.enable_fault_tolerance
+        vllm_config.parallel_config.enable_fault_tolerance = False
 
         # 310P runs Model Runner V2 without Triton. Replace this context manager
         # with a _validate_triton() override once all supported vLLM versions
@@ -228,6 +234,7 @@ class NPUWorker(GPUWorker):
                 distributed_init_method=distributed_init_method,
                 is_driver_worker=is_driver_worker,
             )
+        vllm_config.parallel_config.enable_fault_tolerance = ft_enabled
 
         if self.cache_config.cache_dtype == "auto":
             self.cache_dtype = self.model_config.dtype
@@ -242,6 +249,8 @@ class NPUWorker(GPUWorker):
 
         if "UnquantizedLinearMethod" in WEIGHT_LOADER_V2_SUPPORTED:
             WEIGHT_LOADER_V2_SUPPORTED.remove("UnquantizedLinearMethod")
+
+        self.worker_sentinel: WorkerSentinel | None = None
 
         self._static_kernel_runtime_initialized = False
         self._kvpp_cache_allocation_plan: KVPPPhysicalCachePlan | None = None
@@ -275,9 +284,6 @@ class NPUWorker(GPUWorker):
 
     def _scoped_allocator_max_split(self, max_split_size_mb: int):
         raise NotImplementedError("GPUWorker._scoped_allocator_max_split is not validated on Ascend.")
-
-    def handle_ft_command(self, ft_request):
-        raise NotImplementedError("GPUWorker.handle_ft_command is not validated on Ascend.")
 
     def _compile_or_warm_up_model(self) -> CompilationTimes:
         raise NotImplementedError("GPUWorker._compile_or_warm_up_model is not validated on Ascend.")
@@ -513,6 +519,8 @@ class NPUWorker(GPUWorker):
         # shift self.local_rank by dp_local_rank * tp_pp_world_size so
         # that each DP group binds to a distinct set of NPUs.
         parallel_config = self.parallel_config
+        if self.parallel_config.enable_fault_tolerance:
+            NPUPlatform.apply_fault_tolerance_comm_settings(parallel_config)
         if (
             parallel_config.distributed_executor_backend not in ("ray", "external_launcher")
             and parallel_config.data_parallel_backend != "ray"
@@ -557,6 +565,11 @@ class NPUWorker(GPUWorker):
         device = torch.device(f"{current_platform.device_type}:{visible_device_index}")
 
         torch.npu.set_device(device)
+
+        if self.parallel_config.enable_fault_tolerance:
+            npu_op_timeout = get_ascend_config().npu_op_timeout
+            torch.npu.current_stream()
+            torch.npu.set_op_timeout_ms(npu_op_timeout * 1000)
 
         if enable_custom_op():
             register_device_print()
@@ -607,6 +620,8 @@ class NPUWorker(GPUWorker):
 
         # Initialize the distributed environment.
         self._init_worker_distributed_environment()
+        if self.parallel_config.enable_fault_tolerance:
+            self.worker_sentinel = WorkerSentinel(worker=self, device=device)
         # Set random seed.
         set_random_seed(self.model_config.seed)
         # Initialize device properties used by triton kernels.
@@ -929,6 +944,7 @@ class NPUWorker(GPUWorker):
             self.torch_allocated / GiB_bytes,
         )
 
+    @fault_barrier_wrapper
     def execute_model(
         self,
         scheduler_output: "SchedulerOutput",
@@ -986,8 +1002,13 @@ class NPUWorker(GPUWorker):
         return None
 
     @torch.inference_mode()
+    @fault_barrier_wrapper
     def sample_tokens(self, grammar_output: "GrammarOutput") -> ModelRunnerOutput | AsyncModelRunnerOutput:
         output = self.model_runner.sample_tokens(grammar_output)
+        # Only the async (MRV2) path returns an AsyncOutput; re-class it so
+        # get_output is guarded by the fault barrier.
+        if self.parallel_config.enable_fault_tolerance and isinstance(output, AsyncOutput):
+            output.__class__ = AscendAsyncOutput
         return output
 
     def load_model(self) -> None:
@@ -1025,6 +1046,9 @@ class NPUWorker(GPUWorker):
 
         if has_ec_transfer():
             get_ec_transfer().start_worker_services()
+
+        if self.worker_sentinel is not None:
+            self.worker_sentinel.init_num_local_experts()
 
         if self.vllm_config.weight_transfer_config is not None:
             from vllm.distributed.weight_transfer.factory import (

@@ -102,6 +102,7 @@ def test_worker_requires_shared_expert_tp_on_a_loaded_layer(monkeypatch, has_sha
         SimpleNamespace(finegrained_tp_group=object() if tp_size > 1 else None) if has_shared_experts else None
     )
     worker = worker_module.NPUWorker.__new__(worker_module.NPUWorker)
+    worker.worker_sentinel = None
     worker.vllm_config = SimpleNamespace(
         model_config=SimpleNamespace(enable_sleep_mode=False), weight_transfer_config=None
     )

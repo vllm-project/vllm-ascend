@@ -246,3 +246,4 @@ estimated_times:
   tests/e2e/pull_request/two_card/ops/triton/test_resample.py: 70
   tests/e2e/pull_request/two_card/ops/triton/test_rms_norm.py: 50
   tests/e2e/pull_request/two_card/ops/triton/test_temperature.py: 30
+  tests/e2e/pull_request/four_card/fault_tolerance/test_fault_tolerance_e2e.py: 900
