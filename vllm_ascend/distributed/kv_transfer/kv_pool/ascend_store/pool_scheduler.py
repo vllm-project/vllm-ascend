@@ -1045,7 +1045,7 @@ class KVPoolScheduler:
         for request in scheduler_output.scheduled_new_reqs:
             req_meta = self._process_new_request(request, scheduler_output, force_skip_save)
             if req_meta is not None:
-                self.touch_sending_mamba_blocks(req_meta)
+                self.retain_blocks_for_save(req_meta)
                 meta.add_request(req_meta)
 
         cached_reqs = scheduler_output.scheduled_cached_reqs
@@ -1080,7 +1080,7 @@ class KVPoolScheduler:
                         force_skip_save,
                     )
                 if req_meta is not None:
-                    self.touch_sending_mamba_blocks(req_meta)
+                    self.retain_blocks_for_save(req_meta)
                     meta.add_request(req_meta)
 
         request_ids = [req.req_id for req in scheduler_output.scheduled_new_reqs]
@@ -1088,7 +1088,7 @@ class KVPoolScheduler:
             if request_id not in request_ids and request_id not in cached_reqs.req_ids:
                 req_meta = self._process_async_load_request(request_id, request, block_ids)
                 if req_meta is not None:
-                    self.touch_sending_mamba_blocks(req_meta)
+                    self.retain_blocks_for_save(req_meta)
                     meta.add_request(req_meta)
 
         return meta
@@ -1102,22 +1102,21 @@ class KVPoolScheduler:
         self.sending_event_id += 1
         return using_id
 
-    def touch_sending_mamba_blocks(self, req_meta: ReqMeta):
-        """
-        keep the reference of all non-null mamba blocks that will send to external kv store
-        """
-        if not self.use_hybrid or not self.num_speculative_blocks_by_group or not req_meta.can_save:
+    def retain_blocks_for_save(self, req_meta: ReqMeta):
+        """Hold SWA and Mamba source blocks until all workers finish saving."""
+        if self.use_layerwise or not req_meta.can_save:
             return
-        # Layerwise transfer frees mamba blocks layer by layer on its own
-        # completion path (see KVCacheStoreSendingThread); bulk-touching them
-        # here would double-reference the block pool and leak blocks.
-        if self.use_layerwise:
+        scratch_blocks_by_group = dict.fromkeys(self.swa_group_ids, 0) | self.num_speculative_blocks_by_group
+        if not scratch_blocks_by_group:
             return
-        using_event_id = self.get_sending_event_id()
-        req_meta.event_id = using_event_id
         current_step_sending: list[int] = []
-        for group_id, num_speculative_blocks in self.num_speculative_blocks_by_group.items():
-            group_block_ids = req_meta.block_ids_by_group[group_id]
+        # Running requests can refresh their block table before the sender reads it.
+        req_meta.block_ids_by_group = req_meta.block_ids_by_group.copy()
+        for group_id, group_block_ids in enumerate(req_meta.block_ids_by_group):
+            num_speculative_blocks = scratch_blocks_by_group.get(group_id)
+            if num_speculative_blocks is None:
+                continue
+            req_meta.block_ids_by_group[group_id] = group_block_ids.copy()
             # The last num_speculative_blocks slots are speculative scratch
             # blocks that the allocator relocates in place; relocation requires
             # them exclusively owned (ref_cnt == 1), so they must never be
@@ -1126,6 +1125,11 @@ class KVPoolScheduler:
                 group_block_ids[:-num_speculative_blocks] if num_speculative_blocks > 0 else group_block_ids
             )
             current_step_sending.extend([block_id for block_id in non_spec_block_ids if block_id > 0])
+        if not current_step_sending:
+            return
+
+        using_event_id = self.get_sending_event_id()
+        req_meta.event_id = using_event_id
         logger.debug("event: %s touch blocks: %s", using_event_id, current_step_sending)
         assert self._block_pool is not None
         self._block_pool.touch([self._block_pool.blocks[block_id] for block_id in current_step_sending])
@@ -1133,9 +1137,7 @@ class KVPoolScheduler:
         self.sending_blocks[using_event_id] = current_step_sending
 
     def update_connector_output(self, connector_output: KVConnectorOutput):
-        """
-        hand the connector_output, free non-null mamba blocks and so on.
-        """
+        """Process receive completions and release acknowledged bulk-save references."""
         self.update_finished_recving(connector_output.finished_recving)
 
         meta = connector_output.kv_connector_worker_meta
@@ -1163,7 +1165,7 @@ class KVPoolScheduler:
         request: "Request",
         block_ids: list[int],
     ) -> tuple[bool, dict[str, Any] | None]:
-        """Allow the scheduler to free blocks after synchronous saving."""
+        """Release request ownership; bulk save events hold their own block references."""
         return False, None
 
     def request_finished_all_groups(
@@ -1171,7 +1173,7 @@ class KVPoolScheduler:
         request: "Request",
         block_ids: tuple[list[int], ...],
     ) -> tuple[bool, dict[str, Any] | None]:
-        """Allow the scheduler to free all groups after synchronous saving."""
+        """Release request ownership across all groups."""
         return False, None
 
     def bind_kv_cache_manager(self, kv_cache_manager: KVCacheManager) -> None:
