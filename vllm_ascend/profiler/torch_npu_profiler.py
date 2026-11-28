@@ -40,8 +40,11 @@ class TorchNPUProfilerWrapper(WorkerProfiler):
         if not profiler_config.torch_profiler_dir:
             raise RuntimeError("torch_profiler_dir cannot be empty.")
         msmonitor_use_daemon = False
+        with_op_stack = False
         with suppress(RuntimeError):
-            msmonitor_use_daemon = get_ascend_config().msmonitor_use_daemon
+            ascend_config = get_ascend_config()
+            msmonitor_use_daemon = ascend_config.msmonitor_use_daemon
+            with_op_stack = ascend_config.torch_npu_profiler_with_stack
         if msmonitor_use_daemon:
             raise RuntimeError(
                 "additional_config.msmonitor_use_daemon and torch profiler cannot be enabled at the same time."
@@ -64,10 +67,11 @@ class TorchNPUProfilerWrapper(WorkerProfiler):
                 torch_npu.profiler.ProfilerActivity.CPU,
                 torch_npu.profiler.ProfilerActivity.NPU,
             ],
-            with_stack=False,
-            profile_memory=profiler_config.torch_profiler_with_memory,
             # NOTE: torch_npu.profiler.with_modules is equivalent to torch.profiler.with_stack.
-            # The with_stack option in torch_npu.profiler introduces significant time overhead.
+            # The with_stack option in torch_npu.profiler introduces significant time overhead,
+            # so it stays off unless additional_config.torch_npu_profiler_with_stack opts in.
+            with_stack=bool(profiler_config.torch_profiler_with_stack and with_op_stack),
+            profile_memory=profiler_config.torch_profiler_with_memory,
             with_modules=profiler_config.torch_profiler_with_stack,
             experimental_config=experimental_config,
             on_trace_ready=torch_npu.profiler.tensorboard_trace_handler(
