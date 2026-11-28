@@ -102,7 +102,6 @@ def _fixture(names=("cancel",), *, admit=True):
         indexer_tensors=[None],
         indexer_scale_tensors=[None],
         dest_blocks_by_req=worker._dest_blocks_by_req,
-        get_offload_layer_id=lambda name: 0,
         dspark_context_receiver=receiver,
         dspark_draft_kv_metadata={"draft": _metadata(2, 4000)},
         dspark_draft_blocks_by_req=worker._dspark_draft_blocks_by_req,

@@ -1,0 +1,16 @@
+pr: 20478
+entries:
+  - category: feature
+    text: >-
+      Added sparse_kv_offload_config.offload_shared_indexer_only to keep
+      indexer-owner layers resident in NPU HBM for layered-indexer models
+      (e.g. GLM-5.2) while offloading only the shared-indexer layers;
+      supported on both the fused Copy-SFA pipeline and the
+      use_fused_overlap pipeline; the MTP draft layer stays
+      device-resident as well, and miss_onboard_mode (inline | side_stream)
+      to select how the offloaded layers' missed KV rows are onboarded:
+      side_stream pre-copies the landed prefix misses on a side stream
+      during the owner's forward and encodes them as hits, so the fused
+      attention operators read the pre-copied rows directly instead of
+      gathering from the host pool inline.
+    model: GLM-5.2

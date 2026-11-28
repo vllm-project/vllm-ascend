@@ -170,6 +170,8 @@ The following `sparse_kv_offload_config` options are supported:
 
 | Parameter | Description |
 | :--- | :--- |
+| `offload_shared_indexer_only` | Supported on both the fused Copy-SFA path (the default) and `use_fused_overlap=true`. Keep the KV cache of full (indexer-owner) layers resident in NPU paged caches and offload only the shared-indexer layers (the MTP draft layer stays device-resident as well). See the [shared-indexer-only tutorial](../../tutorials/features/sparse_kv_offload_shared_indexer_only.md) for details. |
+| `miss_onboard_mode` | Requires `offload_shared_indexer_only=true`. `"inline"` (default) resolves misses inside the fused attention kernel; `"side_stream"` pre-copies the group's landed prefix misses on a side stream during the owner's forward (via the `npu_lim_copy_descriptors` / `npu_lim_copy_descriptors_linear` operators), encoding them as hits so the fused operators never re-copy — the speculative suffix stays inline. Falls back to `inline` when the operators are unavailable. |
 | `topk_buffer_size` | Device hot-buffer size. Defaults to `-1`, which resolves to `(1 + num_speculative_tokens) * 2048` (2048 without speculation). Explicit values are unchanged. For the default Copy-SFA path, use a multiple of 256, at least `(1 + num_speculative_tokens) * 2048` and at most 32512. |
 | `dram_size_per_dp_GB` | Defaults to `110` GB of host memory per DP rank. It must hold the full KV cache. TP ranks share this pool while different DP ranks use different pool. The whole required host memory is around `dram_size_per_dp_GB * data_parallel_size`. |
 | `keep_device_kv_cache` | Defaults to `false`. Debug-only option that retains the full device KV cache when enabled. |
