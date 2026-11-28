@@ -33,12 +33,12 @@ def case(monkeypatch):
         use_mla=False,
     )
     config = SimpleNamespace(
-        use_v2_model_runner=True,
         model_config=model_config,
         compilation_config=SimpleNamespace(
             cudagraph_mode=CUDAGraphMode.FULL_DECODE_ONLY, cudagraph_capture_sizes=[1, 2, 4, 8]
         ),
         parallel_config=SimpleNamespace(
+            enable_eplb=False,
             enable_expert_parallel=False,
             tensor_parallel_size=2,
             pipeline_parallel_size=1,
@@ -77,10 +77,7 @@ def case(monkeypatch):
     monkeypatch.setattr(
         module,
         "get_ascend_config",
-        lambda: SimpleNamespace(
-            eplb_config=SimpleNamespace(dynamic_eplb=False),
-            ascend_compilation_config=SimpleNamespace(enable_super_kernel=False),
-        ),
+        lambda: SimpleNamespace(ascend_compilation_config=SimpleNamespace(enable_super_kernel=False)),
     )
     monkeypatch.setattr(SleepGraphReuse, "unanimous", staticmethod(lambda local: local))
     group = SimpleNamespace(device_group=object())
@@ -185,13 +182,19 @@ def test_inventory_exception_still_votes_for_collective_fallback(case, monkeypat
 @pytest.mark.parametrize(
     "feature,reason",
     [
+        ("mrv1", "requires_mrv2"),
+        ("eplb", "dynamic_eplb_or_super_kernel_not_validated"),
         ("ep", "expert_parallel_not_validated"),
         ("lora", "speculation_or_lora_not_validated"),
         ("mode", "requires_full_decode_only"),
     ],
 )
 def test_unsupported_combination_has_reason(case, feature, reason):
-    if feature == "ep":
+    if feature == "mrv1":
+        case.config.use_v2_model_runner = False
+    elif feature == "eplb":
+        case.config.parallel_config.enable_eplb = True
+    elif feature == "ep":
         case.config.parallel_config.enable_expert_parallel = True
     elif feature == "lora":
         case.config.lora_config = object()

@@ -34,7 +34,8 @@ def reuse_unsupported_reason(config: VllmConfig, runner: Any) -> str | None:
     """A support boundary, rather than a claim about other model combinations."""
     if not get_current_hardware_profile().supports(HardwareCapability.SLEEP_GRAPH_REUSE):
         return "hardware_not_validated"
-    if not config.use_v2_model_runner:
+    # Upstream removed this flag when MRV2 became the only model runner.
+    if not getattr(config, "use_v2_model_runner", True):
         return "requires_mrv2"
     if config.compilation_config.cudagraph_mode != CUDAGraphMode.FULL_DECODE_ONLY:
         return "requires_full_decode_only"
@@ -73,7 +74,7 @@ def reuse_unsupported_reason(config: VllmConfig, runner: Any) -> str | None:
     if offload is not None and (offload.uva.cpu_offload_gb or offload.prefetch.offload_group_size):
         return "weight_offload_not_validated"
     ascend = get_ascend_config()
-    if ascend.eplb_config.dynamic_eplb or ascend.ascend_compilation_config.enable_super_kernel:
+    if parallel.enable_eplb or ascend.ascend_compilation_config.enable_super_kernel:
         return "dynamic_eplb_or_super_kernel_not_validated"
     if runner is not None:
         backends = {group.backend.__module__ for groups in runner.attn_groups for group in groups}
