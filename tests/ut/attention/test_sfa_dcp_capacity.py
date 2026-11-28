@@ -166,7 +166,6 @@ def test_kimi_k31_dcp_uses_final_physical_interleave(interleave):
     config.model_config.hf_text_config = SimpleNamespace(model_type="kimi_k31", index_topk=2048)
     config.cache_config = SimpleNamespace(block_size=768, cache_dtype="fp8")
     config.kv_transfer_config = None
-    config.use_v2_model_runner = True
     with patch("vllm_ascend.platform.enable_sp", return_value=False):
         _validate_sfa_dcp_kv_sp(config)
     assert config.parallel_config.cp_kv_cache_interleave_size == 768

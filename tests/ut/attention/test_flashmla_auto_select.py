@@ -19,7 +19,7 @@ from vllm_ascend.device.hardware_profile import HardwareCapability
 
 def _selector_impl(**attrs):
     impl = AscendMLAImpl.__new__(AscendMLAImpl)
-    vars(impl).update(attrs)
+    impl.__dict__.update(attrs)
     return impl
 
 
@@ -71,7 +71,6 @@ def test_flashmla_module_precheck_skips_absent_cann_import(monkeypatch):
 
 def test_flashmla_selection_requires_operator_and_supported_mla_config(monkeypatch):
     config = SimpleNamespace(
-        use_v2_model_runner=True,
         speculative_config=None,
         parallel_config=SimpleNamespace(decode_context_parallel_size=1),
         model_config=SimpleNamespace(hf_config=SimpleNamespace(model_type="deepseek_v3")),
@@ -86,13 +85,14 @@ def test_flashmla_selection_requires_operator_and_supported_mla_config(monkeypat
         dtype=torch.bfloat16,
         enable_kv_nz=False,
         use_pcp=False,
+        sliding_window=None,
     )
     monkeypatch.setattr(
         mla_v1,
         "get_current_hardware_profile",
         lambda: SimpleNamespace(supports=lambda capability: capability is HardwareCapability.MLA_FLASH),
     )
-    monkeypatch.setattr(mla_v1, "supports_component_major_mla_pd", lambda _config: True)
+    monkeypatch.setattr(mla_v1, "use_component_major_mla_pd_layout", lambda _config: True)
     monkeypatch.setattr(mla_v1, "get_flashmla_ops", lambda: (lambda: None, lambda: None))
     monkeypatch.setattr(mla_v1, "get_pcp_group", lambda: SimpleNamespace(world_size=1))
 
@@ -102,10 +102,8 @@ def test_flashmla_selection_requires_operator_and_supported_mla_config(monkeypat
     assert not AscendMLAImpl._can_use_flashmla(impl)
 
     monkeypatch.setattr(mla_v1, "get_flashmla_ops", lambda: (lambda: None, lambda: None))
-    config.use_v2_model_runner = False
-    assert not AscendMLAImpl._can_use_flashmla(impl)
+    assert AscendMLAImpl._can_use_flashmla(impl)
 
-    config.use_v2_model_runner = True
     impl.num_heads = 48
     assert not AscendMLAImpl._can_use_flashmla(impl)
 
@@ -121,9 +119,8 @@ def test_flashmla_selection_requires_operator_and_supported_mla_config(monkeypat
     assert not AscendMLAImpl._can_use_flashmla(impl)
 
 
-def test_quant_flashmla_selection_is_k3_dspark_c8_mrv2_only(monkeypatch):
+def test_quant_flashmla_selection_is_k3_dspark_c8(monkeypatch):
     config = SimpleNamespace(
-        use_v2_model_runner=True,
         speculative_config=None,
         parallel_config=SimpleNamespace(decode_context_parallel_size=1),
         model_config=SimpleNamespace(dtype=torch.bfloat16, hf_config=SimpleNamespace(model_type="kimi_linear")),
@@ -142,7 +139,7 @@ def test_quant_flashmla_selection_is_k3_dspark_c8_mrv2_only(monkeypatch):
         use_pcp=False,
     )
     monkeypatch.setattr(mla_v1, "get_current_hardware_profile", lambda: SimpleNamespace(supports=lambda _: True))
-    monkeypatch.setattr(mla_v1, "supports_component_major_mla_pd", lambda _: True)
+    monkeypatch.setattr(mla_v1, "use_component_major_mla_pd_layout", lambda _: True)
     monkeypatch.setattr(mla_v1, "get_quant_flashmla_ops", lambda: (object(), object()))
 
     assert not AscendMLAImpl._can_use_quant_flashmla(impl)
@@ -152,9 +149,12 @@ def test_quant_flashmla_selection_is_k3_dspark_c8_mrv2_only(monkeypatch):
     config.speculative_config = SimpleNamespace(method="dspark")
     impl._is_k3_dspark_draft = True
     assert AscendMLAImpl._can_use_quant_flashmla(impl)
-    config.use_v2_model_runner = False
+    impl.use_pcp = True
     assert not AscendMLAImpl._can_use_quant_flashmla(impl)
-    config.use_v2_model_runner = True
+    impl.use_pcp = False
+    impl.enable_kv_nz = True
+    assert not AscendMLAImpl._can_use_quant_flashmla(impl)
+    impl.enable_kv_nz = False
     impl.fa_quant_layer = False
     assert not AscendMLAImpl._can_use_quant_flashmla(impl)
     impl.fa_quant_layer = True
@@ -170,7 +170,6 @@ def test_quant_flashmla_selection_is_k3_dspark_c8_mrv2_only(monkeypatch):
 
 def test_quant_flashmla_selection_supports_k31_dspark_draft_c8(monkeypatch):
     config = SimpleNamespace(
-        use_v2_model_runner=True,
         speculative_config=SimpleNamespace(method="dspark"),
         parallel_config=SimpleNamespace(decode_context_parallel_size=1),
         model_config=SimpleNamespace(dtype=torch.bfloat16, hf_config=SimpleNamespace(model_type="kimi_k31")),
@@ -189,7 +188,7 @@ def test_quant_flashmla_selection_supports_k31_dspark_draft_c8(monkeypatch):
         use_pcp=False,
     )
     monkeypatch.setattr(mla_v1, "get_current_hardware_profile", lambda: SimpleNamespace(supports=lambda _: True))
-    monkeypatch.setattr(mla_v1, "supports_component_major_mla_pd", lambda _: True)
+    monkeypatch.setattr(mla_v1, "use_component_major_mla_pd_layout", lambda _: True)
     monkeypatch.setattr(mla_v1, "get_quant_flashmla_ops", lambda: (object(), object()))
     assert AscendMLAImpl._can_use_quant_flashmla(impl)
 
@@ -214,7 +213,6 @@ def test_quant_flashmla_selection_supports_k31_dspark_draft_c8(monkeypatch):
 )
 def test_flashmla_dspark_target_model_gate(monkeypatch, dcp_size, pcp_size, model_type, expected_flashmla):
     config = SimpleNamespace(
-        use_v2_model_runner=True,
         speculative_config=SimpleNamespace(method="dspark"),
         parallel_config=SimpleNamespace(decode_context_parallel_size=dcp_size),
         model_config=SimpleNamespace(
@@ -232,9 +230,10 @@ def test_flashmla_dspark_target_model_gate(monkeypatch, dcp_size, pcp_size, mode
         dtype=torch.bfloat16,
         enable_kv_nz=False,
         use_pcp=False,
+        sliding_window=None,
     )
     monkeypatch.setattr(mla_v1, "get_current_hardware_profile", lambda: SimpleNamespace(supports=lambda _: True))
-    monkeypatch.setattr(mla_v1, "supports_component_major_mla_pd", lambda _: True)
+    monkeypatch.setattr(mla_v1, "use_component_major_mla_pd_layout", lambda _: True)
     monkeypatch.setattr(mla_v1, "get_flashmla_ops", lambda: (object(), object()))
     monkeypatch.setattr(mla_v1, "get_pcp_group", lambda: SimpleNamespace(world_size=pcp_size))
     if model_type == "kimi_k31":
@@ -250,9 +249,60 @@ def test_flashmla_dspark_target_model_gate(monkeypatch, dcp_size, pcp_size, mode
     assert not AscendMLAImpl._can_use_flashmla(impl)
 
 
+def test_flashmla_window_requires_a5_and_flashmla_ops(monkeypatch):
+    config = SimpleNamespace(
+        speculative_config=SimpleNamespace(method="dflash"),
+        parallel_config=SimpleNamespace(decode_context_parallel_size=1),
+        model_config=SimpleNamespace(
+            hf_config=SimpleNamespace(model_type="kimi_k31"),
+            hf_text_config=SimpleNamespace(model_type="kimi_linear"),
+        ),
+    )
+    impl = _selector_impl(
+        vllm_config=config,
+        num_heads=12,
+        num_kv_heads=1,
+        kv_lora_rank=512,
+        qk_rope_head_dim=64,
+        fa_quant_layer=False,
+        dtype=torch.bfloat16,
+        enable_kv_nz=False,
+        use_pcp=False,
+        sliding_window=None,
+    )
+    has_mla_flash = True
+    ops_available = True
+    monkeypatch.setattr(
+        mla_v1,
+        "get_current_hardware_profile",
+        lambda: SimpleNamespace(
+            supports=lambda capability: has_mla_flash and capability is HardwareCapability.MLA_FLASH
+        ),
+    )
+    monkeypatch.setattr(mla_v1, "use_component_major_mla_pd_layout", lambda _: True)
+    monkeypatch.setattr(mla_v1, "get_flashmla_ops", lambda: (object(), object()) if ops_available else None)
+
+    assert impl._can_use_flashmla()
+    impl.sliding_window = 1024
+    assert impl._can_use_flashmla(dflash_draft_window=True)
+    assert not impl._can_use_flashmla()  # A target layer cannot use the draft lengths.
+    has_mla_flash = False  # A3.
+    assert not impl._can_use_flashmla(dflash_draft_window=True)
+    has_mla_flash = True
+    ops_available = False
+    assert not impl._can_use_flashmla(dflash_draft_window=True)
+    ops_available = True
+    config.parallel_config.decode_context_parallel_size = 2
+    assert not impl._can_use_flashmla(dflash_draft_window=True)
+    config.parallel_config.decode_context_parallel_size = 1
+    impl.use_pcp = True
+    assert not impl._can_use_flashmla(dflash_draft_window=True)
+
+
 @pytest.mark.parametrize("prefilling", [[True, False, True], [False, False, False]])
 @pytest.mark.parametrize("graph_eligible", [None, True, False])
-def test_request_order_preserves_fields_and_real_prefill_graph_gate(prefilling, graph_eligible):
+@pytest.mark.parametrize("override", [False, True])
+def test_request_order_preserves_fields_and_real_prefill_graph_gate(prefilling, graph_eligible, override):
     fields = [
         "req_ids",
         "num_scheduled_tokens",
@@ -275,10 +325,16 @@ def test_request_order_preserves_fields_and_real_prefill_graph_gate(prefilling, 
     ]
     if graph_eligible is not None:
         fields += ["num_draft_tokens_np", "prefill_runs_as_decode_np", "max_seq_len_np", "decode_graph_eligible"]
-        values += [np.array([0, 1, 0]), np.array(prefilling), np.array([100, 200, 300]), graph_eligible]
+        values += [
+            np.array([0, 1, 0]),
+            np.array(prefilling) & override,
+            np.array([100, 200, 300]),
+            graph_eligible,
+        ]
     state = cast(Any, namedtuple("BatchReqState", fields))(*values)
     result, uniform = prepare_flashmla_batch_req_state(state, 1)
-    order = [1, 0, 2] if state.has_prefill else [0, 1, 2]
+    has_prefill = state.has_prefill and not (override and graph_eligible is not None)
+    order = [1, 0, 2] if has_prefill else [0, 1, 2]
     assert result.req_ids == [state.req_ids[index] for index in order]
     for field in state._fields:
         expected = getattr(state, field)
@@ -286,18 +342,22 @@ def test_request_order_preserves_fields_and_real_prefill_graph_gate(prefilling, 
         if isinstance(expected, np.ndarray):
             np.testing.assert_array_equal(actual, expected[order])
         elif field == "decode_graph_eligible":
-            assert actual is (expected and not state.has_prefill)
+            assert actual is (expected and not has_prefill)
         elif field != "req_ids":
             assert actual == expected
-    assert uniform == (None if state.has_prefill or graph_eligible is False else 1)
+    assert uniform == (None if has_prefill or graph_eligible is False else 1)
+    prefill_runs_as_decode = getattr(result, "prefill_runs_as_decode_np", None)
     common = SimpleNamespace(
-        is_prefilling=torch.from_numpy(result.is_prefilling_np),
+        is_prefilling=torch.from_numpy(
+            flashmla.apply_prefill_as_decode_mask(result.is_prefilling_np, prefill_runs_as_decode)
+        ),
         query_start_loc_cpu=torch.tensor([0, 1, 2, 3, 3], dtype=torch.int32),
         num_reqs=4,
         num_actual_tokens=3,
     )
-    # A one-token prompt stays FIA prefill; trailing empty graph rows are ignored.
-    assert split_flashmla_requests(common) == ((1, 2, 1, 2) if state.has_prefill else (3, 0, 3, 0))
+    # Fresh prompts stay FIA prefill; explicit overrides use decode. Trailing
+    # empty graph rows are ignored in either case.
+    assert split_flashmla_requests(common) == ((1, 2, 1, 2) if has_prefill else (3, 0, 3, 0))
 
 
 def test_request_split_rejects_decode_after_real_prefill():
@@ -308,4 +368,15 @@ def test_request_split_rejects_decode_after_real_prefill():
         num_actual_tokens=2,
     )
     with pytest.raises(RuntimeError, match="decode requests before prefill"):
+        split_flashmla_requests(common)
+
+
+def test_request_split_requires_phase_for_each_active_row():
+    common = SimpleNamespace(
+        is_prefilling=torch.tensor([False]),
+        query_start_loc_cpu=torch.tensor([0, 1, 2], dtype=torch.int32),
+        num_reqs=2,
+        num_actual_tokens=2,
+    )
+    with pytest.raises(RuntimeError, match="is_prefilling does not cover the active request batch"):
         split_flashmla_requests(common)

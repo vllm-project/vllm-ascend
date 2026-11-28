@@ -35,70 +35,24 @@ def test_factory_adapts_only_the_returned_router():
     untouched_router = _Router()
     runner = SimpleNamespace(router=router)
     original_factory = MagicMock(return_value=runner)
-    ascend_config = SimpleNamespace(
-        eplb_config=SimpleNamespace(
-            dynamic_eplb=False,
-            expert_map_path=None,
-            num_redundant_experts=0,
-        )
-    )
 
     with (
         patch.object(patch_fused_moe, "_original_FusedMoE", original_factory),
-        patch.object(patch_fused_moe, "get_ascend_config", return_value=ascend_config),
-        patch.object(
-            patch_fused_moe,
-            "get_current_vllm_config",
-            return_value=SimpleNamespace(use_v2_model_runner=True),
-        ),
     ):
         result = patch_fused_moe._ascend_FusedMoE(
             num_experts=8,
             top_k=2,
             router=router,
             enable_eplb=True,
+            num_redundant_experts=2,
         )
 
     assert result is runner
+    assert original_factory.call_args.kwargs["enable_eplb"] is True
+    assert original_factory.call_args.kwargs["num_redundant_experts"] == 2
     assert isinstance(router.eplb_state, AscendEplbLayerState)
     assert getattr(router._apply_eplb_mapping, "__func__", None) is patch_fused_moe._ascend_apply_eplb_mapping
     assert getattr(untouched_router._apply_eplb_mapping, "__func__", None) is _Router._apply_eplb_mapping
-
-
-def test_factory_keeps_v1_eplb_on_the_legacy_routing_path():
-    router = _Router()
-    runner = SimpleNamespace(router=router)
-    original_factory = MagicMock(return_value=runner)
-    router_factory = MagicMock(return_value=router)
-    ascend_config = SimpleNamespace(
-        eplb_config=SimpleNamespace(
-            dynamic_eplb=True,
-            expert_map_path=None,
-            num_redundant_experts=2,
-        )
-    )
-
-    with (
-        patch.object(patch_fused_moe, "_original_FusedMoE", original_factory),
-        patch.object(patch_fused_moe, "create_ascend_fused_moe_router", router_factory),
-        patch.object(patch_fused_moe, "get_ascend_config", return_value=ascend_config),
-        patch.object(
-            patch_fused_moe,
-            "get_current_vllm_config",
-            return_value=SimpleNamespace(use_v2_model_runner=False),
-        ),
-    ):
-        result = patch_fused_moe._ascend_FusedMoE(
-            num_experts=8,
-            top_k=2,
-        )
-
-    assert result is runner
-    assert router_factory.call_args.kwargs["eplb_state"] is None
-    assert original_factory.call_args.kwargs["enable_eplb"] is True
-    assert original_factory.call_args.kwargs["num_redundant_experts"] == 2
-    assert router.eplb_state is None
-    assert getattr(router._apply_eplb_mapping, "__func__", None) is _Router._apply_eplb_mapping
 
 
 def test_adapted_router_uses_ascend_mapping_operation():
@@ -131,17 +85,9 @@ def test_factory_passes_hash_table_only_through_upstream_path():
     router = _Router()
     runner = SimpleNamespace(router=router)
     original_factory = MagicMock(return_value=runner)
-    ascend_config = SimpleNamespace(
-        eplb_config=SimpleNamespace(
-            dynamic_eplb=False,
-            expert_map_path=None,
-            num_redundant_experts=0,
-        )
-    )
 
     with (
         patch.object(patch_fused_moe, "_original_FusedMoE", original_factory),
-        patch.object(patch_fused_moe, "get_ascend_config", return_value=ascend_config),
     ):
         patch_fused_moe._ascend_FusedMoE(
             num_experts=8,
@@ -161,18 +107,10 @@ def test_factory_keeps_vision_bias_in_ascend_router_only():
     runner = SimpleNamespace(router=router)
     original_factory = MagicMock(return_value=runner)
     router_factory = MagicMock(return_value=router)
-    ascend_config = SimpleNamespace(
-        eplb_config=SimpleNamespace(
-            dynamic_eplb=False,
-            expert_map_path=None,
-            num_redundant_experts=0,
-        )
-    )
 
     with (
         patch.object(patch_fused_moe, "_original_FusedMoE", original_factory),
         patch.object(patch_fused_moe, "create_ascend_fused_moe_router", router_factory),
-        patch.object(patch_fused_moe, "get_ascend_config", return_value=ascend_config),
     ):
         patch_fused_moe._ascend_FusedMoE(
             num_experts=8,
@@ -193,17 +131,9 @@ def test_factory_composes_custom_routed_experts_with_ascend_contract():
     router = _Router()
     runner = SimpleNamespace(router=router)
     original_factory = MagicMock(return_value=runner)
-    ascend_config = SimpleNamespace(
-        eplb_config=SimpleNamespace(
-            dynamic_eplb=False,
-            expert_map_path=None,
-            num_redundant_experts=0,
-        )
-    )
 
     with (
         patch.object(patch_fused_moe, "_original_FusedMoE", original_factory),
-        patch.object(patch_fused_moe, "get_ascend_config", return_value=ascend_config),
     ):
         result = patch_fused_moe._ascend_FusedMoE(
             num_experts=8,
@@ -235,15 +165,8 @@ def test_factory_maps_legacy_scaling_to_the_active_native_contract(scale_output,
     router = _Router()
     router_factory = MagicMock(return_value=router)
     original_factory = MagicMock(return_value=SimpleNamespace(router=router))
-    config = SimpleNamespace(
-        eplb_config=SimpleNamespace(dynamic_eplb=False, expert_map_path=None, num_redundant_experts=0)
-    )
     with (
         patch.object(patch_fused_moe, "_original_FusedMoE", original_factory),
-        patch.object(patch_fused_moe, "get_ascend_config", return_value=config),
-        patch.object(
-            patch_fused_moe, "get_current_vllm_config", return_value=SimpleNamespace(use_v2_model_runner=True)
-        ),
         patch.object(patch_fused_moe, "create_ascend_fused_moe_router", router_factory),
     ):
         patch_fused_moe._ascend_FusedMoE(
@@ -275,9 +198,6 @@ def test_factory_preserves_native_scaling_modes(mode_name):
     router = _Router()
     router_factory = MagicMock(return_value=router)
     original_factory = MagicMock(return_value=SimpleNamespace(router=router))
-    config = SimpleNamespace(
-        eplb_config=SimpleNamespace(dynamic_eplb=False, expert_map_path=None, num_redundant_experts=0)
-    )
     main = not patch_fused_moe.vllm_version_is("0.34.0")
     scaling: dict[str, Any] = {}
     if main:
@@ -288,10 +208,6 @@ def test_factory_preserves_native_scaling_modes(mode_name):
         scaling["apply_routed_scale_to_output"] = mode_name != "ROUTER"
     with (
         patch.object(patch_fused_moe, "_original_FusedMoE", original_factory),
-        patch.object(patch_fused_moe, "get_ascend_config", return_value=config),
-        patch.object(
-            patch_fused_moe, "get_current_vllm_config", return_value=SimpleNamespace(use_v2_model_runner=True)
-        ),
         patch.object(patch_fused_moe, "create_ascend_fused_moe_router", router_factory),
     ):
         patch_fused_moe._ascend_FusedMoE(num_experts=8, top_k=2, routed_scaling_factor=2.0, **scaling)
@@ -322,16 +238,12 @@ def test_ling_routed_experts_use_swiglustep_only_for_a_configured_limit():
         topk_group=1,
         expert_swiglu_limit_list=[0, 4.0],
     )
-    ascend_config = SimpleNamespace(
-        eplb_config=SimpleNamespace(dynamic_eplb=False, expert_map_path=None, num_redundant_experts=0)
-    )
     original_factory = MagicMock(return_value=SimpleNamespace(router=_Router()))
 
     with (
         patch.object(ling, "GateLinear"),
         patch.object(ling, "BailingMoeV3MLP"),
         patch.object(patch_fused_moe, "_original_FusedMoE", original_factory),
-        patch.object(patch_fused_moe, "get_ascend_config", return_value=ascend_config),
         patch.object(patch_fused_moe, "create_ascend_fused_moe_router", return_value=_Router()),
     ):
         activations = []

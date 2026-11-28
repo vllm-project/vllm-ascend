@@ -118,7 +118,6 @@ class KimiRecoverSSMWorker:
 def k3_runtime_v2(monkeypatch: pytest.MonkeyPatch) -> None:
     """Run the reused Kimi smoke scenarios with Model Runner V2."""
 
-    monkeypatch.setenv("VLLM_USE_V2_MODEL_RUNNER", "1")
     monkeypatch.setenv("VLLM_WORKER_MULTIPROC_METHOD", "spawn")
     monkeypatch.setenv("HCCL_OP_EXPANSION_MODE", "AIV")
     monkeypatch.setenv("HCCL_BUFFSIZE", "512")

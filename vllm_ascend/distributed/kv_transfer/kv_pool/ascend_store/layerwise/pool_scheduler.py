@@ -16,7 +16,9 @@ from vllm_ascend.distributed.kv_transfer.kv_pool.ascend_store.layerwise.layerwis
 )
 from vllm_ascend.distributed.kv_transfer.kv_pool.ascend_store.metadata import (
     LoadSpec,
+    ReqMeta,
     RequestTracker,
+    StoreLookupResult,
     block_hash_to_str,
     get_block_hashes,
     get_sharded_mamba_group_ids,
@@ -78,6 +80,20 @@ class LayerwiseKVPoolScheduler(BaseKVPoolScheduler):
     def _process_hit_without_alloc(self, store_skip_tokens: int) -> bool:
         return store_skip_tokens > 0
 
+    def _build_req_meta(
+        self,
+        request_tracker: RequestTracker,
+        block_hashes: list[BlockHash],
+        load_spec: LoadSpec | None,
+        prompt_token_ids: list[int],
+        skip_save: bool | None,
+    ) -> ReqMeta | None:
+        request_tuple = self._unfinished_requests.get(request_tracker.req_id)
+        if self.layerwise_offload and request_tuple is not None:
+            # Verifier rows have no corresponding input KV or state to snapshot.
+            request_tracker.token_len = min(request_tracker.token_len, len(request_tuple[0].all_token_ids))
+        return super()._build_req_meta(request_tracker, block_hashes, load_spec, prompt_token_ids, skip_save)
+
     def get_running_target_token_len(self, request: Request, num_new_tokens: int) -> int:
         target_token_len = request.num_computed_tokens + num_new_tokens
         if self.layerwise_offload:
@@ -99,7 +115,7 @@ class LayerwiseKVPoolScheduler(BaseKVPoolScheduler):
             self.use_block_key_layerwise and kv_cache_groups is not None and len(kv_cache_groups) > 1
         )
 
-    def _lookup_external_hit_tokens(self, request: Request, num_computed_tokens: int) -> int | None:
+    def _lookup_external_hit_tokens(self, request: Request, num_computed_tokens: int) -> StoreLookupResult | None:
         prompt_token_len = len(request.prompt_token_ids)
         if self.use_block_key_layerwise:
             token_len = self._floor_to_cache_transfer_granularity(prompt_token_len)
@@ -107,10 +123,10 @@ class LayerwiseKVPoolScheduler(BaseKVPoolScheduler):
                 token_len = self._floor_to_cache_transfer_granularity(max(prompt_token_len - 1, 0))
             if token_len < self.cache_transfer_granularity:
                 return None
-            return self._get_block_key_layerwise_hit_tokens(request, token_len, num_computed_tokens)
+            return StoreLookupResult(self._get_block_key_layerwise_hit_tokens(request, token_len, num_computed_tokens))
 
         if self.use_layerwise_transfer:
-            return self._get_layerwise_hit_tokens(request, prompt_token_len, num_computed_tokens)
+            return StoreLookupResult(self._get_layerwise_hit_tokens(request, prompt_token_len, num_computed_tokens))
 
         raise RuntimeError(f"Unsupported layerwise data plane: {self.layerwise_data_plane!r}")
 
@@ -121,6 +137,13 @@ class LayerwiseKVPoolScheduler(BaseKVPoolScheduler):
         num_computed_tokens: int,
     ) -> int:
         self._get_or_create_request_tracker(request.request_id)
+        if self.layerwise_offload and (
+            self.num_mamba_speculative_blocks_by_group or len(self.cacheable_group_ids) != len(self.original_block_size)
+        ):
+            # Resolve a saved checkpoint at the replayable endpoint before looking up the prefix.
+            token_len = min(token_len, self._floor_to_cache_transfer_granularity(request.num_tokens - 1))
+            if token_len <= 0:
+                return 0
         if self.cache_coordinator is not None:
             if self.use_eagle:
                 final_block_start = (request.num_tokens - 1) // self.lcm_block_size * self.lcm_block_size
@@ -309,7 +332,7 @@ class LayerwiseKVPoolScheduler(BaseKVPoolScheduler):
         if draft_keys is not None and group_id in self.dspark_draft_only_group_ids:
             # Draft-only groups have no ordinary layerwise target object.
             return draft_keys.make_hit_check_keys(block_hash_hex)
-        if group_id in self.sharded_mamba_group_ids or group_id in self.num_speculative_blocks_by_group:
+        if group_id in self.sharded_mamba_group_ids or group_id in self.num_mamba_speculative_blocks_by_group:
             head_or_tp_ranks = self.tp_size
         else:
             head_or_tp_ranks = self.tp_size // self.put_step

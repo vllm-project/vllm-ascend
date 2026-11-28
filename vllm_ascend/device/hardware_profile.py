@@ -36,6 +36,9 @@ from types import MappingProxyType
 from vllm_ascend.device.device_config import get_device_config
 from vllm_ascend.device.hardware import AscendDeviceType
 
+DCP_HEAD_SCATTER_SINGLE_ROW = 0
+DCP_HEAD_SCATTER_MULTI_ROW = 1
+
 
 class HardwareCapability(Enum):
     """Binary contracts consumed by shared business logic.
@@ -119,11 +122,6 @@ class HardwareCapability(Enum):
     # Prepare and reuse the fixed CANN GBSA schedule across supported M3 decode layers.
     # Callers must also check block size, dtype, and uniform query length.
     MINIMAX_M3_GBSA_METADATA_REUSE = auto()
-    # CANN MsaIndexScore ``return_choice`` TopK fusion, which replaces the
-    # separate TopK and sort post-processing. Callers must also check that the
-    # installed CANN package provides the fused output and that the index score
-    # runs with ``pool_block_size=128``.
-    MINIMAX_M3_INDEX_SCORE_TOPK_FUSION = auto()
     # Select the compatibility grouped-top-k router used by the fused-MoE path.
     FUSED_MOE_COMPATIBILITY = auto()
     # Use npu_rotary_mul with adjacent pairs (rotary_mode="interleave").
@@ -255,6 +253,7 @@ class FlashAttentionNpu3Model(Enum):
 
     MINIMAX = auto()
     STEP5 = auto()
+    QWEN = auto()
 
 
 class CPUBindingMode(Enum):
@@ -328,6 +327,9 @@ class HardwareProfile:
 
     # Operator availability alone does not determine which model route to use.
     flash_attn_npu_3_models: frozenset[FlashAttentionNpu3Model] = frozenset()
+
+    # A5 streams rank contributions across eight output rows per tile.
+    dcp_head_scatter_mode: int = DCP_HEAD_SCATTER_SINGLE_ROW
 
     # NZ mm/addmm is supported, but batched matmul rejects NZ weights.
     requires_2d_nz_linear_input: bool = False
@@ -419,12 +421,7 @@ _HARDWARE_PROFILES: Mapping[AscendDeviceType, HardwareProfile] = MappingProxyTyp
     {
         AscendDeviceType.A2: HardwareProfile(
             _device_type=AscendDeviceType.A2,
-            flash_attn_npu_3_models=frozenset({FlashAttentionNpu3Model.MINIMAX}),
-            # A2 BF16 native verification produced NaNs with 8 drafts (9 queries).
-            # Nine is the first observed failing configuration, not a proven
-            # universal kernel bound. Remove after native recurrent parity is
-            # validated on the replacement operator stack.
-            gdn_fixed_spec_recurrent_fallback_min_query_len=9,
+            flash_attn_npu_3_models=frozenset({FlashAttentionNpu3Model.MINIMAX, FlashAttentionNpu3Model.QWEN}),
             attention_backend_family=AttentionBackendFamily.STANDARD,
             cpu_binding_mode=CPUBindingMode.TOPO_AFFINITY,
             default_worker_cls=_DEFAULT_WORKER_CLS,
@@ -452,7 +449,7 @@ _HARDWARE_PROFILES: Mapping[AscendDeviceType, HardwareProfile] = MappingProxyTyp
         ),
         AscendDeviceType.A3: HardwareProfile(
             _device_type=AscendDeviceType.A3,
-            flash_attn_npu_3_models=frozenset({FlashAttentionNpu3Model.MINIMAX}),
+            flash_attn_npu_3_models=frozenset({FlashAttentionNpu3Model.MINIMAX, FlashAttentionNpu3Model.QWEN}),
             attention_backend_family=AttentionBackendFamily.STANDARD,
             cpu_binding_mode=CPUBindingMode.GLOBAL_SLICE,
             default_worker_cls=_DEFAULT_WORKER_CLS,
@@ -503,6 +500,7 @@ _HARDWARE_PROFILES: Mapping[AscendDeviceType, HardwareProfile] = MappingProxyTyp
             # once CANN supports Step5 and the integration is validated.
             flash_attn_npu_3_models=frozenset({FlashAttentionNpu3Model.STEP5}),
             qwen4exp_hc_gate_mix_row_block_min_rows=1024,
+            dcp_head_scatter_mode=DCP_HEAD_SCATTER_MULTI_ROW,
             requires_2d_nz_linear_input=True,
             minimax_m3_gbsa_bf16_softmax_precision=1,
             attention_backend_family=AttentionBackendFamily.STANDARD,
@@ -546,7 +544,6 @@ _HARDWARE_PROFILES: Mapping[AscendDeviceType, HardwareProfile] = MappingProxyTyp
                     HardwareCapability.MLA_FLASH,
                     HardwareCapability.MLAPO_NATIVE_WEIGHTS,
                     HardwareCapability.MINIMAX_M3_GBSA_METADATA_REUSE,
-                    HardwareCapability.MINIMAX_M3_INDEX_SCORE_TOPK_FUSION,
                     HardwareCapability.MOE_DISPATCH_EXTRA_ARGS,
                     HardwareCapability.MOE_DISPATCH_SHARED_EXPERT_ARGS,
                     HardwareCapability.MM_REDUCE_SCATTER_AI_CPU_INFERENCE,

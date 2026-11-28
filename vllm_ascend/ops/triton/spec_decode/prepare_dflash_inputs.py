@@ -204,12 +204,13 @@ def _prepare_dflash_inputs_kernel(
 
     input_id = tl.where(query_off == 0, bonus_token, parallel_drafting_token_id)
 
+    # Keep the full query block for drafting, but only in-range positions own KV slots.
     q_slot = _dflash_local_slot(
         query_pos,
         block_table_ptr,
         block_table_stride,
         req_idx,
-        query_mask,
+        query_mask & (query_pos < max_model_len),
         block_size,
         block_stride,
         cp_rank,

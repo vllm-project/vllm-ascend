@@ -18,7 +18,7 @@
 import unittest
 from dataclasses import replace
 from types import SimpleNamespace
-from unittest.mock import MagicMock
+from unittest.mock import MagicMock, patch
 
 import tests.ut.distributed.ascend_store._mock_deps  # noqa: F401, E402
 
@@ -39,6 +39,7 @@ from vllm_ascend.distributed.kv_transfer.kv_pool.ascend_store.metadata import (
     ReqMeta,
     RequestTracker,
     get_block_hashes,
+    get_engine_transfer_config,
     get_group_block_size,
     get_group_cache_family,
     get_sharded_mamba_group_ids,
@@ -50,6 +51,22 @@ from vllm_ascend.distributed.kv_transfer.kv_pool.ascend_store.metadata import (
 
 
 class TestCacheLayoutHelpers(unittest.TestCase):
+    def test_engine_transfer_config_uses_planner_then_core_context_then_child(self):
+        child, engine, planner = object(), object(), object()
+        config = SimpleNamespace(kv_transfer_config=child)
+        current = SimpleNamespace(kv_transfer_config=engine)
+        with patch(
+            "vllm_ascend.distributed.kv_transfer.kv_pool.ascend_store.metadata.get_current_vllm_config_or_none",
+            return_value=current,
+        ):
+            self.assertIs(get_engine_transfer_config(config, SimpleNamespace(kv_transfer_config=planner)), planner)
+            self.assertIs(get_engine_transfer_config(config, SimpleNamespace()), engine)
+        with patch(
+            "vllm_ascend.distributed.kv_transfer.kv_pool.ascend_store.metadata.get_current_vllm_config_or_none",
+            return_value=None,
+        ):
+            self.assertIs(get_engine_transfer_config(config, None), child)
+
     def test_sharded_mamba_groups_exclude_tp_replicas(self):
         mamba_spec = MambaSpec(
             shapes=((4,),),
@@ -501,7 +518,7 @@ class TestRequestTracker(unittest.TestCase):
             req_id="r1",
             token_len=32,
             allocated_block_ids_by_group=[[1, 2], [3, 4], [5, 6]],
-            num_speculative_blocks_by_group={1: 1, 2: 0},
+            num_mamba_speculative_blocks_by_group={1: 1, 2: 0},
             block_sizes=[16] * 3,
         )
 
@@ -521,7 +538,7 @@ class TestRequestTracker(unittest.TestCase):
                 [0, 7, 8, 9, 10],
                 [0, 11, 12, 13, 14],
             ],
-            num_speculative_blocks_by_group={1: 3, 2: 3, 3: 3},
+            num_mamba_speculative_blocks_by_group={1: 3, 2: 3, 3: 3},
             block_sizes=[16] * 4,
         )
 
@@ -541,7 +558,7 @@ class TestRequestTracker(unittest.TestCase):
                 [0, 0, 0, 0, 0, 0, 0, 13, 14, 15, 16],
                 [0, 0, 0, 0, 0, 0, 0, 17, 18, 19, 20],
             ],
-            num_speculative_blocks_by_group={1: 3, 2: 3, 3: 3},
+            num_mamba_speculative_blocks_by_group={1: 3, 2: 3, 3: 3},
             block_sizes=[16] * 4,
         )
 

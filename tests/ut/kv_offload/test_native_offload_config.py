@@ -39,7 +39,6 @@ def test_offloading_chunk_matches_effective_npu_block_size() -> None:
         ),
         kv_events_config=None,
         speculative_config=None,
-        use_v2_model_runner=False,
     )
     refresh_block_size(vllm_config)
     assert cache_config.block_size == NPU_BLOCK_SIZE

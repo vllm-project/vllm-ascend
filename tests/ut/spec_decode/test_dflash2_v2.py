@@ -23,6 +23,7 @@ from dataclasses import make_dataclass
 from types import SimpleNamespace
 from unittest.mock import MagicMock, patch
 
+import numpy as np
 import pytest
 import torch
 from vllm.config.compilation import CompilationMode, CUDAGraphMode
@@ -64,6 +65,24 @@ else:
 REQUIRES_LILICORR = pytest.mark.skipif(not HAS_LILICORR, reason="LiLiCorr is not supported by the paired vLLM version")
 
 
+@pytest.mark.parametrize(
+    ("a3_sinks", "expected"),
+    [([True], (False, True)), ([False], (True, False)), ([True, False], (False, False))],
+)
+def test_mla_provider_requires_uniform_draft_groups(monkeypatch, a3_sinks, expected):
+    from vllm_ascend.attention.mla_v1 import AscendMLABackend
+
+    monkeypatch.setattr(AscendMLABackend, "get_impl_cls", staticmethod(lambda: object))
+    groups = [
+        SimpleNamespace(
+            backend=AscendMLABackend,
+            get_metadata_builder=MagicMock(return_value=SimpleNamespace(flashmla_state=object(), use_a3_mla_sink=sink)),
+        )
+        for sink in a3_sinks
+    ]
+    assert dflash_module.detect_draft_attn_architecture([groups]) == ("MLA", *expected)
+
+
 @pytest.mark.parametrize("causal", [False, True])
 @pytest.mark.parametrize("fail", [False, True])
 def test_v2_loader_selects_flash_attn_and_restores_target_context(monkeypatch, causal, fail):
@@ -91,7 +110,6 @@ def test_v2_loader_selects_flash_attn_and_restores_target_context(monkeypatch, c
     )
     # Keep the real V2 loader's config cloning, causality and model-tag scopes.
     fields = {
-        "use_v2_model_runner": True,
         "model_config": target_config,
         "speculative_config": spec,
         "attention_config": AttentionConfig(),
@@ -189,6 +207,7 @@ def test_v2_flash_attn_uses_exact_lengths_after_rejection_and_reordering(monkeyp
     )
     speculator = AscendDFlash2Speculator.__new__(AscendDFlash2Speculator)
     speculator.arange_np = torch.arange(5, dtype=torch.int32).numpy()
+    speculator.attn_architecture, speculator.use_flashmla, _ = dflash_module.detect_draft_attn_architecture([[group]])
     # vLLM main exposes max_model_len as a read-only view of vllm_config.
     speculator.vllm_config = SimpleNamespace(model_config=SimpleNamespace(max_model_len=1024))
     speculator.draft_max_seq_len = 1024
@@ -281,43 +300,86 @@ def test_patch_swaps_upstream_selector_walk_kernel():
     assert upstream._selector_walk_kernel is _selector_walk_kernel_ascend
 
 
-def _spec_config(arch: str) -> SimpleNamespace:
-    return SimpleNamespace(
-        method="dflash",
-        enforce_eager=None,
-        use_dspark=lambda: False,
-        use_dflash=lambda: True,
-        draft_model_config=SimpleNamespace(architectures=[arch]),
+def test_registered_dflash2_model_resolves_dflash2_speculator_config_and_routes(monkeypatch, tmp_path):
+    """Registered Ascend DFlash2 model resolves DFlash2SpeculatorConfig and routes to AscendDFlash2Speculator."""
+    from vllm import ModelRegistry
+    from vllm import envs as vllm_envs
+    from vllm.config import SpeculativeConfig
+    from vllm.model_executor.models import registry as registry_mod
+    from vllm.v1.worker.gpu.spec_decode.dflash2.config import DFlash2SpeculatorConfig
+
+    from vllm_ascend.models import register_model
+    from vllm_ascend.models.qwen3_dflash2 import DFlash2Qwen3ForCausalLM
+
+    monkeypatch.setattr(ModelRegistry, "models", ModelRegistry.models.copy())
+    monkeypatch.setenv("VLLM_CACHE_ROOT", str(tmp_path))
+    monkeypatch.setattr(vllm_envs, "VLLM_CACHE_ROOT", str(tmp_path), raising=False)
+    monkeypatch.setattr(registry_mod, "_run_in_subprocess", lambda fn: fn())
+    if hasattr(registry_mod._try_load_model_cls, "cache_clear"):
+        registry_mod._try_load_model_cls.cache_clear()
+
+    register_model()
+
+    model_config = SimpleNamespace(
+        model="/test/DFlash2DraftModel",
+        model_impl="vllm",
+        convert_type="none",
+        runner_type="generate",
+        trust_remote_code=False,
+        _get_transformers_backend_cls=lambda: "TransformersForCausalLM",
+    )
+    resolved_cls, resolved_arch = ModelRegistry.resolve_model_cls(["DFlash2DraftModel"], model_config)
+    assert resolved_arch == "DFlash2DraftModel"
+    assert resolved_cls is DFlash2Qwen3ForCausalLM
+
+    model_info, inspected_arch = ModelRegistry.inspect_model_cls(["DFlash2DraftModel"], model_config)
+    assert inspected_arch == "DFlash2DraftModel"
+
+    assert model_info.speculator_config_class == "vllm.v1.worker.gpu.spec_decode.dflash2.config.DFlash2SpeculatorConfig"
+
+    speculative = object.__new__(SpeculativeConfig)
+    speculative.method = "dflash"
+    speculative.custom_method = None
+    speculative.enforce_eager = False
+    speculative.draft_model_config = SimpleNamespace(
+        speculator_config_class=model_info.speculator_config_class,
+        architectures=["DFlash2DraftModel"],
+    )
+    assert type(speculative.speculator_config) is DFlash2SpeculatorConfig
+    assert speculative.speculator_config.supports_watermarking is False
+    assert speculative.speculator_config.speculator_class == (
+        "vllm.v1.worker.gpu.spec_decode.dflash2.speculator.DFlash2Speculator"
     )
 
-
-def test_init_speculator_routes_dflash2_draft_model():
-    cfg = SimpleNamespace(speculative_config=_spec_config("DFlash2DraftModel"))
-    with patch("vllm_ascend.worker.v2.spec_decode.dflash2.speculator.AscendDFlash2Speculator") as d2:
-        assert init_speculator(cfg, torch.device("cpu")) is d2.return_value
-        d2.assert_called_once_with(cfg, torch.device("cpu"))
-
-    cfg = SimpleNamespace(speculative_config=_spec_config("DFlashDraftModel"))
+    cfg = SimpleNamespace(speculative_config=speculative)
     with (
         patch("vllm_ascend.worker.v2.spec_decode.dflash2.speculator.AscendDFlash2Speculator") as d2,
         patch("vllm_ascend.worker.v2.spec_decode.dflash.speculator.AscendDFlashSpeculator") as d1,
     ):
-        assert init_speculator(cfg, torch.device("cpu")) is d1.return_value
-        d2.assert_not_called()
+        assert init_speculator(cfg, torch.device("cpu")) is d2.return_value
+        d2.assert_called_once_with(cfg, torch.device("cpu"))
+        d1.assert_not_called()
 
 
 @pytest.mark.parametrize(
-    "architecture,speculator_path",
+    "upstream_class,speculator_path",
     [
-        ("DFlash2DraftModel", "dflash2.speculator.AscendDFlash2Speculator"),
-        pytest.param("LiLiCorrDraftModel", "lilicorr.speculator.AscendLiLiCorrSpeculator", marks=REQUIRES_LILICORR),
+        (
+            "vllm.v1.worker.gpu.spec_decode.dflash2.speculator.DFlash2Speculator",
+            "dflash2.speculator.AscendDFlash2Speculator",
+        ),
+        pytest.param(
+            "vllm.v1.worker.gpu.spec_decode.lilicorr.speculator.LiLiCorrSpeculator",
+            "lilicorr.speculator.AscendLiLiCorrSpeculator",
+            marks=REQUIRES_LILICORR,
+        ),
     ],
 )
-def test_eager_speculator_keeps_target_compilation_and_graph_config(architecture, speculator_path):
-    spec = _spec_config(architecture)
-    spec.enforce_eager = True
+def test_eager_speculator_keeps_target_compilation_and_graph_config(upstream_class, speculator_path):
     config = SimpleNamespace(
-        speculative_config=spec,
+        speculative_config=SimpleNamespace(
+            method="dflash", enforce_eager=True, speculator_config=SimpleNamespace(speculator_class=upstream_class)
+        ),
         compilation_config=SimpleNamespace(
             mode=CompilationMode.VLLM_COMPILE, cudagraph_mode=CUDAGraphMode.FULL_DECODE_ONLY
         ),
@@ -330,18 +392,6 @@ def test_eager_speculator_keeps_target_compilation_and_graph_config(architecture
     assert draft_config.compilation_config.mode == CompilationMode.NONE
     assert config.compilation_config.mode == CompilationMode.VLLM_COMPILE
     assert config.compilation_config.cudagraph_mode == CUDAGraphMode.FULL_DECODE_ONLY
-
-
-@REQUIRES_LILICORR
-def test_init_speculator_routes_lilicorr_before_dflash2():
-    cfg = SimpleNamespace(speculative_config=_spec_config("LiLiCorrDraftModel"))
-    with (
-        patch("vllm_ascend.worker.v2.spec_decode.lilicorr.speculator.AscendLiLiCorrSpeculator") as lilicorr,
-        patch("vllm_ascend.worker.v2.spec_decode.dflash2.speculator.AscendDFlash2Speculator") as dflash2,
-    ):
-        assert init_speculator(cfg, torch.device("cpu")) is lilicorr.return_value
-        lilicorr.assert_called_once_with(cfg, torch.device("cpu"))
-        dflash2.assert_not_called()
 
 
 @REQUIRES_LILICORR
@@ -518,9 +568,12 @@ def test_greedy_walk_contract_reference():
 @pytest.mark.parametrize("num_reqs_padded", [2, 4])
 def test_dflash_metadata_spans_padded_queries(monkeypatch, num_reqs_padded):
     speculator = AscendDFlashSpeculator.__new__(AscendDFlashSpeculator)
+    speculator.attn_architecture = "GQA"
+    speculator.use_flashmla = False
     speculator.attn_backends = {name: AscendAttentionBackend for name in ("draft.0", "draft.1")}
     speculator.input_batch = SimpleNamespace(num_reqs=2)
     speculator.num_query_per_req = 3
+    speculator.arange_np = np.arange(2 * 3 + 1, dtype=np.int32)
     speculator._group_causal = {0: False}
     seq_lens = torch.tensor([10, 20])
     metadata = {
@@ -533,12 +586,13 @@ def test_dflash_metadata_spans_padded_queries(monkeypatch, num_reqs_padded):
         )
         for name in ("draft.0", "draft.1")
     }
-    speculator._build_uniform_attn_metadata = MagicMock(return_value=metadata)
+    build = MagicMock(return_value=metadata)
+    monkeypatch.setattr(DFlashSpeculator, "_build_attn_metadata", build)
     monkeypatch.setattr(dflash_module, "build_attn_metadata_wrapper", nullcontext)
 
     assert speculator.build_draft_attn_metadatas(num_reqs_padded, seq_lens) == [metadata]
 
-    kwargs = speculator._build_uniform_attn_metadata.call_args.kwargs
+    kwargs = build.call_args.kwargs
     assert kwargs["num_reqs"] == 2
     assert kwargs["seq_lens_cpu_upper_bound"] is seq_lens
     assert kwargs["causal"] is speculator._group_causal
@@ -561,6 +615,8 @@ def test_dflash_dummy_metadata_fits_draft_graph(monkeypatch, num_reqs_padded):
 
     speculator = AscendDFlashSpeculator.__new__(AscendDFlashSpeculator)
     speculator.attn_backends = {"draft": AscendAttentionBackend}
+    speculator.attn_architecture = "GQA"
+    speculator.use_flashmla = False
     speculator.input_batch = SimpleNamespace(num_reqs=8)
     speculator.num_query_per_req = 8
     speculator._group_causal = {0: False}
@@ -655,6 +711,8 @@ def test_dflash_attention_uses_only_draft_layers_and_int32_slots(monkeypatch, ac
     speculator.max_num_tokens = 8
     speculator.draft_kv_cache_group_ids = [0, 1]
     speculator.draft_attn_layer_names = active_layers
+    speculator.attn_groups = [[SimpleNamespace(backend=AscendAttentionBackend, layer_names=["draft.0", "draft.1"])]]
+    speculator.model = SimpleNamespace()
     speculator.vllm_config = SimpleNamespace(cache_config=SimpleNamespace(block_size=128))
     backends = {name: object() for name in ("draft.0", "draft.1")}
     layers = {name: SimpleNamespace(get_attn_backend=lambda name=name: backends[name]) for name in backends}

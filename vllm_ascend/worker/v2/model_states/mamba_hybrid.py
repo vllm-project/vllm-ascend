@@ -39,17 +39,44 @@ from vllm.v1.worker.mamba_utils import (
 )
 from vllm.v1.worker.utils import AttentionGroup
 
+from vllm_ascend.attention.gdn_attn_builder import AscendGDNAttentionMetadataBuilder
 from vllm_ascend.utils import model_uses_kimi_kda, model_uses_kpool_indexer
 from vllm_ascend.worker.v2.attn_utils import build_attn_metadata
 from vllm_ascend.worker.v2.input_batch import AscendInputBatch
 from vllm_ascend.worker.v2.model_states.default import AscendModelState
 
 if TYPE_CHECKING:
+    from vllm.v1.kv_cache_interface import KVCacheSpec
+
+    from vllm_ascend.ops.triton.mamba.graph_state import GDNGraphStateUpdater
     from vllm_ascend.worker.v2.pcp_manager import AscendPCPAttentionContext
 
 # Copy block size used by the upstream fused mamba kernels.
 _COPY_BLOCK_SIZE = 1024
 _PREPROCESS_BLOCK_SIZE = 256
+
+
+def _partition_gdn_groups(attn_groups: list[list[AttentionGroup]]):
+    """Keep one full build per compatible GDN spec and preserve cache-group indices."""
+    leaders: dict[tuple[KVCacheSpec, type[AscendGDNAttentionMetadataBuilder]], tuple[str, GDNGraphStateUpdater]] = {}
+    followers = []
+    build_groups = []
+    for group_id, groups in enumerate(attn_groups):
+        retained = []
+        for group in groups:
+            builder = group.get_metadata_builder(0)
+            # These hooks run inside the common build and need the complete layer map.
+            if callable(getattr(builder, "prepare_step_metadata", None)):
+                return attn_groups, []
+            if isinstance(builder, AscendGDNAttentionMetadataBuilder) and builder.supports_update_block_table:
+                key = (group.kv_cache_spec, type(builder))
+                if key in leaders:
+                    followers.append((group_id, group, builder, leaders[key]))
+                    continue
+                leaders[key] = (group.layer_names[0], builder.graph_state_updater)
+            retained.append(group)
+        build_groups.append(retained)
+    return build_groups, followers
 
 
 @dataclass
@@ -93,6 +120,16 @@ class AscendMambaHybridModelState(MambaHybridModelState, AscendModelState):
         self._layerwise_mamba_copy: _LayerwiseMambaCopyState | None = None
         self._layer_state_ranges: dict[str, tuple[int, int]] | None = None
         self._pending_bulk_copy: tuple[MambaSpecDecodeGPUContext, int, torch.Tensor] | None = None
+
+    def _get_aligned_state_index_views(self, indices: torch.Tensor) -> tuple[torch.Tensor, ...]:
+        # The gather refreshes values in fixed storage. Reuse only row views;
+        # a request-count, stride or backing-storage change rebuilds them.
+        key = (indices.data_ptr(), indices.shape, indices.stride(), indices.dtype, indices.device)
+        cached = getattr(self, "_aligned_state_index_views", None)
+        if cached is None or cached[0] != key:
+            cached = (key, indices.unbind(0))
+            self._aligned_state_index_views = cached
+        return cached[1]
 
     def _get_layer_state_ranges(self, kv_cache_config: KVCacheConfig) -> dict[str, tuple[int, int]]:
         """Map every mamba layer name to its (start, end) range in the
@@ -343,6 +380,7 @@ class AscendMambaHybridModelState(MambaHybridModelState, AscendModelState):
         ubatch_idx: int = 0,
         model_specific_attn_metadata: ModelSpecificAttnMetadata | None = None,
     ) -> dict[str, Any]:
+        self._check_finegrained_tp_idle_graph_step(cudagraph_mode)
         # Match the upstream Mamba contract without enabling DBO.
         assert ubatch_idx == 0, "DBO is not supported on Ascend"
         pcp_manager = getattr(self, "pcp_manager", None)
@@ -501,6 +539,21 @@ class AscendMambaHybridModelState(MambaHybridModelState, AscendModelState):
                     num_decode_draft_tokens_np[input_batch.num_reqs :] = padded_query_lens - 1
             num_decode_draft_tokens_cpu = torch.from_numpy(num_decode_draft_tokens_np)
 
+        if self._align_mode:
+            mamba_group_ids, _ = self._get_mamba_group_info(kv_cache_config)
+            aligned_builders = [
+                (group_idx, builder)
+                for group_idx, group_id in enumerate(mamba_group_ids)
+                for group in attn_groups[group_id]
+                if hasattr(builder := group.get_metadata_builder(0), "mamba_aligned_state_indices")
+            ]
+            if aligned_builders:
+                ctx = self._ensure_align_ctx(kv_cache_config, mamba_group_ids, block_tables)
+                indices = ctx.compute_aligned_state_indices(input_batch.seq_lens, num_reqs)
+                index_views = self._get_aligned_state_index_views(indices)
+                for group_idx, builder in aligned_builders:
+                    builder.mamba_aligned_state_indices = index_views[group_idx]
+
         model_specific_metadata = MambaHybridAttnMetadata(
             is_prefilling=is_prefilling,
             num_accepted_tokens=num_accepted_tokens,
@@ -511,8 +564,11 @@ class AscendMambaHybridModelState(MambaHybridModelState, AscendModelState):
         max_query_len = getattr(input_batch, "max_query_len", None)
         if max_query_len is None:
             max_query_len = input_batch.num_scheduled_tokens.max().item()
-        return build_attn_metadata(
-            attn_groups=attn_groups,
+        build_groups, followers = attn_groups, []
+        if pcp_context is None and len(attn_groups) > 1:
+            build_groups, followers = _partition_gdn_groups(attn_groups)
+        metadata = build_attn_metadata(
+            attn_groups=build_groups,
             num_reqs=num_reqs,
             num_actual_reqs=input_batch.num_reqs,
             num_tokens=num_tokens,
@@ -536,3 +592,16 @@ class AscendMambaHybridModelState(MambaHybridModelState, AscendModelState):
             full_graph_mode=cudagraph_mode == CUDAGraphMode.FULL,
             for_cudagraph_capture=for_capture,
         )
+        graph_writes: dict[GDNGraphStateUpdater, list] = {}
+        for group_id, group, builder, (first_layer, updater) in followers:
+            updated = builder.update_block_table(
+                metadata[first_layer],
+                group.map_to_kernel_block_table(block_tables[group_id]),
+                slot_mappings[group_id],
+                graph_state_updates=graph_writes.setdefault(updater, []),
+            )
+            for layer_name in group.layer_names:
+                metadata[layer_name] = updated
+        for updater, writes in graph_writes.items():
+            updater.apply(writes)
+        return metadata

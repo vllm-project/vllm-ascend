@@ -10,13 +10,16 @@ attention is the independent reference; this is not NPU or ACL graph evidence.
 import ast
 import runpy
 import sys
-from contextlib import contextmanager
+from collections.abc import Mapping
+from contextlib import contextmanager, nullcontext
 from dataclasses import dataclass
 from enum import Enum
 from pathlib import Path
 from types import MethodType, ModuleType, SimpleNamespace
+from typing import Any
 from unittest.mock import Mock
 
+import numpy as np
 import pytest
 import torch
 
@@ -141,10 +144,16 @@ def runtime(monkeypatch):
         return module
 
     def load(name, relative):
-        return install(name, **runpy.run_path(str(ROOT / relative)))
+        return install(name, **runpy.run_path(str(ROOT / relative), run_name=name))
 
     install("vllm_ascend")
-    utils = install("vllm_ascend.attention.utils", get_flashmla_ops=lambda: None, get_quant_flashmla_ops=lambda: None)
+    utils = install(
+        "vllm_ascend.attention.utils",
+        get_flashmla_ops=lambda: None,
+        get_quant_flashmla_ops=lambda: None,
+        np=np,
+        torch=torch,
+    )
     tree = ast.parse((ROOT / "vllm_ascend/attention/utils.py").read_text(encoding="utf-8"))
     constant = next(
         node
@@ -152,7 +161,13 @@ def runtime(monkeypatch):
         if isinstance(node, ast.Assign)
         and any(isinstance(target, ast.Name) and target.id == "MLA_FLASH_SUPPORTED_Q_HEADS" for target in node.targets)
     )
-    exec(compile(ast.Module(body=[constant], type_ignores=[]), "<heads>", "exec"), utils.__dict__)
+    prefill_flags = next(
+        node for node in tree.body if isinstance(node, ast.FunctionDef) and node.name == "apply_prefill_as_decode_mask"
+    )
+    exec(
+        compile(ast.Module(body=[constant, prefill_flags], type_ignores=[]), "<attention-utils>", "exec"),
+        utils.__dict__,
+    )
     install("vllm.v1.attention.backends.utils", get_dcp_local_seq_lens=local_lengths)
     install(
         "vllm.forward_context", BatchDescriptor=object, get_forward_context=Mock(), is_forward_context_available=Mock()
@@ -163,6 +178,7 @@ def runtime(monkeypatch):
         return values, -values
 
     install("vllm_ascend.ops.rotary_embedding", get_cos_and_sin_mla=rope)
+    load("vllm_ascend.attention.a3_mla_sink", "vllm_ascend/attention/a3_mla_sink.py")
     api = load("vllm_ascend.attention.flashmla", "vllm_ascend/attention/flashmla.py")
 
     def schedule(lengths, *, cu_seqlens_q, seqused_q, **kwargs):
@@ -195,13 +211,17 @@ def runtime(monkeypatch):
         query_capacity=None,
         max_requests=8,
         pcp_size=1,
+        sliding_window=None,
+        a3_adapter=None,
     ):
         impl = SimpleNamespace(
+            a3_mla_adapter=a3_adapter,
             num_heads=heads,
             scale=0.125,
             dtype=dtype,
             use_mla_rope=use_rope,
             use_quant_flashmla=quantized,
+            sliding_window=sliding_window,
             dcp_size=size,
             dcp_rank=rank,
             pcp_group=SimpleNamespace(world_size=pcp_size),
@@ -292,6 +312,185 @@ def runtime(monkeypatch):
         recorded_streams=recorded_streams,
         current_query_storages=current_query_storages,
     )
+
+
+def dspark_metadata_class(parent):
+    """Execute the production dispatch hooks without importing the NPU runtime."""
+    path = ROOT / "vllm_ascend/worker/v2/spec_decode/dspark/speculator.py"
+    tree = ast.parse(path.read_text(encoding="utf-8"))
+    cls = next(n for n in tree.body if isinstance(n, ast.ClassDef) and n.name == "AscendDSparkSpeculator")
+    cls.bases = [ast.Name(id="Parent", ctx=ast.Load())]
+    cls.body = [
+        n
+        for n in cls.body
+        if isinstance(n, ast.FunctionDef)
+        and n.name
+        in {
+            "_build_uniform_attn_metadata",
+            "_build_attn_metadata",
+            "build_draft_attn_metadatas",
+            "_update_draft_attn_metadata",
+        }
+    ]
+    scope = dict(
+        Parent=parent,
+        AscendAttentionBackend=type("AscendAttentionBackend", (), {}),
+        torch=torch,
+        np=np,
+        Any=Any,
+        Mapping=Mapping,
+        BatchExecutionDescriptor=SimpleNamespace,
+        CUDAGraphMode=SimpleNamespace(FULL="full"),
+        AscendAttentionState=SimpleNamespace(ChunkedPrefill="chunked"),
+        build_attn_metadata_wrapper=nullcontext,
+        build_attn_metadata_factory=lambda *args, **kwargs: nullcontext(),
+    )
+    exec(compile(ast.fix_missing_locations(ast.Module(body=[cls], type_ignores=[])), str(path), "exec"), scope)
+    return scope[cls.name]
+
+
+def configure_dspark_metadata(spec, provider):
+    spec.use_flashmla = provider == "a5"
+    spec.use_a3_mla_sink = provider == "a3"
+    spec.attn_architecture = "MLA"
+    spec.attn_backends = {"draft.0": type("AscendMLABackend", (), {})}
+    spec.num_query_per_req = 3
+    spec.arange_np = np.arange(9, dtype=np.int32)
+    spec.input_batch = SimpleNamespace(num_reqs=2)
+    spec._group_causal = True
+    spec.input_buffers = SimpleNamespace(positions=torch.arange(6))
+    spec.attn_vllm_config = SimpleNamespace(parallel_config=object())
+    spec._prepare_draft_dcp_metadata_inputs = lambda *args: (None, torch.zeros(2, dtype=torch.bool))
+
+
+@pytest.mark.parametrize("provider", ["a3", "a5", "fia"])
+def test_graph_refresh_uses_uniform_entry(provider):
+    class Parent:
+        def _build_uniform_attn_metadata(self, **kwargs):
+            return kwargs
+
+    spec = dspark_metadata_class(Parent)()
+    configure_dspark_metadata(spec, provider)
+    lengths = torch.tensor([23, 11])
+    (args,) = spec.build_draft_attn_metadatas(2, lengths)
+    assert args["seq_lens_cpu_upper_bound"] is lengths
+    assert args["num_query_per_req"] == args["step"] == 3
+    assert args["batch_desc"].cg_mode == "full"
+
+
+@pytest.mark.parametrize("size", [1, 8])
+def test_dspark_full_graph_refreshes_schedules_once_per_round(runtime, monkeypatch, size):
+    """Regression: target + propose + replay previously submitted six schedules."""
+    if size > 1 and not hasattr(runtime.api.FlashMLACurrent, "allocate_split"):
+        pytest.skip("requires split-query DCP support")
+    a3 = sys.modules["vllm_ascend.attention.a3_mla_sink"]
+    calls = []
+    monkeypatch.setattr(a3.A3MLAAdapter, "_check_lengths", lambda self, lengths, cu, used: lengths.numel())
+
+    def metadata_op(*args, **kwargs):
+        calls.append(args[6])
+        return torch.cat((args[6], kwargs["cu_seqlens_q"])).to(torch.uint8)
+
+    adapter = a3.A3MLAAdapter(a3.A3MLAConfig(8, 0.125, dtype=torch.float16), None, metadata_op)
+    builder = runtime.builder(size=size, a3_adapter=adapter)
+    inputs = common([17, 9], [3, 3], tokens=6)
+    flash = builder.build(inputs, 2, 6, False, retain_for_graph=True)
+    assert (flash.current is not None) == (size > 1)
+    pointers = addresses(flash)
+    draft = SimpleNamespace(
+        layer_names=["draft.0"], get_metadata_builder=lambda _: SimpleNamespace(use_a3_mla_sink=True)
+    )
+    target = SimpleNamespace(layer_names=["target.0"], get_metadata_builder=lambda _: object())
+    groups = [[target], [draft]]
+    filtered = runtime.api.target_attn_groups_without_draft_flashmla(groups, {"draft.0"})
+    assert filtered == [[target], []] and groups == [[target], [draft]]
+
+    class Parent:
+        arange_np: np.ndarray
+
+        def _build_uniform_attn_metadata(self, batch_desc, num_reqs, num_query_per_req, **kwargs):
+            return self._build_attn_metadata(
+                num_reqs=num_reqs,
+                batch_desc=batch_desc,
+                query_start_loc_np=self.arange_np[: num_reqs + 1] * num_query_per_req,
+                **kwargs,
+            )
+
+        def _build_attn_metadata(self, **kwargs):
+            current = builder.build(inputs, 2, 6, False)
+            return {"draft.0": SimpleNamespace(external_flashmla=current)}
+
+    spec = dspark_metadata_class(Parent)()
+    configure_dspark_metadata(spec, "a3")
+    for lengths in ([23, 11], [7, 0], [31, 13]):
+        inputs.seq_lens.copy_(torch.tensor(lengths, dtype=torch.int32))
+        runtime.metadata_op.reset_mock()
+        calls.clear()
+        # Target phase: retained groups must not invoke the draft builder.
+        for bucket in filtered:
+            for group in bucket:
+                assert group is target
+        # Upstream propose's unused FULL-graph metadata result is skipped.
+        assert (
+            spec._build_uniform_attn_metadata(
+                num_reqs=2,
+                batch_desc=SimpleNamespace(cg_mode="full", num_reqs=2, num_tokens=6),
+                num_query_per_req=3,
+                seq_lens_cpu_upper_bound=torch.tensor(lengths),
+                step=3,
+                causal=True,
+            )
+            is None
+        )
+        assert not calls and runtime.metadata_op.call_count == 0
+        # The real graph-manager entry refreshes the captured buffers once.
+        result = spec.build_draft_attn_metadatas(2, torch.tensor(lengths))[0]["draft.0"].external_flashmla
+        assert result is flash and addresses(result) == pointers
+        assert len(calls) == (2 if size > 1 else 1)
+        expected = (
+            [sum(t % size == 0 for t in range(max(0, length - 3))) for length in lengths] if size > 1 else list(lengths)
+        )
+        assert result.cache_lens[:2].tolist() == expected
+        assert result.used_q[:2].tolist() == [3, 3 if lengths[1] else 0]
+
+
+@pytest.mark.parametrize("provider", ["a3", "a5", "fia"])
+@pytest.mark.parametrize("mode", ["full", "piecewise", "eager"])
+def test_dspark_metadata_dispatch_preserves_non_full_and_fia(provider, mode):
+    calls = []
+
+    class Parent:
+        def _build_uniform_attn_metadata(self, batch_desc, **kwargs):
+            calls.append(kwargs)
+            return {"draft.0": SimpleNamespace(external_flashmla=None, decode=SimpleNamespace())}
+
+    spec = dspark_metadata_class(Parent)()
+    configure_dspark_metadata(spec, provider)
+    result = spec._build_uniform_attn_metadata(
+        batch_desc=SimpleNamespace(cg_mode=mode, num_reqs=2, num_tokens=6),
+        num_reqs=2,
+        num_query_per_req=3,
+        seq_lens_cpu_upper_bound=torch.tensor([17, 9]),
+        step=3,
+    )
+    skipped = mode == "full" and provider == "a3"
+    assert (result is None) == skipped
+    assert len(calls) == int(not skipped)
+    if calls:
+        assert calls[0]["num_query_per_req"] == calls[0]["step"] == 3
+
+
+def test_target_group_filter_keeps_other_backends_mixed_and_empty_groups(runtime):
+    def group(names, **builder_flags):
+        return SimpleNamespace(layer_names=names, get_metadata_builder=lambda _: SimpleNamespace(**builder_flags))
+
+    fia = group(["draft.fia"])
+    a5 = group(["draft.a5"], use_a3_mla_sink=False, flashmla_state=object())
+    mixed = group(["target", "draft.mixed"], use_a3_mla_sink=True)
+    empty = group([], use_a3_mla_sink=True)
+    groups = [[fia, a5, mixed], [], [empty]]
+    draft_names = {"draft.fia", "draft.a5", "draft.mixed"}
+    assert runtime.api.target_attn_groups_without_draft_flashmla(groups, draft_names) is groups
 
 
 def common(lengths, queries, *, tokens=None, causal=True):
@@ -450,6 +649,45 @@ def test_single_token_replay_keeps_configured_split_and_buffer_addresses(runtime
     assert addresses(flash) == pointers
     assert (flash.current is not None) is speculative
     torch.testing.assert_close(flash.schedule, torch.cat((flash.cache_lens, flash.cu, flash.used_q)))
+
+
+@pytest.mark.parametrize("pcp_size", [1, 2])
+@pytest.mark.parametrize("masked", [False, True])
+def test_history_mask_reaches_exchange_before_current_merge(runtime, monkeypatch, pcp_size, masked):
+    impl = runtime.bind(
+        SimpleNamespace(
+            dcp_size=2,
+            tp_group=SimpleNamespace(world_size=1, unique_name="tp"),
+            dcp_group=SimpleNamespace(unique_name="dcp"),
+            pcp_group=SimpleNamespace(world_size=pcp_size, unique_name="pcp"),
+        )
+    )
+    history = torch.full((2, 2, 512), 18.0)
+    lse = torch.zeros(2, 2, 1)
+    mask = torch.tensor([True, False]) if masked else None
+
+    def exchange(output, stats, size, dim, group, pcp=None, *, defer_combine, output_mask=None):
+        assert defer_combine and dim == 1
+        assert (size, group, pcp) == ((1, "tp", "pcp") if pcp_size == 2 else (2, "dcp", None))
+        output, stats = output[:, : 2 // size], stats[:, : 2 // size]
+        if output_mask is not None:
+            stats = stats.masked_fill(output_mask[:, None, None], -torch.inf)
+        # The other source rank supplies valid history for both tokens.
+        return [output, torch.full_like(output, 8.0)], [stats, torch.zeros_like(stats)]
+
+    fused = Mock(side_effect=exchange)
+    monkeypatch.setattr(torch.ops.vllm, "dcp_a2a_fused", fused, raising=False)
+    recv = impl._merge_dcp_attention_output(history, lse, defer_combine=True, output_mask=mask)
+    current = torch.full_like(recv[0][0], 4.0)
+    actual = combine_outputs(
+        recv, 512, scatter_dim=1, local_output=current, local_lse=torch.zeros_like(current[..., :1])
+    )
+    # Equal finite LSEs give each valid contribution equal weight.
+    expected = torch.full_like(actual, 10.0)
+    if masked:
+        expected[0] = 6.0
+    torch.testing.assert_close(actual, expected)
+    assert fused.call_args.kwargs.get("output_mask") is mask
 
 
 def test_current_pages_cross_physical_blocks_and_eager_does_not_retain(runtime):
@@ -668,6 +906,83 @@ def test_forward_matches_dense_with_strided_history_and_empty_ranks(
     runtime.scope["torch_npu"]._npu_fused_infer_attention_score_get_max_workspace.assert_not_called()
 
 
+@pytest.mark.parametrize("causal", [False, True])
+def test_a3_dcp_defers_normalization_to_matching_consumers(runtime, monkeypatch, causal):
+    if not hasattr(runtime.api.FlashMLACurrent, "allocate_split"):
+        pytest.skip("requires split-query DCP support")
+    a3 = sys.modules["vllm_ascend.attention.a3_mla_sink"]
+    monkeypatch.setattr(a3.A3MLAAdapter, "_check_lengths", lambda self, lengths, cu, used: lengths.numel())
+
+    def provider(q, *args, **kwargs):
+        tokens, heads = q.shape[:2]
+        return torch.ones(tokens, heads, 512, dtype=q.dtype), torch.zeros(heads, tokens), None, None
+
+    adapter = a3.A3MLAAdapter(
+        a3.A3MLAConfig(8, 0.125, dtype=torch.bfloat16),
+        provider,
+        lambda *args, **kwargs: torch.zeros(32, dtype=torch.uint8),
+    )
+    flash = runtime.builder(size=2, dtype=torch.bfloat16, a3_adapter=adapter).build(
+        common([1, 3], [1, 1], tokens=4, causal=causal),
+        2,
+        2,
+        False,
+    )
+    cache = adapter.allocate_cache(8, device="cpu")
+    exchanged = object()
+
+    def exchange(output, lse, *args, output_mask, **kwargs):
+        assert output_mask is flash.output_mask
+        assert torch.all(output == 1) and torch.all(lse == 0)
+        assert kwargs["defer_combine"]
+        return exchanged
+
+    def combine(recv, *args, local_output, local_lse, local_output_mask=None, **kwargs):
+        assert recv is exchanged
+        if causal:
+            assert local_output_mask is flash.current.output_mask
+            assert torch.all(local_output == 1) and torch.all(local_lse == 0)
+            assert local_output_mask.tolist() == [False, False, True, True]
+        else:
+            assert local_output is local_lse is local_output_mask is None
+        return torch.zeros(4, 8, 512, dtype=torch.bfloat16)
+
+    def forbidden_mask(*args, **kwargs):
+        pytest.fail("DCP attention must not launch standalone output normalization")
+
+    monkeypatch.setattr(torch.Tensor, "masked_fill_", forbidden_mask)
+    monkeypatch.setattr(torch.ops.vllm, "dcp_a2a_fused", exchange, raising=False)
+    runtime.scope["fused_dcp_lse_combine"] = combine
+    impl = runtime.bind(
+        SimpleNamespace(
+            kv_lora_rank=512,
+            qk_rope_head_dim=64,
+            num_kv_heads=1,
+            num_heads=8,
+            dcp_size=2,
+            dcp_rank=0,
+            dcp_group=SimpleNamespace(unique_name="cpu-dcp"),
+            use_a3_mla_sink=True,
+            use_quant_flashmla=False,
+            _v_up_proj_batch_major=lambda value: value,
+        )
+    )
+    assert flash.query is None
+    if causal:
+        assert flash.current.query is None
+    preprocessed = SimpleNamespace(
+        ql_nope=torch.zeros(4, 16, 512, dtype=torch.bfloat16),
+        q_pe=torch.zeros(4, 16, 64, dtype=torch.bfloat16),
+        dequant_scale_q_nope=None,
+        current_k_nope=torch.zeros(4, 1, 512, dtype=torch.bfloat16),
+        current_k_pe=torch.zeros(4, 1, 64, dtype=torch.bfloat16),
+    )
+    runtime.forward(impl, preprocessed, cache, SimpleNamespace(external_flashmla=flash, decode=SimpleNamespace()))
+    assert not any(event[0] == "query_copy" for event in runtime.events)
+    if causal:
+        assert any(t is flash.current.output_mask and stream.name == "attn" for t, stream in runtime.recorded_streams)
+
+
 def test_dcp_rejects_legacy_graph_parameter_updates():
     update = load_method(
         "vllm_ascend/attention/context_parallel/mla_cp.py", "AscendMlaDCPImpl", "update_graph_params", {}
@@ -780,6 +1095,33 @@ def test_causal_target_and_noncausal_draft_do_not_share_schedules(runtime):
     assert target.cache_lens[0] == 1 and draft.cache_lens[0] == 2
 
 
+def test_band_replay_refreshes_valid_query_prefix_and_write_slots(runtime):
+    builder = runtime.builder(size=1, heads=12, dtype=torch.bfloat16, sliding_window=1024)
+    inputs = common([1028], [8])
+    inputs.slot_mapping = torch.arange(1020, 1028)
+    flash = builder.build(inputs, 1, 8, False, retain_for_graph=True)
+    original_addresses = addresses(flash)
+    assert flash.used_q[0] == 8
+
+    # Same captured rows, but only four queries now belong to the draft.
+    with builder.limit_query_positions(torch.tensor([1024]), 1028):
+        replay = builder.build(inputs, 1, 8, False)
+    assert replay is flash and addresses(replay) == original_addresses
+    assert replay.cu[:2].tolist() == [0, 8]
+    assert replay.used_q[0] == 4 and replay.cache_lens[0] == 1028
+    assert replay.slots.tolist() == [1020, 1021, 1022, 1023, -1, -1, -1, -1]
+    assert replay.attn_mask is builder.attn_mask
+    metadata_kwargs = runtime.metadata_op.call_args.kwargs
+    assert (metadata_kwargs["mask_mode"], metadata_kwargs["win_left"], metadata_kwargs["win_right"]) == (4, 1023, 0)
+
+    # A fully clipped request keeps its physical rows; the next ordinary build recovers all eight.
+    with builder.limit_query_positions(torch.tensor([1029]), 1028):
+        empty = builder.build(inputs, 1, 8, False)
+        assert empty.cu[:2].tolist() == [0, 8] and not empty.used_q.any()
+        assert not empty.cache_lens.any() and (empty.slots == -1).all()
+    assert builder.build(inputs, 1, 8, False).used_q[0] == 8
+
+
 @pytest.mark.parametrize("causal", [False, True])
 def test_quant_metadata_uses_request_capacity_not_padded_batch(runtime, causal):
     builder = runtime.builder(quantized=True, query_capacity=4, max_requests=64)
@@ -788,7 +1130,8 @@ def test_quant_metadata_uses_request_capacity_not_padded_batch(runtime, causal):
     flash = builder.build(inputs, 64, 256, False, retain_for_graph=True)
     original_addresses = addresses(flash)
     torch.testing.assert_close(inputs.query_start_loc_cpu, cu_before)
-    assert flash.used_q.tolist() == [4] * 64 + [0]
+    assert flash.used_q[:64].tolist() == [4] * 64
+    assert not flash.used_q[64:].any()
     for call in runtime.metadata_op.call_args_list:
         assert call.kwargs["max_seqlen_q"] == 4
         assert call.kwargs["max_seqlen_kv"] in (4, 140000)
@@ -797,12 +1140,53 @@ def test_quant_metadata_uses_request_capacity_not_padded_batch(runtime, causal):
     shorter = common([3] * 64, [3] * 64, tokens=256, causal=causal)
     replay = builder.build(shorter, 64, 192, False)
     assert replay is flash and addresses(replay) == original_addresses
-    assert replay.used_q.tolist() == [3] * 64 + [0]
+    assert replay.used_q[:64].tolist() == [3] * 64
+    assert not replay.used_q[64:].any()
+    assert replay.cu[-1].item() == 256 and replay.cu.diff().max().item() == 4
     if causal:
         assert not replay.cache_lens.any()
         assert replay.current is not None
     empty = builder.build(common([0] * 64, [0] * 64, tokens=256, causal=causal), 64, 0, False)
     assert empty is flash and not empty.used_q.any() and not empty.cache_lens.any()
+    assert empty.cu[-1].item() == 256 and empty.cu.diff().max().item() == 4
+
+
+@pytest.mark.parametrize("dcp_size", [1, 8])
+def test_quant_metadata_splits_dspark7_graph_padding_on_replay(runtime, dcp_size):
+    builder = runtime.builder(size=dcp_size, quantized=True, query_capacity=8)
+    full = builder.build(common([32] * 4, [7] * 4, tokens=28), 4, 28, False, retain_for_graph=True)
+    original_addresses = addresses(full)
+
+    inputs = common([32], [7], tokens=28)
+    inputs.slot_mapping.copy_(torch.arange(25, 32))
+    sparse = builder.build(inputs, 1, 7, False)
+
+    assert sparse is full and addresses(sparse) == original_addresses
+    assert sparse.cu[:5].tolist() == [0, 7, 14, 21, 28]
+    assert torch.all(sparse.cu[4:] == 28)
+    assert sparse.used_q[0].item() == 7 and not sparse.used_q[1:].any()
+    assert not sparse.cache_lens[1:].any()
+    torch.testing.assert_close(sparse.slots[:7], inputs.slot_mapping)
+    assert torch.all(sparse.slots[7:] == -1)
+    torch.testing.assert_close(sparse.schedule, torch.cat((sparse.cache_lens, sparse.cu, sparse.used_q)))
+    if sparse.current is not None:
+        assert torch.all(sparse.current.slots[7:] == -1)
+        torch.testing.assert_close(sparse.current.schedule, torch.cat((sparse.used_q, sparse.cu, sparse.used_q)))
+
+
+def test_quant_metadata_respects_batch_limit_when_reserving_padding_rows(runtime, monkeypatch):
+    builder = runtime.builder(size=1, quantized=True, query_capacity=2, max_requests=8)
+    monkeypatch.setitem(builder.build.__func__.__globals__, "FLASHMLA_MAX_BATCH_SIZE", 9)
+    captured = builder.build(common([32] * 8, [2] * 8), 8, 16, False, retain_for_graph=True)
+    assert captured.used_q.numel() == 9
+
+    replay = builder.build(common([32] * 4, [2] * 4, tokens=16), 4, 8, False)
+    assert replay is captured and replay.cu.diff().max().item() == 2
+    replay_cu = replay.cu.clone()
+
+    with pytest.raises(ValueError, match="metadata batch limit"):
+        builder.build(common([32] * 8, [1] * 8, tokens=16), 8, 8, False)
+    torch.testing.assert_close(captured.cu, replay_cu)
 
 
 def test_quant_metadata_excludes_mixed_prefill_and_padding(runtime):
@@ -867,3 +1251,73 @@ def test_quant_adapter_class_constraints_and_native_abi(runtime, heads):
     assert output.shape == (heads, 2, 512) and lse.shape == (heads, 2)
     assert operation.call_args.args[6] == 1
     assert operation.call_args.kwargs["return_softmax_lse"]
+
+
+@pytest.mark.parametrize("kind", ["HISTORY", "CURRENT"])
+@pytest.mark.parametrize("split", [False, True])
+@pytest.mark.parametrize("masked", [False, True])
+def test_dcp_query_layout_is_independent_of_output_mask(runtime, kind, split, masked):
+    flash = runtime.builder(size=8, heads=8).build(common([3], [2]), 1, 2, False)
+    batch = flash.current if kind == "CURRENT" else flash
+    q_nope, q_pe = torch.ones_like(batch.query[..., :512]), torch.full_like(batch.query[..., 512:], 2)
+    if split:
+        batch.query = None
+    else:
+        batch.query.fill_(float("nan"))
+    mask = torch.tensor([False, True]) if masked else None
+    batch.output_mask = mask
+    batch.adapter = Mock()
+    batch.adapter.attention.return_value = (q_nope.transpose(0, 1), q_nope[..., 0].T)
+    impl = runtime.bind(SimpleNamespace(use_quant_flashmla=False, kv_lora_rank=512, qk_rope_head_dim=64))
+    k_nope, k_pe = q_nope[:, :1], q_pe[:, :1]
+    if kind == "CURRENT":
+        impl._prepare_dcp_flashmla_current(flash, q_nope, q_pe, k_nope, k_pe)
+    impl._run_dcp_flashmla_attention(flash, q_nope, q_pe, k_nope, k_pe, attention_kind=runtime.scope["CPKVScope"][kind])
+    call = batch.adapter.attention.call_args
+    query = call.args[0]
+    if split:
+        assert isinstance(query, tuple) and query[0] is q_nope and query[1] is q_pe
+    else:
+        assert query is batch.query
+        torch.testing.assert_close(query, torch.cat((q_nope, q_pe), dim=-1))
+    assert call.kwargs.get("output_mask") is mask
+
+
+def test_split_current_allocates_component_pages_without_fused_query(runtime):
+    adapter = Mock()
+    prepared = adapter.for_capacity.return_value
+    prepared.allocate_cache.return_value = (torch.empty(5, 128, 1, 512), torch.empty(5, 128, 1, 64))
+    current = runtime.api.FlashMLACurrent.allocate_split(adapter, 129, 3, 2, torch.device("cpu"))
+    adapter.for_capacity.assert_called_once_with(2, 129)
+    prepared.allocate_cache.assert_called_once_with(5, device=torch.device("cpu"))
+    assert current.query is None and current.schedule is None
+    assert current.cache is prepared.allocate_cache.return_value
+    assert current.block_table.shape == (3, 2)
+    assert current.slots.tolist() == [-1] * 129
+    assert current.output_mask.shape == (129,) and current.output_mask.dtype == torch.bool
+
+
+def test_split_current_and_history_masks_refresh_independently(runtime, monkeypatch):
+    builder = runtime.builder(size=8, rank=1, heads=8)
+    allocate = builder._allocate
+
+    def allocate_split(tokens, rows, columns, causal):
+        batch = allocate(tokens, rows, columns, causal)
+        # Supply the split buffer contract without installing an attention provider.
+        batch.query = None
+        batch.output_mask = torch.empty(tokens, dtype=torch.bool)
+        batch.current.output_mask = torch.empty(tokens, dtype=torch.bool)
+        batch.current.schedule = None
+        return batch
+
+    monkeypatch.setattr(builder, "_allocate", allocate_split)
+    batch = builder.build(common([1, 5], [1, 1], tokens=3), 2, 2, False, retain_for_graph=True)
+    assert batch.output_mask.tolist() == [True, False, True]
+    assert batch.current.output_mask.tolist() == [False, False, True]
+    assert batch.current.slots.tolist() == [0, 128, -1]
+    schedule = batch.current.schedule
+    replay = builder.build(common([5, 0], [1, 1], tokens=3), 2, 2, False)
+    assert replay is batch and replay.current.schedule is schedule
+    assert replay.output_mask.tolist() == [False, True, True]
+    assert replay.current.output_mask.tolist() == [False, True, True]
+    assert replay.current.slots.tolist() == [0, -1, -1]

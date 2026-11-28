@@ -57,7 +57,7 @@ Configure through `--additional-config` (or `LLM(..., additional_config=...)`):
 
 **Bootstrap overwrite:** At process start the effective config is built from **built-in defaults + `additional_config.runtime_config` overlay** (and dump-dir seed). Any pre-existing file at `runtime_config_path` is **ignored for that first load** and then **rewritten** when the worker leader persists (`(overwrote)` in the startup log). Put detectors / dump quotas you need at boot into the `runtime_config` overlay (or edit the JSON **after** start with hot-reload). Pre-seeding only the on-disk JSON without an overlay will look like “my file was wiped” — that is expected.
 
-See [Additional Configuration](../configuration/additional_config.md#runtime_guard) and the full [runtime_config reference](../configuration/runtime_config.md).
+See [Additional Configuration](../configuration/additional_config.md#runtime_guard) and the full [runtime_config.md](../configuration/runtime_config.md).
 
 ## Architecture (summary)
 

@@ -42,6 +42,7 @@
 /.github/workflows/scripts/test_ai_review.py @wangxiyuan
 /.github/agent-review/L1/ @wangxiyuan
 /.github/agent-review/L2/ci/ @zhangxinyuehfad
+/.github/agent-review/L2/doc-quality/ @liqian79
 /.github/agent-review/L2/release-note/ @wangxiyuan
 /.github/agent-review/L2/speculative-decoding/ @drslark @slippersss
 
@@ -55,14 +56,15 @@
 /docs/source/user_guide/feature_guide/rl.md @Ronald1995 @Liccol
 /docs/source/user_guide/feature_guide/batch_invariance.md @Ronald1995
 /docs/source/community/contributors.md @wangxiyuan
+/docs/source/developer_guide/Design_Documents/quantization.md @kunpengW-code @lcfenglinwan
+/docs/source/user_guide/feature_guide/quantization.md @kunpengW-code @lcfenglinwan
 /.readthedocs.yaml @liqian79 @MrZ20
 /README* @liqian79
-/mkdocs.yml @MrZ20
+/mkdocs.yml @MrZ20 @liqian79
 
 # examples
 /examples/ @MrZ20
 /examples/rl/ @Ronald1995 @Liccol
-/examples/eplb/ @freyfwt
 /examples/rfork/ @yangsonglin13
 
 # c++ source code
@@ -92,6 +94,7 @@
 
 # compilation
 /vllm_ascend/compilation @yiz-liu @wxsIcey
+/vllm_ascend/compilation/static_kernel.py @yiz-liu
 
 # device / device_allocator
 /vllm_ascend/device @zzzzwwjj @Tflowers-0129
@@ -125,7 +128,7 @@
 /vllm_ascend/ops/triton/msa @CXY-Katrina
 /vllm_ascend/ops/triton/kda/recoverssm.py @drslark @chenxi-hh
 /vllm_ascend/ops/triton/docs/kda_recoverssm.md @drslark @chenxi-hh
-/vllm_ascend/ops/fused_moe @weijinqian0 @Tflowers-0129 @ZT-AIA @zhenwenqi2024 @linfeng-yuan
+/vllm_ascend/ops/fused_moe @weijinqian0 @Tflowers-0129 @ZT-AIA @zhenwenqi2024 @linfeng-yuan @freyfwt
 /vllm_ascend/ops/fused_moe/eplb.py @freyfwt
 /vllm_ascend/ops/fused_moe/force_eplb.py @freyfwt
 /vllm_ascend/ops/kimi_kda.py @Dawn952 @drslark @chenxi-hh @hust17yixuan
@@ -148,6 +151,7 @@
 
 # kv cache
 /vllm_ascend/core/kv_cache_config_builder.py @yzeyu71 @Angazenn @zhenwenqi2024 @@yiz-liu
+/vllm_ascend/core/kv_cache_dtype_handlers.py @kunpengW-code @lcfenglinwan
 /vllm_ascend/core/kv_cache_interface.py @yzeyu71 @Angazenn @zhenwenqi2024 @yiz-liu
 /vllm_ascend/core/kv_cache_placement.py @yzeyu71 @Angazenn @zhenwenqi2024 @yiz-liu
 /vllm_ascend/core/single_type_kv_cache_manager.py @yzeyu71 @Angazenn @zhenwenqi2024 @yiz-liu
@@ -162,7 +166,6 @@
 /vllm_ascend/envs.py @ningjingbengxiaohai @zzzzwwjj
 /vllm_ascend/logger.py @wangxiyuan
 /vllm_ascend/meta_registration.py @ZT-AIA
-/vllm_ascend/mrv2_utils.py @yzeyu71
 /vllm_ascend/platform.py @wxsIcey @Tflowers-0129 @Ronald1995 @zhenwenqi2024 @pisceskkk @zzzzwwjj @linfeng-yuan
 # /vllm_ascend/profiling_config.py
 /vllm_ascend/utils.py @wxsIcey @Ronald1995 @Tflowers-0129 @zhenwenqi2024 @pisceskkk @zzzzwwjj @linfeng-yuan
@@ -172,6 +175,9 @@
 /vllm_ascend/patch/platform/patch_replayssm_config.py @drslark @chenxi-hh
 /vllm_ascend/patch/worker/patch_kda_recoverssm.py @drslark @chenxi-hh
 /vllm_ascend/patch/platform/patch_eplb.py @freyfwt
+/vllm_ascend/patch/platform/patch_fused_moe.py @freyfwt
+/vllm_ascend/patch/worker/patch_fused_moe.py @freyfwt
+/vllm_ascend/patch/worker/patch_routed_experts_capture.py @freyfwt
 /vllm_ascend/patch/worker/patch_kimi_k25.py @Dawn952 @hust17yixuan
 /vllm_ascend/patch/worker/patch_minimax_m2.py @CXY-Katrina
 /vllm_ascend/patch/worker/patch_step3p5.py @earthmanylf
@@ -234,7 +240,7 @@
 /vllm_ascend/xlite @lulina @SijieFu
 
 # release_notes
-/release_notes/ @wangxiyuan @zhenwenqi2024 @weijinqian0
+/release_notes/ @wangxiyuan @zhenwenqi2024 @weijinqian0 @freyfwt
 
 # recipes
 /recipes/ @SOMEONEUNSEEN
@@ -252,13 +258,8 @@
 /tests/ut/models/test_kimi_recoverssm_metadata.py @drslark @chenxi-hh
 /tests/ut/ops/test_kimi_kda_recoverssm.py @drslark @chenxi-hh
 
-# EPLB
-/vllm_ascend/eplb @freyfwt
-
 # observability
 # /vllm_ascend/observability
-/vllm_ascend/observability/ms_metrics/config/eplb_metrics.yaml @freyfwt
-/vllm_ascend/observability/ms_metrics/handlers/eplb.py @freyfwt
 
 # profiler
 # /vllm_ascend/profiler

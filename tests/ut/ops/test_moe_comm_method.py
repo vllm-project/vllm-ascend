@@ -475,7 +475,6 @@ class TestMoECommMethod(TestBase):
                 ),
                 activation="silu",
                 need_trans=False,
-                dynamic_eplb=False,
                 quant=MoEQuantParams(),
             ),
             quant_method=quant_method,

@@ -82,9 +82,9 @@ RUN export PIP_EXTRA_INDEX_URL="${ASCEND_INDEX_URL}" && \
     python3 -m pip cache purge
 
 # ===== Install FLA and flash_attn_npu =====
-ARG FLA_VERSION="26.10.0+feature"
+ARG FLA_VERSION="26.11.0.dev20261126"
 ARG FLASH_ATTN_NPU_VERSION="0.5.0"
-ARG MOONCAKE_VERSION="0.3.14"
+ARG MOONCAKE_VERSION="0.3.14.post1"
 RUN source /usr/local/Ascend/ascend-toolkit/set_env.sh && \
     source /usr/local/Ascend/nnal/atb/set_env.sh && \
     source /usr/local/Ascend/cann/set_env.sh && \
@@ -93,7 +93,7 @@ RUN source /usr/local/Ascend/ascend-toolkit/set_env.sh && \
     TORCH_DEVICE_BACKEND_AUTOLOAD=0 mfcli kernel install --soc-version A3 --install-for-all && \
     # Install flash-linear-attention-npu from the Ascend mirror
     python3 -m pip install --force-reinstall --no-deps \
-        "flash-linear-attention-npu-a3===${FLA_VERSION}" && \
+        "flash-linear-attention-npu-a3==${FLA_VERSION}" && \
     # Keep the CANN env and --no-build-isolation: the isolated build env lacks torch/torch_npu.
     FLASH_ATTN_BUILD_NPU=910 python3 -m pip install --no-build-isolation "flash_attn_npu==${FLASH_ATTN_NPU_VERSION}" && \
     # Install mooncake-transfer-engine-npu from the Ascend nightly mirror

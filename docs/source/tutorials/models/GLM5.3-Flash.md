@@ -38,10 +38,10 @@ the [speculative decoding guide](../../user_guide/feature_guide/speculative_deco
 for details.
 
 All deployment examples on this page use Model Runner V2 with
-`VLLM_USE_V2_MODEL_RUNNER=1`. Every PD Prefill role uses PCP8 with TP1;
-Decode keeps PCP1.
+`VLLM_USE_V2_MODEL_RUNNER=1`. A3 PD deployments use TP1/PCP16 on Prefill.
+The 950DT and A2 PD deployments use TP1/PCP8 on Prefill. Decode uses PCP1.
 
-The [A3 series PD example](#glm53-flash-5-3-a3) use Prefill Context
+The [A3 series PD example](#glm53-flash-5-3-a3) uses Prefill Context
 Parallelism (PCP) and BF16 SSM state (`--mamba-ssm-cache-dtype bfloat16`).
 
 With native KDA, enabling PCP shards the KDA attention heads and recurrent
@@ -801,6 +801,10 @@ For DP>1, the launcher executes the role script without filtering.
     communication; the socket interface variables still select the host
     network. Adjust the resource configuration for other network topologies.
 
+    Both role scripts enable the fastokens tokenizer backend. Ensure the
+    version of `fastokens` required by your vLLM build is installed in
+    each container.
+
     Start Decode first, then Prefill. In another terminal, check `<DECODE_NODE_IP>:9900/health` through port `9915` and `<PREFILL_NODE_IP>:9081/health` with `curl --fail`. Start the proxy only after all 17 endpoints respond successfully; inspect each launcher terminal if a rank fails to initialize.
 
     ##### A3 series Serving Scripts and Startup Commands
@@ -824,6 +828,7 @@ For DP>1, the launcher executes the role script without filtering.
     MODEL_PATH="<YOUR_MODEL_PATH>"
 
     export HCCL_IF_IP="$LOCAL_IP"
+    export VLLM_USE_FASTOKENS=1
     export GLOO_SOCKET_IFNAME="$NIC_NAME"
     export TP_SOCKET_IFNAME="$NIC_NAME"
     export HCCL_SOCKET_IFNAME="$NIC_NAME"
@@ -848,11 +853,11 @@ For DP>1, the launcher executes the role script without filtering.
       --prefill-context-parallel-size "$8" \
       --enable-expert-parallel \
       --enable-eplb \
-      --eplb-config '{"window_size":300,"step_interval":300,"num_redundant_experts":16,"use_async":true,"policy":"stair","communicator":"hixl"}' \
+      --eplb-config '{"window_size":300,"step_interval":300,"num_redundant_experts":0,"use_async":true,"policy":"stair","communicator":"hixl"}' \
       --seed 1024 \
       --served-model-name glm \
       --safetensors-load-strategy prefetch \
-      --max-num-seqs 32 \
+      --max-num-seqs 64 \
       --max-model-len 1048576 \
       --max-num-batched-tokens 16384 \
       --trust-remote-code \
@@ -877,8 +882,9 @@ For DP>1, the launcher executes the role script without filtering.
     <a id="glm53-flash-a3-prefill-command"></a>
 
     Start one TP1/PCP16 Prefill engine (total DP1). `--dp-address` uses the Prefill node IP.
-    The launcher assigns API port `9081` and omits the external DP rank option
-    for DP1; do not invoke the role template directly with `--data-parallel-rank 0`.
+    Pass `--pcp-size 16` to the launcher so it assigns all 16 devices to this
+    engine. It assigns API port `9081` and strips the external DP rank option
+    for DP1.
 
     ```shell
     python launch_online_dp.py \
@@ -908,6 +914,7 @@ For DP>1, the launcher executes the role script without filtering.
     MODEL_PATH="<YOUR_MODEL_PATH>"
 
     export HCCL_IF_IP="$LOCAL_IP"
+    export VLLM_USE_FASTOKENS=1
     export GLOO_SOCKET_IFNAME="$NIC_NAME"
     export TP_SOCKET_IFNAME="$NIC_NAME"
     export HCCL_SOCKET_IFNAME="$NIC_NAME"
@@ -915,7 +922,7 @@ For DP>1, the launcher executes the role script without filtering.
     export PYTORCH_NPU_ALLOC_CONF=expandable_segments:True
     export VLLM_USE_V2_MODEL_RUNNER=1
     export HCCL_OP_EXPANSION_MODE=AIV
-    export HCCL_BUFFSIZE=1200
+    export HCCL_BUFFSIZE=1024
     export ASCEND_RT_VISIBLE_DEVICES="$1"
     export PYTHONHASHSEED=0
     export ACL_OP_INIT_MODE=1
@@ -955,7 +962,7 @@ For DP>1, the launcher executes the role script without filtering.
         "enable_flashcomm1": false,
         "enable_fused_mc2": 2,
         "finegrained_tp_config": {"qkv_iproj_tensor_parallel_size":8,"oproj_tensor_parallel_size":1},
-        "ascend_compilation_config": {"enable_npugraph_ex":true,"enable_static_kernel":true,"enable_super_kernel":false}
+        "ascend_compilation_config": {"enable_npugraph_ex":true,"enable_static_kernel":false,"enable_super_kernel":false}
       }' \
       --kv-transfer-config \
       '{"kv_connector": "MooncakeConnectorV2", "kv_role": "kv_consumer", "engine_id": "1", "kv_port": "36580"}'
@@ -1024,22 +1031,32 @@ For DP>1, the launcher executes the role script without filtering.
       `--mamba-ssm-cache-dtype bfloat16`. Both roles explicitly enable ReplaySSM and prefix caching.
     - Prefill runs the target eagerly and enables draft graph execution.
       It enables asynchronous EPLB with the `stair` policy and `hixl`
-      communicator, a window and step interval of 300, and 16 redundant experts. The Prefill configuration sets `enable_fused_mc2` to `2`
+      communicator, a window and step interval of 300, and zero redundant
+      experts. The Prefill configuration sets `enable_fused_mc2` to `2`
       and `enable_shared_expert_dp` to `true`.
-    - Prefill uses `--max-num-seqs 32` and
+    - The shorter EPLB window and interval give faster feedback in short
+      benchmark or accuracy runs. A smaller window uses fewer load samples,
+      and a shorter interval can increase how often experts are rearranged
+      and reduce stability. For production, use the defaults of
+      `window_size=1000` and `step_interval=3000`. See
+      [Asynchronous EPLB](../../user_guide/feature_guide/expert_parallelism_load_balancer.md#asynchronous-eplb).
+    - Prefill uses `--max-num-seqs 64` and
       `--max-num-batched-tokens 16384`. Decode uses `40` and `240`, respectively.
-    - Decode uses `FULL_DECODE_ONLY` with default capture sizes, NpuGraphEx,
-      StaticKernel, shared-expert DP and fused MC2 mode 2. FlashComm1,
-      shared-expert multistream overlap and SuperKernel are disabled.
+    - Decode uses `FULL_DECODE_ONLY` with default capture sizes and NPUGraph Ex.
+      It sets `enable_shared_expert_dp` to `true` and uses fused MC2 mode 2.
+      Static Kernel, Super Kernel, FlashComm1 and shared-expert multistream
+      overlap are disabled.
       QKV input-projection TP is 8 and output-projection TP is 1.
-      Recompute scheduling is enabled through `scheduler_config`.
+      Recompute scheduling is enabled through
+      `scheduler_config.recompute_scheduler_enable` in `--additional-config`.
     - Both roles allow up to seven images per prompt and disable video input.
     - `MooncakeConnectorV2` uses `kv_producer` and engine ID `0` on Prefill,
       and `kv_consumer` and engine ID `1` on Decode. These IDs identify the
       roles in this deployment. Base KV ports are `36680` and `36580`.
     - The HCCS resource settings select device communication; `HCCL_IF_IP`
-      and the socket interface variables select the host network. The DP RPC,
-      API, Mooncake and proxy ports must be available on the respective hosts.
+      and the socket interface variables select the host network. Both roles
+      set `HCCL_BUFFSIZE=1024`. The DP RPC, API, Mooncake and proxy ports
+      must be available on the respective hosts.
 
 === "A2 series"
 
@@ -1555,23 +1572,24 @@ and tenant options, refer to the [KV Cache Pool Deployment Guide](../../user_gui
 
     #### A3 series {: #glm53-flash-5-4-a3 }
 
-    This KV Cache Pool example uses DP2/TP1/PCP8 Prefill and DP8/TP2 Decode,
+    This KV Cache Pool example uses DP1/TP1/PCP16 Prefill and DP16/TP1 Decode,
     using Model Runner V2 and native KDA. Prepare separate `run_p.sh` and
     `run_d.sh` files for this scenario from the [A3 series PD example](#glm53-flash-5-3-a3).
     Before adding the pool connectors, restore these pool-specific settings:
 
-    - Use Prefill DP2/TP1/PCP8 and Decode DP8/TP2 with the startup commands below.
+    - Use Prefill DP1/TP1/PCP16 and Decode DP16/TP1 with the startup commands below.
     - Set `num_speculative_tokens` to `3` on both roles, remove `--use-replayssm`,
       and set `--limit-mm-per-prompt` to `'{"image":1}'`.
     - On Prefill, set EPLB `window_size` and `step_interval` to `3000`,
       and `num_redundant_experts` to `0`; remove `--api-server-count 1`.
-    - On Decode, set `HCCL_BUFFSIZE=1024`; set `multistream_overlap_shared_expert` and `enable_flashcomm1`
-      to `true`. Remove `enable_fused_mc2`, `finegrained_tp_config`, and
+    - On Decode, set `HCCL_BUFFSIZE=1024`; set `multistream_overlap_shared_expert`
+      to `true` and keep `enable_flashcomm1` at `false` for TP1.
+      Remove `enable_fused_mc2`, `finegrained_tp_config`, and
       `ascend_compilation_config` from `--additional-config`.
 
     Keep `ASCEND_RT_VISIBLE_DEVICES="$1"`, INT8 main KV cache,
     BF16 SSM state, and the role-specific scheduling limits.
-    Prefill uses 32 sequences and 16384 batched tokens; Decode uses 40
+    Prefill uses 64 sequences and 16384 batched tokens; Decode uses 40
     sequences and 240 batched tokens. Both roles limit image input to one image.
     Add `--enable-prefix-caching` for this pooling example.
     Add the Memcache environment settings and replace the connectors as
@@ -1633,7 +1651,7 @@ and tenant options, refer to the [KV Cache Pool Deployment Guide](../../user_gui
     ```
 
     `dram.size` specifies the DRAM capacity allocated per worker. Prefill
-    (DP2/TP1/PCP8) and Decode (DP8/TP2) each start 16 workers. At `20GB` per worker,
+    (DP1/TP1/PCP16) and Decode (DP16/TP1) each start 16 workers. At `20GB` per worker,
     each node contributes `320GB`, for a total DRAM pool capacity of `640GB`.
     Reserve sufficient DRAM memory for the operating system and vLLM. For
     `device_sdma`, keep each non-zero size aligned to `1GB`.
@@ -1677,7 +1695,7 @@ and tenant options, refer to the [KV Cache Pool Deployment Guide](../../user_gui
     Replace the final `--kv-transfer-config` argument in `run_p.sh` with the
     following fragment. Keep the pool-specific overrides above and
     the remaining A3 series Prefill flags, including
-    `--max-num-seqs 32`.
+    `--max-num-seqs 64`.
 
     ```shell
       --kv-transfer-config \
@@ -1739,14 +1757,14 @@ and tenant options, refer to the [KV Cache Pool Deployment Guide](../../user_gui
     ```
 
     `$4` is the DP rank passed by `launch_online_dp.py`. Each engine must have a
-    unique `lookup_rpc_port`. The Prefill lookup values are `37000-37001`, and the
-    Decode lookup values are `37100-37107`. Keep the role-specific Mooncake KV
+    unique `lookup_rpc_port`. The Prefill lookup value is `37000`, and the
+    Decode lookup values are `37100-37115`. Keep the role-specific Mooncake KV
     base ports from [A3 series PD example](#glm53-flash-5-3-a3); its workers and schedulers derive their own
     ports from the topology.
 
     ##### Start the Services
 
-    Start the services in this order: Memcache MetaService → Decode → Prefill → Proxy. 
+    Start the services in this order: Memcache MetaService → Decode → Prefill → Proxy.
     Each vLLM worker initializes its Memcache LocalService during startup.
 
     1. In a separate terminal in the Prefill container, start MetaService.
@@ -1761,29 +1779,29 @@ and tenant options, refer to the [KV Cache Pool Deployment Guide](../../user_gui
        python -c "from memcache_hybrid import MetaService; MetaService.main()"
        ```
 
-    2. Start Decode with DP8/TP2. Wait until all eight engines on ports
-       `9900-9907` are ready and their Memcache LocalServices have reserved
+    2. Start Decode with DP16/TP1. Wait until all 16 engines on ports
+       `9900-9915` are ready and their Memcache LocalServices have reserved
        the configured DRAM pool memory.
 
        ```shell
        python launch_online_dp.py --template ./run_d.sh \
-         --dp-size 8 --tp-size 2 --dp-address "<DECODE_NODE_IP>" \
+         --dp-size 16 --tp-size 1 --dp-address "<DECODE_NODE_IP>" \
          --vllm-start-port 9900
        ```
 
-    3. Start Prefill with DP2/TP1/PCP8. Wait until both engines on ports
-       `9081-9082` are ready and their Memcache LocalServices have reserved
+    3. Start Prefill with DP1/TP1/PCP16. Wait until the engine on port
+       `9081` is ready and its workers' Memcache LocalServices have reserved
        the configured DRAM pool memory.
 
        ```shell
        python launch_online_dp.py --template ./run_p.sh \
-         --dp-size 2 --tp-size 1 --pcp-size 8 --dp-address "<PREFILL_NODE_IP>" \
+         --dp-size 1 --tp-size 1 --pcp-size 16 --dp-address "<PREFILL_NODE_IP>" \
          --vllm-start-port 9081
        ```
 
-    4. In a separate terminal, set `export P_N=2 D_N=8`, then run the
-       [A3 series proxy script](#glm53-flash-a3-proxy). It uses Prefill ports
-       `9081-9082` and Decode ports `9900-9907` for this pooling scenario.
+    4. In a separate terminal, set `export P_N=1 D_N=16`, then run the
+       [A3 series proxy script](#glm53-flash-a3-proxy). It uses Prefill port
+       `9081` and Decode ports `9900-9915` for this pooling scenario.
        Send requests to `<PREFILL_NODE_IP>:8081` using
        [Functional Verification](#6-functional-verification).
 
@@ -1796,11 +1814,13 @@ and tenant options, refer to the [KV Cache Pool Deployment Guide](../../user_gui
     successful pool saves, lookups, loads, and cache hits, and check Decode
     output for successful P→D transfers.
 
-    Capture the Prefill launcher's standard output and standard error when starting the service. Compare `vllm:ascend_store_load_get_keys_total` at each Prefill API's `/metrics` endpoint before and after repeating the prefix on the other Prefill rank: an increase records pool GET keys, unlike a local prefix-cache hit alone. Also verify that requests complete successfully; a GET counter alone does not prove a successful transfer or an accuracy result.
+    Capture the Prefill launcher's standard output and standard error when starting the service. Compare `vllm:ascend_store_load_get_keys_total` at the Prefill API's `/metrics` endpoint before and after repeating the prefix: an increase records pool GET keys, unlike a local prefix-cache hit alone. Also verify that requests complete successfully; a GET counter alone does not prove a successful transfer or an accuracy result.
 
-    The proxy distributes requests across two Prefill engines. A repeated
-    request can also hit an engine's local prefix cache; confirm pool load/hit
-    information on the other Prefill rank to verify shared pool reuse. Only
+    With one Prefill engine, a repeated request can hit its local prefix cache.
+    In an isolated validation deployment, start Prefill with
+    `VLLM_SERVER_DEV_MODE=1`. After the warm-up save completes, send
+    `POST /reset_prefix_cache?reset_external=false` to Prefill port `9081`.
+    Repeat the prefix after the local reset succeeds. Only
     complete, cacheable blocks are reused, so a partial trailing block can
     still require computation.
 
@@ -2121,7 +2141,7 @@ and role-specific settings when reproducing the deployment.
 | Prefill context parallelism | Prefill | `--prefill-context-parallel-size 16` | The TP1 Prefill engine uses all 16 devices. |
 | Prefill MoE communication | Prefill | `enable_fused_mc2: 2`, `--enable-eplb` | Uses fused MoE communication and asynchronous EPLB with the `stair` policy and `hixl` communicator. |
 | Shared-expert overlap | Decode | `multistream_overlap_shared_expert: false`, `enable_fused_mc2: 2` | Disables shared-expert overlap and enables fused MC2 mode 2. |
-| Decode execution | Decode | `FULL_DECODE_ONLY`, NpuGraphEx, StaticKernel | Uses graph execution; SuperKernel is disabled. |
+| Decode execution | Decode | `FULL_DECODE_ONLY`, NPUGraph Ex | Uses graph execution with Static Kernel and Super Kernel disabled. |
 | MTP | Prefill and Decode | `num_speculative_tokens: 5` | Uses draft graph execution on both roles; the Prefill target is eager. |
 | KV capacity | Prefill and Decode | `--kv-cache-dtype int8` | Reduces KV cache memory consumption for long contexts. |
 
@@ -2131,14 +2151,21 @@ The settings below refer to the [A3 series PD example](#glm53-flash-5-3-a3).
 Use the role-specific values in the 950DT products example when deploying on that hardware.
 
 - Tune `--max-num-seqs` and `--max-num-batched-tokens` independently on each
-  role. The reference uses 32 sequences and 16384 batched tokens on Prefill,
+  role. The reference uses 64 sequences and 16384 batched tokens on Prefill,
   and 40 sequences and 240 batched tokens on Decode. Measure time to first
   token, time per output token, and throughput before changing these limits.
+- For workloads with stable shapes, consider setting
+  `ascend_compilation_config.enable_static_kernel` to `true` on Decode.
+  Enable it with caution because static kernel compilation can
+  substantially increase service startup time.
+- If chat-template rendering becomes a bottleneck on the Prefill frontend,
+  consider changing `--api-server-count 1` to `--api-server-count 4` in
+  `run_p.sh` to distribute the work across four API server processes.
 - Set `--max-model-len` to the required context length and adjust
   `--gpu-memory-utilization` to the available NPU memory. The reference uses
   1048576 tokens and a utilization of 0.92 on both roles.
-- Decode enables `recompute_scheduler_enable: true` to allow recomputation
-  on Prefill when Decode KV cache is insufficient. Keep it disabled on Prefill.
+- Enable `scheduler_config.recompute_scheduler_enable` on Decode. Keep it
+  disabled on Prefill.
 - For repeated prefixes, use the DRAM KV Cache Pool configuration in
   [Section 5.4](#54-prefill-decode-disaggregation-with-kv-cache-pool). Both
   Prefill and Decode contribute `20GB` per worker. Confirm pool hits when

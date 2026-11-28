@@ -25,7 +25,7 @@ The scheduler is implemented by extending the **waiting queue** with **dynamic p
 The scheduler identifies which job a request belongs to via a `#job_name[${JOB_NAME}]#` tag embedded in the request ID. For example:
 
 ```python
-request_id = "req_001#job_name[my_batch_job]#"
+request_id = "#job_name[my_batch_job]#req_001"
 ```
 
 Requests without a job name tag are grouped under the `__default__` job.
@@ -76,7 +76,7 @@ Requests without a job name tag will be grouped under the default job and still 
 
 ## Configuration Parameters
 
-All parameters are nested under `batch_job_sched_config` in the `additional_config: {"scheduler_config":: {}}`.
+All parameters are nested under `batch_job_sched_config` in the `additional_config: {"scheduler_config": {}}`.
 
 | Parameter | Type | Default | Description |
 |-----------|------|---------|-------------|
@@ -129,6 +129,7 @@ python -m vllm.entrypoints.openai.run_batch \
 ```python
 from vllm import LLM
 
+#Initialize the LLM for the offline batch scenario and enable batch-job-aware scheduling. Once initialization succeeds, batch requests can be submitted.
 llm = LLM(
     model="/path/to/model",
     max_model_len=4096,

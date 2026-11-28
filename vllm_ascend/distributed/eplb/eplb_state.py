@@ -525,6 +525,16 @@ class AscendEplbState(_eplb_state.EplbState):
             log_stats=log_stats,
         )
 
+    def _sync_load_pass(self, *args: Any, **kwargs: Any) -> list[torch.Tensor]:
+        """Observability hook point; upstream owns the behaviour.
+
+        Upstream ``EplbState.step`` calls this only on balancedness logging
+        steps and uses the returned, already reduced load pass. The metric
+        provider can only hook ``vllm_ascend`` symbols, so this pass-through
+        override exists solely to expose that call point to it.
+        """
+        return super()._sync_load_pass(*args, **kwargs)
+
     def collect_global_load_stats(
         self,
     ) -> dict[str, PreparedLoadStats] | None:

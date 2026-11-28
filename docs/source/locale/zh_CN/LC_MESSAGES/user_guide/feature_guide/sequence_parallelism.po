@@ -186,8 +186,134 @@ msgstr ""
 msgid ""
 "- `tensor_parallel_size > 1`.\n"
 "- `enable_expert_parallel` is set (MoE models only).\n"
-"- `--additional-config '{\"enable_flashcomm1\": true}'` sets `flashcomm1`"
+"- `--additional-config '{\"enable_flashcomm1\": true}'` sets `flashcomm1`."
 msgstr ""
 "- `tensor_parallel_size > 1`。\n"
-"- 设置了 `enable_expert_parallel`（仅 MoE 模型）。\n"
-"- `--additional-config '{\"enable_flashcomm1\": true}'` 设置了 `flashcomm1`"
+"- 已设置 `enable_expert_parallel`（仅适用于 MoE 模型）。\n"
+"- `--additional-config '{\"enable_flashcomm1\": true}'` 用于设置 `flashcomm1`。"
+
+msgid "#### Graph fusion"
+msgstr "#### 图融合"
+
+msgid "#### Layer-level O-projection fusion"
+msgstr "#### 层级 O 投影融合"
+
+msgid ""
+"MiniMax-M3 and Kimi-K3 instead install a fused custom op on the attention\n"
+"O-projection automatically when sequence parallelism is active, so no extra\n"
+"switch is required. The op re-evaluates its gates on every forward and falls\n"
+"back to the plain MM + reduce-scatter path whenever they are not met; both\n"
+"paths return the same SP token shard, so the fallback is transparent."
+msgstr ""
+"MiniMax-M3 与 Kimi-K3 则不同：当序列并行启用时，会自动在 attention 的\n"
+"O 投影上安装一个融合自定义算子，因此无需额外的开关。该算子会在每次前向时\n"
+"重新评估其门控条件，一旦不满足就回退到普通的 MM + reduce-scatter 路径；\n"
+"两条路径返回相同的 SP token 分片，因此这种回退是透明的。"
+
+msgid "The current eligibility matrix is:"
+msgstr "当前的适用性矩阵如下："
+
+msgid "| Gate | MiniMax-M3 | Kimi-K3 |"
+msgstr "| 门控条件 | MiniMax-M3 | Kimi-K3 |"
+
+msgid ""
+"| **Hardware platform** | Atlas A2 products, Atlas A3 products, Ascend "
+"950PR&950DT products | Ascend 950PR&950DT products only |"
+msgstr ""
+"| **硬件平台** | Atlas A2系列产品、Atlas A3系列产品、Ascend 950PR&950DT系列产品 | 仅 Ascend "
+"950PR&950DT系列产品 |"
+
+msgid ""
+"| **Hardware capability gate** | `MM_REDUCE_SCATTER_BF16` | "
+"`MM_REDUCE_SCATTER_AI_CPU_INFERENCE` |"
+msgstr ""
+"| **硬件能力门控** | `MM_REDUCE_SCATTER_BF16` | "
+"`MM_REDUCE_SCATTER_AI_CPU_INFERENCE` |"
+
+msgid ""
+"| **SP switch** | `use_sequence_parallel=True` | "
+"`use_sequence_parallel=True` |"
+msgstr ""
+"| **SP 开关** | `use_sequence_parallel=True` | `use_sequence_parallel=True` |"
+
+msgid "| **Extra model condition** | None | `use_attn_residuals=True` |"
+msgstr "| **额外模型条件** | 无 | `use_attn_residuals=True` |"
+
+msgid "| **TP size** | {2, 4, 8} | {2, 4, 8, 16, 32, 64} |"
+msgstr "| **TP 大小** | {2, 4, 8} | {2, 4, 8, 16, 32, 64} |"
+
+msgid "| **Weight precision** | BF16, unquantized | BF16, unquantized |"
+msgstr "| **权重精度** | BF16，非量化 | BF16，非量化 |"
+
+msgid "| **Input precision** | BF16 | BF16 |"
+msgstr "| **输入精度** | BF16 | BF16 |"
+
+msgid "| **Input shape** | Nonempty 2D tensor | Nonempty 2D tensor |"
+msgstr "| **输入形状** | 非空二维张量 | 非空二维张量 |"
+
+msgid ""
+"| **K dimension** | [256, 65535) | [256, 65535), and the input K must match "
+"the weight K |"
+msgstr "| **K 维度** | [256, 65535) | [256, 65535)，且输入的 K 必须与权重的 K 一致 |"
+
+msgid "| **Token count** | [256, 16384) | No fixed token-count limit |"
+msgstr "| **Token 数量** | [256, 16384) | 无固定 token 数量限制 |"
+
+msgid ""
+"| **Communication volume** | Bounded by the token-count limit | "
+"`padded_tokens × N × 2B < 4GiB` |"
+msgstr "| **通信量** | 受 token 数量限制约束 | `padded_tokens × N × 2B < 4GiB` |"
+
+msgid "| **Weight format** | ND format | `weight_nz_mode != 2` |"
+msgstr "| **权重格式** | ND 格式 | `weight_nz_mode != 2` |"
+
+msgid "| **Weight contiguity** | Must be contiguous | Must be contiguous |"
+msgstr "| **权重连续性** | 必须连续 | 必须连续 |"
+
+msgid "| **Batch type** | Pure prefill | Pure prefill |"
+msgstr "| **Batch 类型** | 纯 prefill | 纯 prefill |"
+
+msgid "| **Decode / mixed batch** | Not fused | Not fused |"
+msgstr "| **Decode / 混合 batch** | 不融合 | 不融合 |"
+
+msgid ""
+"| **Pure decode node** | Not supported | Excluded by the dynamic batch gate "
+"|"
+msgstr "| **纯 decode 节点** | 不支持 | 由动态 batch 门控排除 |"
+
+msgid "| **LoRA** | Not supported | Not supported |"
+msgstr "| **LoRA** | 不支持 | 不支持 |"
+
+msgid "| **Bias** | Not supported | Not supported |"
+msgstr "| **Bias** | 不支持 | 不支持 |"
+
+msgid ""
+"| **PCP** | PCP = 1 | Excludes `HeadParallelRowLinear` (PCP KDA case) |"
+msgstr "| **PCP** | PCP = 1 | 排除 `HeadParallelRowLinear`（PCP KDA 场景） |"
+
+msgid "| **DCP** | DCP = 1 | No explicit restriction |"
+msgstr "| **DCP** | DCP = 1 | 无显式限制 |"
+
+msgid "| **Existing custom op** | Not allowed | Not allowed |"
+msgstr "| **已存在的自定义算子** | 不允许 | 不允许 |"
+
+msgid ""
+"| **TP sharding contract** | `input_is_parallel=True`, `disable_tp=False` | "
+"No explicit restriction |"
+msgstr "| **TP 切分约定** | `input_is_parallel=True`、`disable_tp=False` | 无显式限制 |"
+
+msgid ""
+"| **External RS contract** | `reduce_results=False` | No explicit "
+"restriction |"
+msgstr "| **外部 RS 约定** | `reduce_results=False` | 无显式限制 |"
+
+msgid ""
+"| **Forward context** | Must exist with nonempty `attn_metadata` | Must "
+"satisfy the pure-prefill check |"
+msgstr "| **前向上下文** | 必须存在且 `attn_metadata` 非空 | 必须满足纯 prefill 检查 |"
+
+msgid ""
+"| **Underlying interface** | `npu_mm_reduce_scatter_base` | "
+"`npu_quant_mm_reduce_scatter` |"
+msgstr ""
+"| **底层接口** | `npu_mm_reduce_scatter_base` | `npu_quant_mm_reduce_scatter` |"

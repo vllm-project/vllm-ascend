@@ -54,6 +54,7 @@ from vllm_ascend.ops.triton.qwen4_exp.qsa import (
 from .attention_dispatch import build_qsa_request_plan, dispatch_qsa_attention
 from .gbsa import GBSA_PAGE_SIZE, qsa_gbsa_attention
 from .lightning_indexer import QSAIndexerMetadataProtocol, qsa_select_paged_tokens_lightning_v2
+from .topk_buffer import share_topk_buffer
 
 if TYPE_CHECKING:
     import vllm.models.qwen4_exp.amd.qsa_indexer as upstream_indexer
@@ -506,8 +507,6 @@ class AscendQSAImpl(AttentionImplBase[Any]):
         token_to_req: torch.Tensor,
         logical_positions: torch.Tensor | None = None,
         seq_lens: torch.Tensor | None = None,
-        key: torch.Tensor | None = None,
-        value: torch.Tensor | None = None,
     ) -> torch.Tensor:
         # The base ABI forwards only `token_to_req`; the GBSA kernel also
         # needs the indexer-side positions/lengths, supplied by the Ascend
@@ -519,8 +518,6 @@ class AscendQSAImpl(AttentionImplBase[Any]):
         return self._dispatch_qsa(
             layer,
             query,
-            key,
-            value,
             kv_cache,
             attn_metadata,
             output,
@@ -533,8 +530,6 @@ class AscendQSAImpl(AttentionImplBase[Any]):
         self,
         layer: torch.nn.Module,
         query: torch.Tensor,
-        key: torch.Tensor | None,
-        value: torch.Tensor | None,
         kv_cache: QSAKVCache,
         attn_metadata: QSAIndexerMetadataProtocol,
         output: torch.Tensor,
@@ -542,7 +537,7 @@ class AscendQSAImpl(AttentionImplBase[Any]):
         logical_positions: torch.Tensor,
         seq_lens: torch.Tensor,
     ) -> torch.Tensor:
-        """Run GBSA, or the FIA/GBSA split planned for this step."""
+        """Run the GBSA attention path selected for this step."""
         num_tokens = attn_metadata.num_actual_tokens
         output.zero_()
         if num_tokens == 0:
@@ -575,13 +570,8 @@ class AscendQSAImpl(AttentionImplBase[Any]):
             if getattr(attn_metadata, "pcp_full_graph", False):
                 result.masked_fill_(logical_positions[:num_tokens, None, None] < 0, 0)
             return result
-        # main's ABI does not carry the freshly projected K/V; the dispatcher
-        # then gathers them from the paged cache that `do_kv_cache_update`
-        # already filled for this step.
         return dispatch_qsa_attention(
             query[:num_tokens],
-            None if key is None else key[:num_tokens],
-            None if value is None else value[:num_tokens],
             key_cache,
             value_cache,
             compact_indices,
@@ -606,9 +596,62 @@ class AscendQSAImpl(AttentionImplBase[Any]):
 
 
 class AscendQSAMetadataBuilder(upstream_qsa.Qwen4ExpQSAMetadataBuilder):
-    # FULL_DECODE_ONLY captures a fixed GBSA path. Unlike sequence thresholds,
-    # decode phase cannot cross into FIA when a request grows during replay.
+    # FULL_DECODE_ONLY captures the standard GBSA path.
     _cudagraph_support = AttentionCGSupport.UNIFORM_BATCH
+
+    def prepare_step_metadata(
+        self,
+        attn_metadata: dict[str, Any],
+        layer_names: list[str],
+        rows: int,
+        prepared_metadata_ids: set[int],
+    ) -> None:
+        """Prepare shared QSA inputs after all cache metadata has been built."""
+        from vllm_ascend.models.qwen4_exp.attention_dispatch import prepare_qsa_union_batches
+        from vllm_ascend.ops.triton.qwen4_exp.prepare_qsa_visible_lengths_triton import prepare_qsa_visible_lengths
+
+        if not layer_names:
+            return
+        main_metadata = attn_metadata.get(layer_names[0])
+        if main_metadata is None:
+            return
+        request_plan = getattr(main_metadata, "qsa_request_plan", None)
+        if request_plan is None:
+            return
+        layer = self.vllm_config.compilation_config.static_forward_context.get(layer_names[0])
+        if not hasattr(layer, "indexer"):
+            return
+        compressed_metadata = attn_metadata.get(layer.indexer.compressed_key_cache.prefix)
+        if compressed_metadata is None:
+            return
+        if id(main_metadata) in prepared_metadata_ids:
+            return
+        device = compressed_metadata.seq_lens.device
+        max_tokens = self.vllm_config.scheduler_config.max_num_batched_tokens
+        signature = (device, max_tokens)
+        buffer_cache = getattr(self, "_qsa_visible_length_buffers", None)
+        if buffer_cache is None:
+            buffer_cache = {}
+            self._qsa_visible_length_buffers = buffer_cache
+        visible_lengths = buffer_cache.get(signature)
+        if visible_lengths is None:
+            visible_lengths = torch.empty(max_tokens, dtype=torch.int32, device=device)
+            buffer_cache[signature] = visible_lengths
+
+        prepare_qsa_visible_lengths(
+            compressed_metadata.logical_positions,
+            compressed_metadata.seq_lens,
+            compressed_metadata.token_to_req,
+            visible_lengths,
+            rows,
+        )
+        main_metadata.qsa_request_plan = prepare_qsa_union_batches(
+            request_plan,
+            visible_lengths,
+            compressed_metadata.seq_lens,
+            main_metadata.block_table,
+        )
+        prepared_metadata_ids.add(id(main_metadata))
 
     def build(
         self,
@@ -636,12 +679,8 @@ class AscendQSAMetadataBuilder(upstream_qsa.Qwen4ExpQSAMetadataBuilder):
         if phases is None or phases.device.type != "cpu":
             raise ValueError("QSA phase dispatch requires scheduler CPU is_prefilling metadata")
         if any(phases.tolist()):
-            lengths = common_attn_metadata.seq_lens_cpu_upper_bound
-            if lengths is None:
-                raise ValueError("QSA prefill dispatch requires scheduler CPU KV lengths")
             metadata.qsa_request_plan = build_qsa_request_plan(
                 common_attn_metadata.query_start_loc_cpu,
-                lengths,
                 common_attn_metadata.num_actual_tokens,
                 phases,
             )
@@ -797,6 +836,8 @@ class AscendQwen4ExpQSAAttention(upstream_qsa.Qwen4ExpQSAAttention):
     def __init__(self, *, vllm_config: VllmConfig, **kwargs) -> None:
         if vllm_config.parallel_config.prefill_context_parallel_size == 1:
             super().__init__(vllm_config=vllm_config, **kwargs)
+            # Rebind as each layer is constructed to limit live allocations.
+            share_topk_buffer(self)
             return
         # Upstream constructs token-local projections and cache owners. The
         # Ascend forward and metadata builders handle the PCP layout.
@@ -882,8 +923,6 @@ class AscendQwen4ExpQSAAttention(upstream_qsa.Qwen4ExpQSAAttention):
         # name and signature follow the tree's upstream ABI.
         impl: Any = self.impl
         with attention_transfer_window():
-            # main's ABI drops K/V from the signature; pass them back so
-            # the FIA prefill path can skip the paged gather.
             impl.forward(
                 self,
                 query,
@@ -893,8 +932,6 @@ class AscendQwen4ExpQSAAttention(upstream_qsa.Qwen4ExpQSAAttention):
                 token_to_req=side_metadata.token_to_req,
                 logical_positions=side_metadata.logical_positions,
                 seq_lens=side_metadata.seq_lens,
-                key=key,
-                value=value,
             )
         maybe_save_kv_layer_to_connector(self.layer_name, list(self.kv_cache))
 

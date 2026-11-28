@@ -50,10 +50,6 @@ else:
 import vllm_ascend.patch.worker.patch_kimi_k25  # noqa
 import vllm_ascend.patch.worker.patch_deepseek_v2  # noqa
 
-# Re-apply the V2-only runner selection on pickled configs, plus the V2
-# feature patches, in worker processes.
-import vllm_ascend.patch.worker.patch_use_v2_model_runner  # noqa
-
 import vllm_ascend.patch.worker.patch_fused_moe  # noqa
 
 import vllm_ascend.patch.worker.patch_uva  # noqa
@@ -83,3 +79,4 @@ if not get_current_hardware_profile().supports(HardwareCapability.STANDARD_WORKE
 
 # only patch routed experts capture in main2main.
 import vllm_ascend.patch.worker.patch_routed_experts_capture  # noqa
+import vllm_ascend.patch.worker.patch_v2_static_kernel  # noqa

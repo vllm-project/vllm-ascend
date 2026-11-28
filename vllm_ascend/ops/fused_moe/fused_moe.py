@@ -29,6 +29,7 @@ from vllm.model_executor.layers.fused_moe.layer import MoERunner
 from vllm.model_executor.layers.fused_moe.runner.moe_runner import _moe_forward_shared, _unpack
 from vllm.utils.torch_utils import direct_register_custom_op
 
+from vllm_ascend.ascend_config import get_ascend_config
 from vllm_ascend.ascend_forward_context import _EXTRA_CTX, MoECommType
 from vllm_ascend.distributed.parallel_state import get_mc2_group
 from vllm_ascend.ops.fused_moe.dataclass.shared_experts import PreparedSharedExpertInput, RoutedMoEMilestones
@@ -60,7 +61,8 @@ def _ascend_moe_forward_shared_sp_fake(
     which is only correct before the early all-gather optimization.
     """
     del router_logits, input_ids, layer_name
-    assert shared_experts_input is not None
+    if shared_experts_input is None:
+        shared_experts_input = hidden_states
     shared_out = shared_experts_input.new_empty(
         (*hidden_states.shape[:-1], shared_experts_input.shape[-1]),
     )
@@ -83,7 +85,35 @@ direct_register_custom_op(
 )
 
 
+def _plain_tail_add_enabled() -> bool:
+    """Whether the MoE tail combine may use a plain tensor add.
+
+    ``torch._foreach_add`` is required while the superkernel is in use: the
+    superkernel generation path only accepts the combine through the
+    multi-tensor op, and a plain ``aclnnAdd`` disconnects the graph. Static
+    kernel does not impose that requirement. Outside the superkernel both forms
+    are bit-identical elementwise adds, and the plain one avoids one op launch
+    per MoE layer.
+    """
+    try:
+        compilation_config = get_ascend_config().ascend_compilation_config
+    except RuntimeError:
+        # Runners built outside ``init_ascend_config`` (unit tests) keep the
+        # graph-safe default.
+        return False
+    # TODO: revisit when the superkernel supports DSL and Triton operators. The
+    # plain add is an aclnn op today, so it cannot be captured into the
+    # superkernel graph; once it can, the guard can be dropped and both modes
+    # take this path.
+    return not compilation_config.enable_super_kernel
+
+
 class AscendMoERunner(MoERunner):  # type: ignore[no-redef]
+    # Keeps the graph-safe path for instances built without ``__init__`` (tests
+    # construct runners via ``__new__`` to exercise single helpers); ``__init__``
+    # overrides it with the mode resolved from the compilation config.
+    _plain_tail_add: bool = False
+
     def __init__(
         self,
         layer_name,
@@ -126,6 +156,10 @@ class AscendMoERunner(MoERunner):  # type: ignore[no-redef]
         self._gate = gate
         self.hidden_size = moe_config.hidden_dim
 
+        # Resolved once so the hot path never reads the config. See
+        # ``_plain_tail_add_enabled`` for why the graph modes keep foreach.
+        self._plain_tail_add = _plain_tail_add_enabled()
+
         self.quant_type = routed_experts.quant_type
         self.routed_experts.router = router
 
@@ -150,7 +184,10 @@ class AscendMoERunner(MoERunner):  # type: ignore[no-redef]
             # layer is the only module the quant methods
             # (``get_fused_mc2_weights``) and the MegaMoe communicator see.
             self.routed_experts.ascend_megamoe_shared_fusion = self.ascend_shared_experts.megamoe_shared_fusion()
-            if self._can_overlap_sp_shared_with(self.routed_input_transform):
+            if (
+                self._can_overlap_sp_shared_with(self.routed_input_transform)
+                or self.ascend_shared_experts.parallel_mode() is SharedExpertParallelMode.FINE_GRAINED_TENSOR_PARALLEL
+            ):
                 self._forward_entry = torch.ops.vllm.ascend_moe_forward_shared_sp
 
         setup_moe_comm_method(self.moe_config)
@@ -180,16 +217,15 @@ class AscendMoERunner(MoERunner):  # type: ignore[no-redef]
         through the OOT PluggableLayer dispatch of ``MoERunner``).
 
         Upstream inlines the shared+routed output combine, which is not
-        exposed as an overridable hook. On NPU the combine goes through the
-        fused multi-tensor add kernel (``torch._foreach_add``), whose kernel
-        launch count is independent of the tensor-list length and which is
-        the NPU-validated fast path for the MoE combine. Every other step,
-        including the runtime-aware reduction hooks (#16550), is inherited
-        unchanged.
+        exposed as an overridable hook, so the combine is routed through
+        ``_combine_shared_and_routed_output``. It uses a plain tensor add
+        unless the superkernel / static-kernel graph requires the multi-tensor
+        form; see that method for the details. Every other step, including the
+        runtime-aware reduction hooks (#16550), is inherited unchanged.
 
         Future plan: once the aclnnAdd_AddAiCore_Add kernel is available via
-        the superkernel integration, upstream's plain add becomes the fast
-        path and this override can be dropped.
+        the superkernel integration, the graph modes can use the plain add too
+        and this override can be dropped entirely.
         """
         # Apply transform for routed experts (e.g., latent projection for
         # latent MoE). When the caller pre-applies the routed input transform
@@ -279,13 +315,29 @@ class AscendMoERunner(MoERunner):  # type: ignore[no-redef]
         fused_output = self.apply_routed_output_transform(fused_output)
 
         if shared_output is not None:
-            result = torch._foreach_add([shared_output], [fused_output])[0]
+            result = self._combine_shared_and_routed_output(shared_output, fused_output)
         else:
             result = fused_output
 
         result = self._maybe_reduce_final_output(result, og_hidden_dim_post_xform, fused_output_is_reduced)
 
         return self._maybe_add_zero_expert_output(result)
+
+    def _combine_shared_and_routed_output(
+        self,
+        shared_output: torch.Tensor,
+        fused_output: torch.Tensor,
+    ) -> torch.Tensor:
+        """Sum the shared and routed MoE outputs.
+
+        Both branches are the same bf16 elementwise add and produce identical
+        results; they only differ in the kernel that performs it. The plain
+        add is used unless a graph mode requires the multi-tensor form, which
+        is decided once in ``__init__``.
+        """
+        if self._plain_tail_add:
+            return shared_output + fused_output
+        return torch._foreach_add([shared_output], [fused_output])[0]
 
     @property
     def is_internal_router(self) -> bool:
@@ -312,7 +364,8 @@ class AscendMoERunner(MoERunner):  # type: ignore[no-redef]
             routed_transform is not None
             and shared_experts is not None
             and shared_experts.multistream_overlap
-            and shared_experts.parallel_mode() is SharedExpertParallelMode.SEQUENCE_PARALLEL_ONLY
+            and shared_experts.parallel_mode()
+            in (SharedExpertParallelMode.SEQUENCE_PARALLEL_ONLY, SharedExpertParallelMode.FINE_GRAINED_TENSOR_PARALLEL)
         )
 
     @property
