@@ -20,6 +20,7 @@
 #include <torch/types.h>
 #include <ATen/Tensor.h>
 #include <acl/acl_base.h>
+#include <acl/acl_rt.h>
 #include <c10/util/Exception.h>
 #include <dlfcn.h>
 #include <functional>
@@ -702,6 +703,28 @@ typedef int (*InitHugeMemThreadLocal)(void *, bool);
 typedef void (*UnInitHugeMemThreadLocal)(void *, bool);
 typedef void (*ReleaseHugeMem)(void *, bool);
 
+inline void SyncStreamResInCurrentThread(aclrtStream acl_stream) {
+  using AclrtUseStreamResInCurrentThreadFunc = aclError (*)(aclrtStream);
+  static const auto useStreamResFunc =
+      []() -> AclrtUseStreamResInCurrentThreadFunc {
+    void *funcAddr = dlsym(RTLD_DEFAULT, "aclrtUseStreamResInCurrentThread");
+    if (funcAddr == nullptr) {
+      void *handler = GetOpApiLibHandler("libascendcl.so");
+      if (handler != nullptr) {
+        funcAddr = dlsym(handler, "aclrtUseStreamResInCurrentThread");
+      }
+    }
+    return reinterpret_cast<AclrtUseStreamResInCurrentThreadFunc>(funcAddr);
+  }();
+  if (useStreamResFunc != nullptr) {
+    aclError ret = useStreamResFunc(acl_stream);
+    const char *errMsg = aclGetRecentErrMsg();
+    TORCH_CHECK(ret == ACL_SUCCESS,
+                "call aclrtUseStreamResInCurrentThread failed, error code: ",
+                ret, ", detail: ", errMsg != nullptr ? errMsg : "");
+  }
+}
+
 #define EXEC_NPU_CMD(aclnn_api, ...)                                          \
   do {                                                                        \
     static const auto getWorkspaceSizeFuncAddr =                              \
@@ -717,6 +740,9 @@ typedef void (*ReleaseHugeMem)(void *, bool);
         #aclnn_api, " or ", #aclnn_api "GetWorkspaceSize", " not in ",        \
         GetOpApiLibName(), ", or ", GetOpApiLibName(), "not found.");         \
     auto acl_stream = c10_npu::getCurrentNPUStream().stream(false);           \
+    if (c10_npu::check_enqueue_need_use(acl_stream)) {                        \
+      ::SyncStreamResInCurrentThread(acl_stream);                             \
+    }                                                                         \
     uint64_t workspace_size = 0;                                              \
     uint64_t *workspace_size_addr = &workspace_size;                          \
     aclOpExecutor *executor = nullptr;                                        \
@@ -745,6 +771,9 @@ typedef void (*ReleaseHugeMem)(void *, bool);
     }                                                                         \
     auto acl_call = [converted_params, workspace_addr, workspace_size,        \
                      acl_stream, executor]() -> int {                         \
+      if (c10_npu::check_dequeue_need_use(acl_stream)) {                      \
+        ::SyncStreamResInCurrentThread(acl_stream);                           \
+      }                                                                       \
       typedef int (*OpApiFunc)(void *, uint64_t, aclOpExecutor *,             \
                                const aclrtStream);                            \
       OpApiFunc opApiFunc = reinterpret_cast<OpApiFunc>(opApiFuncAddr);       \
