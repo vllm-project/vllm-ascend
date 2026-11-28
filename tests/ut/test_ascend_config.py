@@ -574,6 +574,7 @@ class TestAscendConfig(TestBase):
         self.assertFalse(ascend_config.multistream_overlap_shared_expert)
         self.assertFalse(ascend_config.enable_kv_nz)
         self.assertEqual(ascend_config.weight_nz_mode, 1)
+        self.assertEqual(ascend_config.tokenizer_cache_gb, 0)
         # 0 = let the MegaMoe operator auto-compute the receive capacity.
         self.assertEqual(ascend_config.mega_moe_max_tokens, 0)
 
@@ -702,6 +703,21 @@ class TestAscendConfig(TestBase):
         self.assertFalse(ascend_fusion_config.fusion_ops_gmmswigluquant)
         self.assertTrue(ascend_config.xlite_graph_config.full_mode)
         self.assertEqual(ascend_config.finegrained_tp_config.lmhead_tensor_parallel_size, 0)
+
+    @_clean_up_ascend_config
+    @patch("vllm_ascend.platform.NPUPlatform.check_and_update_config")
+    def test_init_ascend_config_tokenizer_cache_gb(self, mock_fix_incompatible_config):
+        for cfg_dict, expected in (({}, 0), ({"tokenizer_cache_gb": 4}, 4)):
+            clear_ascend_config()
+            cfg = VllmConfig()
+            cfg.additional_config = cfg_dict
+            self.assertEqual(init_ascend_config(cfg).tokenizer_cache_gb, expected)
+        for bad, msg in ((-1, "tokenizer_cache_gb must be >= 0"), (True, "tokenizer_cache_gb must not be a boolean")):
+            clear_ascend_config()
+            cfg = VllmConfig()
+            cfg.additional_config = {"tokenizer_cache_gb": bad}
+            with self.assertRaisesRegex(ValueError, msg):
+                init_ascend_config(cfg)
 
     @_clean_up_ascend_config
     @patch("vllm_ascend.platform.NPUPlatform.check_and_update_config")

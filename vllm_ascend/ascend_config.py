@@ -548,6 +548,7 @@ class AscendConfig:
             "msmonitor_use_daemon": false,
             "enable_transpose_kv_cache_by_block": true,
             "weight_nz_mode": 1,
+            "tokenizer_cache_gb": 0,
             "enable_shared_expert_dp": false,
             "enable_sparse_sfa_c8": false,
             "enable_sparse_li_c8": false,
@@ -716,6 +717,13 @@ class AscendConfig:
     msmonitor_use_daemon: bool = False
     enable_transpose_kv_cache_by_block: bool = True
     weight_nz_mode: int = 1
+    # Size of the renderer-side incremental (segment-level) tokenizer cache, in
+    # GiB, per API server process. 0 (the default) disables it. It only pays off
+    # at very high PrefixCache hit rates, where tokenization - still
+    # O(full prompt) on every turn - dominates the frontend cost. This sizes a
+    # host-memory LRU, so it never consumes NPU memory; with
+    # ``--api-server-count N`` the footprint is N times this value.
+    tokenizer_cache_gb: int = 0
 
     # ---- sub-configs (no vllm_config dep): pydantic dict→dataclass coercion ----
     ascend_compilation_config: AscendCompilationConfig = dataclasses.field(default_factory=AscendCompilationConfig)
@@ -758,10 +766,19 @@ class AscendConfig:
     _sparse_li_c4_layer_names: set[str] = dataclasses.field(default_factory=set, init=False, repr=False)
     _sparse_li_layer_filter_enabled: bool = dataclasses.field(default=False, init=False, repr=False)
 
+    @field_validator("tokenizer_cache_gb", mode="before")
+    @classmethod
+    def _reject_tokenizer_cache_bool(cls, value: Any) -> Any:
+        if isinstance(value, bool):
+            raise ValueError("tokenizer_cache_gb must not be a boolean")
+        return value
+
     @model_validator(mode="after")
     def _validate_user_input_ranges(self):
         if self.weight_nz_mode not in (0, 1, 2):
             raise ValueError(f"weight_nz_mode must be one of 0, 1, or 2; got {self.weight_nz_mode}")
+        if self.tokenizer_cache_gb < 0:
+            raise ValueError(f"tokenizer_cache_gb must be >= 0; got {self.tokenizer_cache_gb}")
         # TODO(zzzzwwjj): remove it after deprecating `enable_mc2_hierarchy_comm`.
         if self.enable_mc2_hierarchy_comm:
             self.mc2_comm_alg = "hierarchy"

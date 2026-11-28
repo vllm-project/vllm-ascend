@@ -102,6 +102,7 @@ estimated_times:
   tests/e2e/pull_request/one_card/rlhf/state_transitions/test_sleep_level2_reload.py: 210
   tests/e2e/pull_request/one_card/rlhf/state_transitions/test_release_kv_cache.py: 400
   tests/e2e/pull_request/one_card/test_sampler.py: 200
+  tests/e2e/pull_request/one_card/test_tokenizer_cache.py: 180
   tests/e2e/pull_request/one_card/test_turboquant_finalize.py: 50
   tests/e2e/pull_request/one_card/test_vlm.py: 480
   tests/e2e/pull_request/one_card/test_xlite.py: 215
