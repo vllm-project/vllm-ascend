@@ -2275,8 +2275,14 @@ def test_zero_block_ids_validates_ids_before_writes(block_ids):
 
 
 def test_init_kv_zero_meta_wraps_tuple_aware_zeroer_for_mxfp8():
-    import vllm_ascend.worker.v2.model_runner as model_runner_mod
+    from vllm.v1.kv_cache_interface import FullAttentionSpec, KVCacheGroupSpec
 
+    import vllm_ascend.worker.v2.model_runner as model_runner_mod
+    from vllm_ascend.attention.attention_c8_mxfp import mxfp_cache_spec
+
+    mxfp_spec = mxfp_cache_spec(
+        FullAttentionSpec(block_size=512, num_kv_heads=2, head_size=64, head_size_v=64, dtype=torch.bfloat16)
+    )
     runner = NPUModelRunner.__new__(NPUModelRunner)
     runner.vllm_config = SimpleNamespace(cache_config=SimpleNamespace(cache_dtype="mxfp8"))
     runner.device = torch.device("cpu")
@@ -2284,7 +2290,10 @@ def test_init_kv_zero_meta_wraps_tuple_aware_zeroer_for_mxfp8():
     runner.kernel_block_sizes = [512]
     runner.cache_config = SimpleNamespace(cache_dtype="mxfp8")
     runner.compilation_config = SimpleNamespace(static_forward_context={})
-    runner.kv_cache_config = SimpleNamespace(num_blocks=2)
+    runner.kv_cache_config = SimpleNamespace(
+        num_blocks=2,
+        kv_cache_groups=[KVCacheGroupSpec(layer_names=["attn"], kv_cache_spec=mxfp_spec)],
+    )
     entries = [(MagicMock(), MagicMock(), 1)]
     runner._c8_mxfp_v_scale_caches = entries
 
@@ -2300,17 +2309,24 @@ def test_init_kv_zero_meta_wraps_tuple_aware_zeroer_for_mxfp8():
     assert runner.kv_block_zeroer.entries is entries
 
 
-def test_init_kv_zero_meta_uses_tuple_aware_zeroer_without_mxfp8():
+@pytest.mark.parametrize("cache_dtype", ["auto", "mxfp8"])
+def test_init_kv_zero_meta_uses_tuple_aware_zeroer_without_mxfp_spec(cache_dtype):
+    from vllm.v1.kv_cache_interface import FullAttentionSpec, KVCacheGroupSpec
+
     import vllm_ascend.worker.v2.model_runner as model_runner_mod
 
+    plain_spec = FullAttentionSpec(block_size=512, num_kv_heads=2, head_size=64, head_size_v=64, dtype=torch.bfloat16)
     runner = NPUModelRunner.__new__(NPUModelRunner)
-    runner.vllm_config = SimpleNamespace(cache_config=SimpleNamespace(cache_dtype="auto"))
+    runner.vllm_config = SimpleNamespace(cache_config=SimpleNamespace(cache_dtype=cache_dtype))
     runner.device = torch.device("cpu")
     runner.attn_groups = []
     runner.kernel_block_sizes = [512]
     runner.compilation_config = SimpleNamespace(static_forward_context={})
-    runner.kv_cache_config = SimpleNamespace(num_blocks=2)
-    runner.cache_config = SimpleNamespace(cache_dtype="auto")
+    runner.kv_cache_config = SimpleNamespace(
+        num_blocks=2,
+        kv_cache_groups=[KVCacheGroupSpec(layer_names=["attn"], kv_cache_spec=plain_spec)],
+    )
+    runner.cache_config = SimpleNamespace(cache_dtype=cache_dtype)
 
     with patch.object(model_runner_mod, "AscendV2KVBlockZeroer") as generic_cls:
         runner._init_kv_zero_meta()
@@ -2329,7 +2345,7 @@ def test_init_kv_zero_meta_excludes_only_registered_topk_components():
     runner.attn_groups = []
     runner.kernel_block_sizes = [128]
     runner.compilation_config = SimpleNamespace(static_forward_context={})
-    runner.kv_cache_config = SimpleNamespace(num_blocks=5856)
+    runner.kv_cache_config = SimpleNamespace(num_blocks=5856, kv_cache_groups=[])
     runner.cache_config = SimpleNamespace(cache_dtype="auto")
     exclusions = {("target", 4), ("target", 5), ("draft", 4), ("draft", 5)}
     runner.sparse_kv_offload_manager = SimpleNamespace(get_topk_cache_components=Mock(return_value=exclusions))
