@@ -23,8 +23,8 @@ def test_sanitize_invalid_confidence_replaces_non_probabilities():
         sanitized,
         torch.tensor(
             [
-                [0.0, 0.0, 0.0, 0.75],
                 [0.0, 0.5, 1.0, 0.0],
+                [0.0, 0.0, 0.0, 0.75],
             ]
         ),
     )

@@ -30,13 +30,14 @@ _SANITIZER_MARKER = "_vllm_ascend_invalid_confidence_sanitizer"
 def _sanitize_invalid_confidence(confidence_probs: torch.Tensor, idx_mapping: torch.Tensor) -> torch.Tensor:
     """Return a copy with every slot probability outside ``(0, 1]`` set to zero.
 
-    NaN fails both comparisons in ``valid``, so the mask also covers NaN and
-    negative or infinite values without a separate check.
+    NaN fails both comparisons, so the mask also covers NaN and negative or
+    infinite values without a separate check.
     """
-    rows = confidence_probs[idx_mapping]
-    valid = (rows > 0.0) & (rows <= 1.0)
     sanitized = confidence_probs.clone()
-    sanitized[idx_mapping] = torch.where(valid, rows, torch.zeros_like(rows))
+    rows = sanitized[idx_mapping]
+    invalid = ~((rows > 0.0) & (rows <= 1.0))
+    rows[invalid] = 0.0
+    sanitized[idx_mapping] = rows
     return sanitized
 
 
