@@ -1,0 +1,7 @@
+pr: 22507
+entries:
+  - category: performance
+    text: >-
+      Compatible Qwen DSpark drafts on Ascend A2 and A3 use device-side attention tiling when
+      flash_attn_npu_3 is installed, avoiding draft sequence-length readback during full-graph replay.
+    hardware: [A2, A3]

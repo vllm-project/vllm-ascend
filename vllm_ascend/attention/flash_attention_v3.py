@@ -51,6 +51,9 @@ def _uses_hnd_kv_cache(config: VllmConfig | None = None) -> bool:
 
 class AscendFlashAttentionBackend(AttentionBackend):
     accept_output_buffer = True
+    # The builder prepares device tiling before FULL replay. Unlike FIA, this
+    # backend needs neither a second metadata build nor host graph-task updates.
+    uses_device_tiling = True
     # Both model runners use the attention layer's cache-update contract.
     # FA3 writes K/V inside forward, before reading the paged cache.
     forward_includes_kv_cache_update = True
@@ -213,14 +216,11 @@ class AscendFlashAttentionMetadataBuilder(AttentionMetadataBuilder[AscendFlashAt
         # The runner can append zero-length or dummy requests for graph padding.
         # Its CPU offsets identify the active prefix without a device sync.
         # Keep one empty request for dummy forwards: the operator requires B > 0.
+        # FULL draft metadata can report padded tokens beyond the last offset.
+        num_query_tokens = min(common.num_actual_tokens, int(common.query_start_loc_cpu[num_reqs]))
         active_reqs = max(
             1,
-            # With MTP graph padding, num_actual_tokens can exceed the last
-            # CPU query offset, so searchsorted returns num_reqs + 1.
-            # Clamp to num_reqs to match the available per-request metadata.
-            min(
-                num_reqs, int(torch.searchsorted(common.query_start_loc_cpu[: num_reqs + 1], common.num_actual_tokens))
-            ),
+            int(torch.searchsorted(common.query_start_loc_cpu[: num_reqs + 1], num_query_tokens)),
         )
         # The runner owns graph-stable buffers. Device tiling limits reads to
         # active_reqs, so padding rows need neither copying nor sanitizing.

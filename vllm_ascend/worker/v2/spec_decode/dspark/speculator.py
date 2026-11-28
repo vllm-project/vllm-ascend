@@ -25,6 +25,7 @@ from vllm.config.compilation import CUDAGraphMode
 from vllm.distributed import get_dcp_group
 from vllm.model_executor.layers.attention_layer_base import AttentionLayerBase
 from vllm.v1.attention.backend import AttentionBackend
+from vllm.v1.attention.selector import _cached_get_attn_backend
 from vllm.v1.worker.gpu.cudagraph_utils import BatchExecutionDescriptor
 from vllm.v1.worker.gpu.input_batch import InputBatch
 from vllm.v1.worker.gpu.spec_decode.dspark.speculator import (
@@ -96,7 +97,13 @@ class AscendDSparkSpeculator(LmheadTPDraftSamplingMixin, DSparkSpeculator):
         target_model: torch.nn.Module,
         target_attn_layer_names: set[str],
     ) -> torch.nn.Module:
-        model = super().load_draft_model(target_model, target_attn_layer_names)
+        # The upstream selection cache omits model_tag. Clear it around draft
+        # loading so target and draft layers select their own backends.
+        _cached_get_attn_backend.cache_clear()
+        try:
+            model = super().load_draft_model(target_model, target_attn_layer_names)
+        finally:
+            _cached_get_attn_backend.cache_clear()
         from vllm_ascend.ops.fused_moe.mega_moe_context import try_share_dspark_mega_moe_buffer
 
         try_share_dspark_mega_moe_buffer(

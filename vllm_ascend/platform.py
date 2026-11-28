@@ -2129,18 +2129,23 @@ def _uses_minimax_fa3(config) -> bool:
 def _uses_qwen_fa3(config: VllmConfig) -> bool:
     from vllm.compilation import backends
 
-    architectures = config.model_config.hf_config.architectures or ()
-    if (
-        FlashAttentionNpu3Model.QWEN not in get_current_hardware_profile().flash_attn_npu_3_models
-        or QWEN_FA3_TARGETS.isdisjoint(architectures)
-    ):
+    if FlashAttentionNpu3Model.QWEN not in get_current_hardware_profile().flash_attn_npu_3_models:
         return False
-    # DFlash keeps the target model config while loading the draft.
+
+    # Both loaders retain the target model config while loading the draft.
     spec = config.speculative_config
+    model_tag = getattr(backends, "model_tag", None)
+    draft_architectures = spec.draft_model_config.architectures or ()
+    if spec.method == "dspark":
+        return model_tag == "dspark_head" and not {"Qwen3DSparkModel", "Qwen3OmniDSparkModel"}.isdisjoint(
+            draft_architectures
+        )
+
     return (
-        backends.model_tag in ("backbone", "dflash_head")
+        model_tag in ("backbone", "dflash_head")
         and spec.method == "dflash"
-        and "DFlash2DraftModel" in (spec.draft_model_config.architectures or ())
+        and "DFlash2DraftModel" in draft_architectures
+        and not QWEN_FA3_TARGETS.isdisjoint(config.model_config.hf_config.architectures or ())
     )
 
 
