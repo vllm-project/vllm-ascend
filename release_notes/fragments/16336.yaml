@@ -1,0 +1,11 @@
+pr: 16336
+entries:
+  - category: performance
+    text: >-
+      Improved Qwen3.5 vision attention preprocessing on Ascend A2 by fusing
+      packed BF16 QKV extraction, Q/K RoPE, and FIA padding into one step
+      instead of materializing Q/K and padding separately. On 910B3,
+      41-8,160-token BF16 inputs saw median preprocessing latency drop by
+      31.3-34.7% and packed-QKV-through-FIA latency by 10.4-19.2%. No
+      configuration is required.
+    hardware: [A2]

@@ -169,3 +169,4 @@ configuration rather than the runner input or sampling interface.
 | [step5/summary_update.py](step5/summary_update.py) | Step5 CSA region summaries: [decode](docs/step5_update_decode.md), [verify](docs/step5_update_verify.md), [prefill](docs/step5_update_prefill.md), [prefill grouping](docs/step5_build_prefill_groups.md), [GBSA id pack](docs/step5_append_current_region.md) |
 | [triton_utils.py](triton_utils.py) | Model/attention primitive or shared utility |
 | [turboquant_finalize.py](turboquant_finalize.py) | Model/attention primitive or shared utility |
+| [vision_qkv_rope_pad.py](vision_qkv_rope_pad.py) | Qwen vision attention preprocessing. [Operator documentation](docs/vision_qkv_rope_pad.md) |

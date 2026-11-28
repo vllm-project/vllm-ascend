@@ -1,3 +1,4 @@
+from types import SimpleNamespace
 from typing import Any
 from unittest.mock import MagicMock, patch
 
@@ -9,9 +10,11 @@ from vllm.model_executor.layers.attention.mm_encoder_attention import MMEncoderA
 from vllm.v1.attention.backends.registry import AttentionBackendEnum
 
 from tests.ut.base import TestBase
+from vllm_ascend.device.hardware import AscendDeviceType
 from vllm_ascend.ops.mm_encoder_attention import (
     MAX_PAD_SIZE,
     AscendMMEncoderAttention,
+    _get_fused_fia_seq_lengths,
 )
 from vllm_ascend.worker import encoder_acl_graph
 from vllm_ascend.worker.encoder_acl_graph import (
@@ -193,6 +196,128 @@ class TestAscendMMEncoderAttentionEager(FIAMockMixin):
         self.assertEqual(out.shape, query.shape)
         self.assertEqual(self.captured["actual_seq_lengths"], [3, 10, 12])
         self.assertEqual(self.captured["q_shape"], (len(seq_lens) * max_q_len, 4, MAX_PAD_SIZE))
+
+    @patch(
+        "vllm_ascend.ops.mm_encoder_attention.get_encoder_forward_context",
+        return_value=SimpleNamespace(capturing=False),
+    )
+    @patch("vllm_ascend.ops.mm_encoder_attention.HAS_TRITON", True)
+    @patch("vllm_ascend.ops.mm_encoder_attention.get_ascend_device_type", return_value=AscendDeviceType.A2)
+    def test_fused_qkv_rope_pad_guard_accepts_supported_contract(
+        self,
+        _mock_device_type,
+        _mock_forward_context,
+    ):
+        layer = self._make_layer(num_heads=8, num_kv_heads=8, head_size=72)
+        device = SimpleNamespace(type="npu")
+
+        qkv = MagicMock(ndim=3, shape=(41, 1, 1728), dtype=torch.bfloat16, device=device)
+        cos = MagicMock(shape=(41, 36), dtype=torch.bfloat16, device=device)
+        sin = MagicMock(shape=(41, 36), dtype=torch.bfloat16, device=device)
+        for tensor in (qkv, cos, sin):
+            tensor.is_contiguous.return_value = True
+
+        for boundaries, accepted in (([0, 41], True), ([0, 20, 41], True), ([[0, 41]], False)):
+            with self.subTest(boundaries=boundaries):
+                self.assertEqual(
+                    layer._can_use_fused_qkv_rope_pad_fia(qkv, cos, sin, torch.tensor(boundaries, dtype=torch.int32)),
+                    accepted,
+                )
+
+        with patch("vllm_ascend.ops.mm_encoder_attention.get_ascend_device_type", return_value=AscendDeviceType.A3):
+            self.assertFalse(
+                layer._can_use_fused_qkv_rope_pad_fia(qkv, cos, sin, torch.tensor([0, 41], dtype=torch.int32))
+            )
+
+        layer.head_size = 80
+        self.assertFalse(layer._can_use_fused_qkv_rope_pad_fia(qkv, cos, sin, torch.tensor([0, 41], dtype=torch.int32)))
+        layer.head_size = 72
+        qkv.dtype = torch.float16
+        self.assertFalse(layer._can_use_fused_qkv_rope_pad_fia(qkv, cos, sin, torch.tensor([0, 41], dtype=torch.int32)))
+
+
+class TestFusedQkvRopePadHostLengths(TestBase):
+    def test_convert_packed_lengths(self):
+        boundaries = torch.tensor([0, 100, 240, 400, 400], dtype=torch.int32)
+        self.assertEqual(_get_fused_fia_seq_lengths(boundaries, 400), [100, 240, 400, 400])
+
+    def test_invalid_boundaries_are_ineligible(self):
+        for values in ([0, 240], [12, 400], [0, 100, 240], [0, 240, 100, 400], [0, -1, 400]):
+            with self.subTest(values=values):
+                self.assertIsNone(_get_fused_fia_seq_lengths(torch.tensor(values), 400))
+        self.assertIsNone(_get_fused_fia_seq_lengths(torch.tensor([0, 400], dtype=torch.float32), 400))
+        self.assertIsNone(_get_fused_fia_seq_lengths(torch.tensor([0, 0]), 0))
+
+    def test_reused_inference_metadata_reflects_in_place_updates(self):
+        with torch.inference_mode():
+            boundaries = torch.tensor([0, 100, 240, 400], dtype=torch.int32)
+            self.assertEqual(_get_fused_fia_seq_lengths(boundaries, 400), [100, 240, 400])
+            boundaries[1] = 120
+            self.assertEqual(_get_fused_fia_seq_lengths(boundaries, 400), [120, 240, 400])
+
+
+class TestFusedQkvRopePadForward(FIAMockMixin):
+    def setUp(self):
+        self._install_vllm_config_mock()
+        for name, value in (
+            ("get_ascend_device_type", AscendDeviceType.A2),
+            ("get_encoder_forward_context", SimpleNamespace(capturing=False)),
+        ):
+            mock = patch(f"vllm_ascend.ops.mm_encoder_attention.{name}", return_value=value)
+            mock.start()
+            self.addCleanup(mock.stop)
+        triton = patch("vllm_ascend.ops.mm_encoder_attention.HAS_TRITON", True)
+        triton.start()
+        self.addCleanup(triton.stop)
+
+    def _make_fused_layer(self):
+        return self._make_layer(num_heads=8, num_kv_heads=8, head_size=72)
+
+    def _make_forward_mocks(self, token_count: int, boundaries: list[int]):
+        device = SimpleNamespace(type="npu")
+        qkv = MagicMock(
+            ndim=3,
+            shape=(token_count, 1, 1728),
+            dtype=torch.bfloat16,
+            device=device,
+        )
+        qkv.is_contiguous.return_value = True
+        cos = MagicMock(shape=(token_count, 36), dtype=torch.bfloat16, device=device)
+        cos.is_contiguous.return_value = True
+        sin = MagicMock(shape=(token_count, 36), dtype=torch.bfloat16, device=device)
+        sin.is_contiguous.return_value = True
+        cu_seqlens = torch.tensor(boundaries, dtype=torch.int32)
+        return qkv, cos, sin, cu_seqlens
+
+    @patch.dict("os.environ", {"VLLM_ASCEND_ENABLE_VIT_FUSED_QKV_ROPE_PAD": "0"})
+    def test_forward_uses_real_lengths_with_removed_switch_disabled(self):
+        layer = self._make_fused_layer()
+        with (
+            patch(
+                "vllm_ascend.ops.triton.vision_qkv_rope_pad.vision_qkv_rope_pad",
+                return_value=(MagicMock(), MagicMock(), MagicMock()),
+            ) as mock_kernel,
+            patch.object(layer, "_run_vit_fia", return_value=MagicMock()) as mock_fia,
+        ):
+            for boundaries in ([0, 257], [0, 100, 240, 400]):
+                with self.subTest(boundaries=boundaries):
+                    qkv, cos, sin, cu_seqlens = self._make_forward_mocks(boundaries[-1], boundaries)
+                    context = layer.forward_qkv_rope_pad_fia(qkv, cos, sin, cu_seqlens=cu_seqlens)
+                    self.assertIsNotNone(context)
+                    self.assertEqual(mock_fia.call_args.args[3:], (boundaries[1:], boundaries[1:]))
+            self.assertEqual(mock_kernel.call_count, 2)
+
+    def test_forward_invalid_boundaries_fall_back(self):
+        layer = self._make_fused_layer()
+
+        with patch(
+            "vllm_ascend.ops.triton.vision_qkv_rope_pad.vision_qkv_rope_pad",
+        ) as mock_kernel:
+            for boundaries in ([0, 399], [0, 100, 240]):
+                with self.subTest(boundaries=boundaries):
+                    qkv, cos, sin, cu_seqlens = self._make_forward_mocks(400, boundaries)
+                    self.assertIsNone(layer.forward_qkv_rope_pad_fia(qkv, cos, sin, cu_seqlens=cu_seqlens))
+        mock_kernel.assert_not_called()
 
 
 class TestAscendMMEncoderAttentionCapture(FIAMockMixin):
