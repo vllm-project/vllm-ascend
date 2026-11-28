@@ -6,9 +6,13 @@ from contextlib import AbstractContextManager
 from typing import TYPE_CHECKING
 
 import torch
+from vllm.compilation.breakable_cudagraph import (
+    eager_break_during_capture,
+    is_breakable_cudagraph_enabled,
+)
 from vllm.config import CUDAGraphMode, VllmConfig
 from vllm.distributed import get_tp_group, tensor_model_parallel_all_gather
-from vllm.forward_context import get_forward_context
+from vllm.forward_context import get_forward_context, in_piecewise_cudagraph
 from vllm.logger import logger
 from vllm.utils.torch_utils import direct_register_custom_op
 
@@ -41,15 +45,63 @@ class AscendDecoderReplayLayers:
         self.sequence_parallel = False
         self.smla_plan_ratios: tuple[int, ...] | None = None
         self.first_swa_plan_ratios: tuple[int, ...] | None = None
+        # Set by the model state with replay graphs: PIECEWISE model graphs of
+        # this many tokens or more break out to the replay batch.
+        self.trim_threshold: int | None = None
+        self._break_outputs: list[torch.Tensor] | None = None
 
     def __call__(self, *states: torch.Tensor | None) -> tuple[torch.Tensor, ...]:
-        if self.rows is None:
-            if self.context_factory is not None:
-                # A peer DP replica compacted its batch. Keep our original PCP
-                # layout, but use the decoder's new cross-DP token counts.
-                with self.context_factory():
-                    return self.run_layers(*states)
-            return self.run_layers(*states)
+        if self.uses_replay_batch():
+            # A PIECEWISE graph cannot replay the trimmed batch: the graph
+            # segments around it are captured at the batch's own token count.
+            if in_piecewise_cudagraph():
+                return self._run_in_graph_break(*states)
+            return self._run_replay(states)
+        if self.context_factory is not None:
+            # A peer DP replica compacted its batch. Keep our original PCP
+            # layout, but use the decoder's new cross-DP token counts.
+            with self.context_factory():
+                return self.run_layers(*states)
+        return self.run_layers(*states)
+
+    def uses_replay_batch(self) -> bool:
+        """Whether this forward runs the layers on a replay batch.
+
+        Inside a PIECEWISE graph the answer comes from the graph's token count
+        rather than from the live state: no Python runs when the graph replays,
+        so capture and replay have to agree on a value fixed by the graph size.
+        """
+        if self.trim_threshold is not None and in_piecewise_cudagraph():
+            batch_descriptor = get_forward_context().batch_descriptor
+            assert batch_descriptor is not None, (
+                "A PIECEWISE graph of the decoder replay layers needs a batch "
+                "descriptor to decide whether it breaks out."
+            )
+            return self.graph_uses_replay_batch(batch_descriptor.num_tokens)
+        return self.rows is not None
+
+    def graph_uses_replay_batch(self, num_tokens: int) -> bool:
+        """Whether a PIECEWISE graph of `num_tokens` breaks out to the replay batch."""
+        return self.trim_threshold is not None and num_tokens >= self.trim_threshold
+
+    @eager_break_during_capture
+    def _run_in_graph_break(self, *states: torch.Tensor | None) -> tuple[torch.Tensor, ...]:
+        """A graph break: the outputs land in fixed buffers the next segment reads."""
+        outputs = self._run_replay(states)
+        if self._break_outputs is None:
+            # Sized by the first call: the largest model graph is captured first.
+            self._break_outputs = [torch.empty_like(out) for out in outputs]
+        return tuple(buf[: out.shape[0]].copy_(out) for buf, out in zip(self._break_outputs, outputs))
+
+    def _run_replay(self, states: tuple[torch.Tensor | None, ...]) -> tuple[torch.Tensor, ...]:
+        rows = self.rows
+        if rows is None:
+            # Capturing a graph that breaks out here, or a replica whose batch
+            # stays whole: run the layers on the batch as captured.
+            if self.context_factory is None:
+                return self.run_layers(*states)
+            with self.context_factory():
+                return self.run_layers(*states)
         assert self.context_factory is not None
         positions = states[2]
         assert positions is not None
@@ -150,6 +202,18 @@ direct_register_custom_op(
 )
 
 
+def supports_replay_graph_mode(compilation_config) -> bool:
+    """Whether the replay layers can run under this graph mode.
+
+    A PIECEWISE graph keeps the layers on the token count it was captured at, so
+    trimming inside one needs a graph break, and only breakable capture has one.
+    """
+    mode = compilation_config.cudagraph_mode
+    if mode in (CUDAGraphMode.NONE, CUDAGraphMode.FULL_DECODE_ONLY):
+        return True
+    return mode.has_piecewise_cudagraphs() and is_breakable_cudagraph_enabled(compilation_config)
+
+
 def make_decoder_replay(model: "DeepseekV41Model", config: VllmConfig) -> AscendDecoderReplayLayers | None:
     if not getattr(config.cache_config, "swa_bounded_replay", False):
         return None
@@ -174,8 +238,12 @@ def make_decoder_replay(model: "DeepseekV41Model", config: VllmConfig) -> Ascend
         return None
     if model.use_sequence_parallel or parallel.decode_context_parallel_size > 1 or parallel.use_ubatching:
         reason = "SP, DCP and microbatching need a separate replay layout"
-    elif config.compilation_config.cudagraph_mode not in (CUDAGraphMode.NONE, CUDAGraphMode.FULL_DECODE_ONLY):
-        reason = "replay prefill requires eager execution; use NONE or FULL_DECODE_ONLY"
+    elif not supports_replay_graph_mode(config.compilation_config):
+        reason = (
+            "replay prefill needs eager execution or PIECEWISE graphs that break out "
+            "to the replay batch; use NONE, FULL_DECODE_ONLY, or PIECEWISE with "
+            "breakable cudagraph capture enabled"
+        )
     elif any(layer > cut for layer in model.config.engram_layer_ids):
         reason = "an Engram layer follows the last KV source"
     elif speculative is not None and not speculative.use_dspark():

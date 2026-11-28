@@ -330,3 +330,90 @@ def test_model_replays_only_layers_after_kv_sources(monkeypatch, num_layers, rep
     for actual, reference, index in zip(aux, regular_aux, selected):
         rows = slice(2, None) if compacted and index >= replay_start else slice(None)
         torch.testing.assert_close(actual[rows], reference[rows])
+
+
+def test_piecewise_replay_batch_follows_the_graph_token_count(monkeypatch):
+    graph_tokens = [2048]
+    replay = replay_mod.AscendDecoderReplayLayers(2, lambda *states: states, [])
+    monkeypatch.setattr(replay_mod, "in_piecewise_cudagraph", lambda: True)
+    monkeypatch.setattr(
+        replay_mod,
+        "get_forward_context",
+        lambda: SimpleNamespace(batch_descriptor=SimpleNamespace(num_tokens=graph_tokens[0])),
+    )
+
+    # Capture and replay agree on the graph's size, not on the live replay batch.
+    replay.trim_threshold = 768
+    assert replay.uses_replay_batch()
+    graph_tokens[0] = 512
+    assert not replay.uses_replay_batch()
+    replay.trim_threshold = None
+    assert not replay.uses_replay_batch()
+
+    # Outside a graph the answer follows the replay batch the model state set.
+    monkeypatch.setattr(replay_mod, "in_piecewise_cudagraph", lambda: False)
+    assert not replay.uses_replay_batch()
+    replay.rows = torch.tensor([0, 1])
+    assert replay.uses_replay_batch()
+
+
+def test_piecewise_break_writes_fixed_output_buffers():
+    def run_layers(hidden, pre_mix, positions, input_ids):
+        return hidden + 1, pre_mix + 2
+
+    replay = replay_mod.AscendDecoderReplayLayers(2, run_layers, [])
+    replay.context_factory = nullcontext
+    hidden = torch.arange(8).float().reshape(4, 2)
+    pre_mix = torch.zeros(4, 1)
+    positions = torch.arange(4)
+
+    replay.rows = torch.tensor([2, 3])
+    replay.num_actual_rows = 2
+    first = replay._run_in_graph_break(hidden, pre_mix, positions, None)
+    addresses = [out.data_ptr() for out in first]
+    torch.testing.assert_close(first[0], torch.tensor([[0.0, 0.0], [0.0, 0.0], [5.0, 6.0], [7.0, 8.0]]))
+    torch.testing.assert_close(first[1], torch.tensor([[0.0], [0.0], [2.0], [2.0]]))
+
+    # A second step reuses the same buffers: the next graph segment reads them.
+    replay.rows = torch.tensor([0, 1])
+    second = replay._run_in_graph_break(hidden, pre_mix, positions, None)
+    assert [out.data_ptr() for out in second] == addresses
+    torch.testing.assert_close(second[0], torch.tensor([[1.0, 2.0], [3.0, 4.0], [0.0, 0.0], [0.0, 0.0]]))
+
+
+def _piecewise_replay_inputs(breakable: bool):
+    model = SimpleNamespace(
+        config=SimpleNamespace(kv_source_layer_ids=[0], sliding_window=2, engram_layer_ids=[]),
+        end_layer=3,
+        decoder_replay_start=3,
+        use_sequence_parallel=False,
+        _run_replay_layers=lambda *states: states,
+        topk_indices_buffer=torch.zeros(8, 2),
+        candidate_indices_buffer=torch.zeros(8, 2),
+        candidate_lengths_buffer=torch.zeros(8),
+        topk_lengths_buffer=torch.zeros(8),
+    )
+    config = SimpleNamespace(
+        cache_config=SimpleNamespace(swa_bounded_replay=True),
+        parallel_config=SimpleNamespace(
+            pipeline_parallel_size=1,
+            prefill_context_parallel_size=1,
+            data_parallel_size=1,
+            decode_context_parallel_size=1,
+            use_ubatching=False,
+        ),
+        compilation_config=SimpleNamespace(
+            cudagraph_mode=CUDAGraphMode.PIECEWISE,
+            use_breakable_cudagraph=breakable,
+        ),
+        speculative_config=None,
+        lora_config=None,
+    )
+    return model, config
+
+
+@pytest.mark.parametrize(("breakable", "kept"), [(True, True), (False, False)])
+def test_piecewise_replay_needs_breakable_capture(breakable, kept):
+    model, config = _piecewise_replay_inputs(breakable)
+    replay = replay_mod.make_decoder_replay(model, config)
+    assert (replay is not None) is kept

@@ -28,6 +28,7 @@ import torch.distributed as dist
 from vllm.config.compilation import CUDAGraphMode
 from vllm.distributed import get_dp_group
 from vllm.forward_context import get_forward_context, set_forward_context
+from vllm.logger import logger
 from vllm.utils.platform_utils import is_pin_memory_available
 from vllm.v1.kv_cache_interface import CircularBufferSpec, KVCacheConfig
 from vllm.v1.utils import CpuGpuBuffer
@@ -146,6 +147,7 @@ class AscendModelState(DefaultModelState):
         self.decoder_replay: AscendDecoderReplayLayers | None = getattr(self.model, "decoder_replay_layers", None)
         if self.decoder_replay is None:
             return
+        self._initialize_replay_trim_threshold(self.decoder_replay)
         tp_size = self.vllm_config.parallel_config.tensor_parallel_size
         max_capture = self.vllm_config.compilation_config.max_cudagraph_capture_size or 0
         capacity = max(self.max_num_tokens, max_capture)
@@ -170,6 +172,36 @@ class AscendModelState(DefaultModelState):
         self._decoder_replay_counts: torch.Tensor | None = None
         self._decoder_replay_counts_device: torch.Tensor | None = None
         self.prompt_logprobs_worker = None
+
+    def _initialize_replay_trim_threshold(self, layers: "AscendDecoderReplayLayers") -> None:
+        """Let PIECEWISE model graphs this wide break out to the replay batch.
+
+        Only breakable capture has a graph break, and only a break lets the tail
+        run at a token count the graph was not captured at. The threshold has to
+        clear the replay window, or the replay batch is the batch it trims.
+        """
+        from vllm_ascend.models.deepseek_v41.decoder_replay_layers import supports_replay_graph_mode
+
+        compilation = self.vllm_config.compilation_config
+        if (
+            not compilation.cudagraph_decoder_replay
+            or not compilation.cudagraph_mode.has_piecewise_cudagraphs()
+            or not supports_replay_graph_mode(compilation)
+            or self.vllm_config.lora_config is not None
+            or self.vllm_config.model_config.enable_prompt_embeds
+        ):
+            return
+        threshold = compilation.decoder_replay_trim_threshold
+        if threshold <= layers.window:
+            raise ValueError(
+                f"decoder_replay_trim_threshold must exceed the replay window of {layers.window} "
+                "tokens: smaller graphs have nothing to trim"
+            )
+        layers.trim_threshold = threshold
+        logger.info_once(
+            "Decoder bounded replay trims PIECEWISE graphs of %d tokens or more.",
+            threshold,
+        )
 
     def _initialize_decoder_replay_metadata(self, attn_groups, kv_cache_config) -> None:
         from vllm_ascend.attention.dsa_v41 import AscendDSAV41MetadataBuilder
@@ -213,18 +245,27 @@ class AscendModelState(DefaultModelState):
         if layers is None:
             return
         layers.rows = layers.context_factory = None
+        layers.num_padded_rows = None
         if self.vllm_config.parallel_config.data_parallel_size > 1 and should_skip_allreduce_across_dp_group(
             self.vllm_config
         ):
             return
         if not self._decoder_replay_builders:
             self._initialize_decoder_replay_metadata(attn_groups, kv_cache_config)
-        if cudagraph_mode != CUDAGraphMode.NONE or getattr(input_batch, "is_dummy", False):
+        # A PIECEWISE model graph this wide breaks out of its capture to run the
+        # layers here, at the trimmed token count. Captures keep the batch whole:
+        # the graph is sized on it, and the break runs its eager body at replay.
+        force_replay_batch = (
+            cudagraph_mode == CUDAGraphMode.PIECEWISE
+            and layers.trim_threshold is not None
+            and input_batch.num_tokens_after_padding >= layers.trim_threshold
+        )
+        if not force_replay_batch and (cudagraph_mode != CUDAGraphMode.NONE or getattr(input_batch, "is_dummy", False)):
             return
 
         common_by_group = self._decoder_replay_common_metadata
         real_batch = input_batch.num_reqs > 0 and bool(common_by_group)
-        trims = False
+        trims = force_replay_batch
         kept_lens = np.empty(0, dtype=np.int32)
         self._decoder_replay_num_actual_tokens = input_batch.num_tokens
         if real_batch:
@@ -237,7 +278,7 @@ class AscendModelState(DefaultModelState):
                 keep_rows = worker.uses_prompt_logprobs[input_batch.idx_mapping_np[:num_reqs]]
             prefills = input_batch.is_prefilling_np[:num_reqs]
             kept_lens = np.where(prefills & ~keep_rows, np.minimum(query_lens, layers.window), query_lens)
-            trims = bool((kept_lens < query_lens).any())
+            trims = force_replay_batch or bool((kept_lens < query_lens).any())
             self._decoder_replay_num_actual_tokens = int(kept_lens.sum())
             kept_offsets = self._decoder_replay_offsets.np[: num_reqs + 1]
             kept_offsets[0] = 0
