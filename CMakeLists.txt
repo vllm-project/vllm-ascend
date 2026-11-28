@@ -270,3 +270,7 @@ if(SOC_VERSION MATCHES "ascend310p.*|ascend950")
 else()
   install(TARGETS vllm_ascend_C vllm_ascend_kernels DESTINATION ${VLLM_ASCEND_INSTALL_PATH})
 endif()
+
+if(SOC_VERSION MATCHES "ascend950")
+  include(cmake/external_projects/deepgemm.cmake)
+endif()

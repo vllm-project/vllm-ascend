@@ -284,6 +284,9 @@ class AscendW4A8MXFPDynamicFusedMoEMethod(AscendMoEScheme):
 
     @classmethod
     def get_eplb_weight_views(cls, layer: torch.nn.Module) -> list:
+        if getattr(layer, "_deepgemm_mega_moe", None) is not None:
+            # DeepGEMM consumes the packed weights and scales in place.
+            return [layer.w13_weight, layer.w2_weight, layer.w13_weight_scale, layer.w2_weight_scale]
         if hasattr(layer, "w13_weight_list"):
             # The expert weights are cast with parameters, so EPLB cannot
             # rebuild them without the same cast. The scales stay ND.
@@ -308,6 +311,14 @@ class AscendW4A8MXFPDynamicFusedMoEMethod(AscendMoEScheme):
         Expert-list weights are intentionally not reversible for RL reload.
         """
         if getattr(layer, "_mxfp4_transformed", False):
+            return
+        moe_config = getattr(layer, "moe_config", None)
+        if getattr(moe_config, "deepgemm_mega_moe", False) is True:
+            from vllm_ascend.ops.fused_moe.deepgemm_mega_moe import DeepGemmExperts
+
+            # The native packer consumes the original checkpoint weights and scales.
+            layer._deepgemm_mega_moe = DeepGemmExperts(layer)
+            layer._mxfp4_transformed = True
             return
         # MegaMoe and EPLB share one canonical, non-transposed NZ list.
         # Evaluate after distributed initialization, when the EP group exists.
@@ -385,6 +396,8 @@ class AscendW4A8MXFPDynamicFusedMoEMethod(AscendMoEScheme):
         """
         if not getattr(layer, "_mxfp4_transformed", False):
             return
+        if hasattr(layer, "_deepgemm_mega_moe"):
+            raise RuntimeError("RL weight reload cannot restore packed DeepGEMM MXFP4 weights.")
         if self.use_expert_weight_list:
             raise RuntimeError("RL weight reload is not supported with W4A8-MXFP expert lists (EPLB or MegaMoe).")
         layer.w13_weight.data = layer.w13_weight.data.transpose(1, 2)

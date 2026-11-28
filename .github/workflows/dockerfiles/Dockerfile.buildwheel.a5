@@ -26,7 +26,7 @@ ENV SOC_VERSION=$SOC_VERSION
 ENV MAX_JOBS=$MAX_JOBS
 ENV CMAKE_BUILD_PARALLEL_LEVEL=$MAX_JOBS
 RUN yum update -y && \
-    yum install -y python3-pip git vim wget net-tools gcc gcc-c++ make cmake numactl-devel && \
+    yum install -y python3-pip git vim wget net-tools gcc gcc-c++ elfutils-devel make cmake numactl-devel && \
     rm -rf /var/cache/yum
 
 WORKDIR /workspace
@@ -35,7 +35,7 @@ COPY . /workspace/vllm-ascend/
 
 # Install req
 RUN python3 -m pip install -r vllm-ascend/requirements.txt --extra-index-url https://download.pytorch.org/whl/cpu/ --extra-index-url https://repo.huaweicloud.com/ascend/repos/pypi --extra-index-url https://repo.huaweicloud.com/ascend/repos/pypi/nightly && \
-    python3 -m pip install twine attrs psutil
+    python3 -m pip install twine attrs psutil -r vllm-ascend/tools/deepgemm/requirements-build.txt
 
 # Install vllm-ascend
 # CANN 9.2.x's custom-op installer validates the packaged .so with dlopen and

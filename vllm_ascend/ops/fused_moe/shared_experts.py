@@ -204,6 +204,16 @@ class AscendSharedExperts:
         """
         # MegaMoe's fused shared ABI does not own the DP-axis AG/RS.
         if getattr(self, "finegrained_tp_group", None) is not None:
+            if getattr(self.moe_config, "deepgemm_mega_moe", False) is True:
+                raise ValueError("DeepGEMM requires replicated shared weights for fused shared experts")
+            return
+        if getattr(self.moe_config, "deepgemm_mega_moe", False) is True:
+            if reason := self._megamoe_shared_incompatibility():
+                raise ValueError(f"DeepGEMM cannot fuse this shared expert: {reason}")
+            # The routed layer's post-load hook packs both FP8 linears directly
+            # from their checkpoint tensors. Keep the normal mode-3 forward.
+            self._wrap_linear_for_megamoe_fusion(self.layer.gate_up_proj, "w1", preserve_checkpoint=True)
+            self._wrap_linear_for_megamoe_fusion(self.layer.down_proj, "w2", preserve_checkpoint=True)
             return
         if not use_cann_megamoe(get_current_vllm_config()):
             return
@@ -244,45 +254,8 @@ class AscendSharedExperts:
                 "the CANN MegaMoe interface cannot describe W4A8 routed and W8A8 shared experts independently"
             )
             return
-        # Output gating (e.g. Qwen3-Next expert_gate) happens outside the
-        # operator and cannot be fused.
-        if getattr(self.layer, "expert_gate", None) is not None:
-            logger.info_once(
-                "MegaMoe shared-expert fusion is not supported with expert gating; "
-                "keeping the separate shared-expert forward."
-            )
-            self._megamoe_shared_fusion_disabled = True
-            return
-        # The operator consumes no shared bias.
-        if (
-            getattr(self.layer.gate_up_proj, "bias", None) is not None
-            or getattr(self.layer.down_proj, "bias", None) is not None
-        ):
-            logger.info_once(
-                "MegaMoe shared-expert fusion is not supported with shared-expert bias; "
-                "keeping the separate shared-expert forward."
-            )
-            self._megamoe_shared_fusion_disabled = True
-            return
-        # The operator exposes a single global activation/activation_params
-        # pair that it applies to the shared experts too, so fusion is only
-        # valid when the shared activation is the *same function* as the
-        # routed one: equal activation type AND equal activation params
-        # (e.g. SituAndMul beta/linear_beta, SwiGLU-OAI alpha/beta/limit).
-        # Parameterized activations of the same class but different params
-        # (or an unbounded shared SiluAndMul under a clamped routed swiglu)
-        # must keep the separate shared-expert forward.
-        # TODO(ZT-AIA): The MegaMoe operator currently executes one activation
-        # for both routed and shared experts, so it cannot represent configs
-        # where the two differ. Remove this activation-signature equality check
-        # once the operator supports distinct routed/shared activations.
-        routed_activation = self._routed_megamoe_activation_signature()
-        shared_activation = self._shared_megamoe_activation_signature()
-        if shared_activation is None or shared_activation != routed_activation:
-            self._disable_megamoe_shared_fusion(
-                f"shared activation {type(self.layer.act_fn).__name__} {shared_activation} "
-                f"does not match the routed activation {routed_activation} executed by the MegaMoe operator"
-            )
+        if reason := self._megamoe_shared_incompatibility():
+            self._disable_megamoe_shared_fusion(reason)
             return
         # The operator accumulates the shared-expert output into the local
         # token accumulator with no cross-rank reduction, so fusion is only
@@ -310,6 +283,18 @@ class AscendSharedExperts:
             (self.layer.down_proj, "w2"),
         ):
             self._wrap_linear_for_megamoe_fusion(linear, slot)
+
+    def _megamoe_shared_incompatibility(self) -> str | None:
+        if getattr(self.layer, "expert_gate", None) is not None:
+            return "the fused shared expert cannot apply an output gate"
+        if any(getattr(linear, "bias", None) is not None for linear in (self.layer.gate_up_proj, self.layer.down_proj)):
+            return "the fused shared expert does not consume linear biases"
+        # One activation and one parameter set apply to both sides of the kernel.
+        shared = self._shared_megamoe_activation_signature()
+        routed = self._routed_megamoe_activation_signature()
+        if shared is None or shared != routed:
+            return f"shared activation {shared} does not match the routed activation {routed}"
+        return None
 
     def _routed_megamoe_activation_signature(self) -> tuple[str, dict[str, float]] | None:
         """Canonical ``(name, params)`` of the activation the operator executes.
@@ -379,7 +364,9 @@ class AscendSharedExperts:
             return ("swigluoai", params)
         return None
 
-    def _wrap_linear_for_megamoe_fusion(self, linear: torch.nn.Module, slot: str) -> None:
+    def _wrap_linear_for_megamoe_fusion(
+        self, linear: torch.nn.Module, slot: str, *, preserve_checkpoint: bool = False
+    ) -> None:
         """Rebuild the shared weight right after its linear is processed.
 
         The wrapper is attached to the linear's own quant-method instance and
@@ -389,15 +376,19 @@ class AscendSharedExperts:
         quant_method = getattr(linear, "quant_method", None)
         original = getattr(quant_method, "process_weights_after_loading", None)
         if original is None:
+            if preserve_checkpoint:
+                return  # No linear post-load conversion to bypass.
             self._disable_megamoe_shared_fusion(
                 f"shared linear {type(linear).__name__} has no process_weights_after_loading"
             )
             return
 
         @wraps(original)
-        def wrapped_megamoe_collect(*args, **kwargs):
-            result = original(*args, **kwargs)
-            if args and args[0] is linear:
+        def wrapped_megamoe_collect(layer, *args, **kwargs):
+            if layer is linear and preserve_checkpoint:
+                return None
+            result = original(layer, *args, **kwargs)
+            if layer is linear:
                 self._collect_megamoe_shared_weight(slot, linear)
             return result
 

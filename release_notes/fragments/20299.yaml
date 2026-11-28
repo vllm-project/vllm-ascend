@@ -1,0 +1,7 @@
+pr: 20299
+entries:
+  - category: feature
+    text: >-
+      On Ascend 950, DeepSeek V4 family models can run routed MXFP4 experts and
+      shared FP8 experts in one DeepGEMM MegaMoE operation. To enable it, set
+      `deepgemm_mega_moe=true` with `enable_fused_mc2=3` in `--additional-config`.

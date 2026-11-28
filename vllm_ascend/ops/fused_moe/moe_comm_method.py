@@ -32,6 +32,7 @@ from vllm_ascend.ops.fused_moe.dataclass.fused_experts import MoEFusedExpertsInp
 from vllm_ascend.ops.fused_moe.dataclass.moe_mlp import MoEMlpComputeInput, build_mlp_compute_input
 from vllm_ascend.ops.fused_moe.dataclass.prepare_finalize import MoEPrepareOutput
 from vllm_ascend.ops.fused_moe.dataclass.token_dispatcher import build_token_dispatch_input
+from vllm_ascend.ops.fused_moe.deepgemm_mega_moe import deepgemm_device_supported
 from vllm_ascend.ops.fused_moe.moe_mlp import apply_moe_mlp, maybe_record_event
 from vllm_ascend.ops.fused_moe.prepare_finalize import (
     PrepareAndFinalize,
@@ -54,7 +55,7 @@ def _moe_config_key(
     moe_comm_type: MoECommType | None, moe_config: FusedMoEConfig | None
 ) -> tuple[MoECommType | None, tuple[int, ...]]:
     """Return the execution shape that owns mutable MoE comm state."""
-    _CONFIG_KEY_FIELDS = ("num_experts", "num_local_experts")
+    _CONFIG_KEY_FIELDS = ("num_experts", "num_local_experts", "deepgemm_mega_moe")
     return (moe_comm_type, tuple(int(getattr(moe_config, field, 0) or 0) for field in _CONFIG_KEY_FIELDS))
 
 
@@ -65,14 +66,33 @@ def get_moe_comm_method(
     return _MoECommMethods.get(_moe_config_key(moe_comm_type, moe_config))
 
 
-def setup_moe_comm_method(moe_config):
+def setup_moe_comm_method(moe_config, quant_type=QuantType.NONE):
+    # The weight loader and the model's communication snapshot must agree per layer.
+    moe_config.deepgemm_mega_moe = (
+        moe_config.ep_size > 1
+        and quant_type == QuantType.W4A8MXFP
+        and get_ascend_config().deepgemm_mega_moe
+        and get_current_hardware_profile().supports(HardwareCapability.CANN_MEGAMOE_MXFP)
+        and deepgemm_device_supported(moe_config.ep_group)
+    )
     if moe_config.ep_size > 1:
         _MoECommMethods[_moe_config_key(MoECommType.ALLTOALL, moe_config)] = AlltoAllCommImpl(moe_config)
         _MoECommMethods[_moe_config_key(MoECommType.ALLGATHER, moe_config)] = AllGatherCommImpl(moe_config)
         _MoECommMethods[_moe_config_key(MoECommType.MC2, moe_config)] = MC2CommImpl(moe_config)
-        _MoECommMethods[_moe_config_key(MoECommType.FUSED_MC2, moe_config)] = FusedMC2CommImpl(moe_config)
+        fused_mc2 = DeepGemmFusedMC2CommImpl if moe_config.deepgemm_mega_moe else FusedMC2CommImpl
+        _MoECommMethods[_moe_config_key(MoECommType.FUSED_MC2, moe_config)] = fused_mc2(moe_config)
     else:
         _MoECommMethods[_moe_config_key(MoECommType.ALLGATHER, moe_config)] = AllGatherCommImpl(moe_config)
+
+    # Model constructors snapshot the most recently registered methods without
+    # a layer config. Preserve that API as well as shape-specific lookup used
+    # by routed experts; target snapshots must survive draft initialization.
+    for kind in MoECommType:
+        method = get_moe_comm_method(kind, moe_config)
+        if method is not None:
+            _MoECommMethods[_moe_config_key(kind, None)] = method
+        else:
+            _MoECommMethods.pop(_moe_config_key(kind, None), None)
 
 
 @dataclass
@@ -272,7 +292,22 @@ class AlltoAllCommImpl(MoECommMethod):
         return PrepareAndFinalizeWithAll2All(self.moe_config)
 
 
-class FusedMC2CommImpl(MoECommMethod):
+class DeepGemmFusedMC2CommImpl(MC2CommImpl):
+    def _get_prepare_finalize(self):
+        return PrepareAndFinalizeWithAll2All(self.moe_config)
+
+    def prepare(self, hidden_states, router_logits, replace_allreduce=False, quant_type=QuantType.NONE):
+        # The fused kernel dispatches the rank's own rows, including zero on an idle rank.
+        return super().prepare(hidden_states, router_logits, replace_allreduce=True, quant_type=quant_type)
+
+    def fused_experts(self, fused_experts_input: MoEFusedExpertsInput, quant_method=None):
+        layer = cast(torch.nn.Module, fused_experts_input.layer)
+        return layer._deepgemm_mega_moe.apply(
+            layer, fused_experts_input.hidden_states, fused_experts_input.topk_weights, fused_experts_input.topk_ids
+        )
+
+
+class FusedMC2CommImpl(MC2CommImpl):
     """This implementation is for the scenarios listed below:
     1. `enable_expert_parallel=True`.
     2. `npu_moe_distribute_dispatch` and `npu_moe_distribute_combine` are available.
@@ -320,15 +355,6 @@ class FusedMC2CommImpl(MoECommMethod):
         self.swiglu_limit = 0.0 if moe_config.swiglu_limit is None else moe_config.swiglu_limit
         self.swiglu_alpha = 1.0 if moe_config.swiglu_alpha is None else moe_config.swiglu_alpha
         self.swiglu_beta = 0.0 if moe_config.swiglu_beta is None else moe_config.swiglu_beta
-
-    def pad_and_split_input_ids(self, input_ids):
-        return self.prepare_finalize.pad_and_split_input_ids(input_ids)  # type: ignore[attr-defined]
-
-    def _get_token_dispatcher(self):
-        return TokenDispatcherWithMC2()
-
-    def _get_prepare_finalize(self):
-        return PrepareAndFinalizeWithMC2(self.moe_config)
 
     def prepare_hccl_teardown(self) -> bool:
         """Invalidate the MegaMoe context before its MC2 group is destroyed."""
