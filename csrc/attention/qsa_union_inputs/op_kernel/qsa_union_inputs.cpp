@@ -656,6 +656,12 @@ private:
         }
         const uint32_t tail_count = MergeAndStageTails(
             meta, scratch0, scratch1, rank);
+        if (tail_count > 0 &&
+            meta.GetValue(0) < scratch0.GetValue(rank - 1)) {
+            WriteMergedOutput(group, scratch0, scratch1, rank, meta,
+                              tail_count);
+            return rank + tail_count;
+        }
         WritePackedOutput(group, scratch0, scratch1, rank);
         WriteStagedTails(group, rank, tail_count, meta);
         return rank + tail_count;
@@ -712,6 +718,22 @@ private:
                     tail, tail_masks.GetValue(tail) | contribution);
             }
         }
+        // Sort at most UNION_SIZE tails together with their packed masks.
+        for (uint32_t index = 1; index < count; ++index) {
+            const int32_t block = tail_blocks.GetValue(index);
+            const int32_t mask = tail_masks.GetValue(index);
+            uint32_t destination = index;
+            while (destination > 0 &&
+                   tail_blocks.GetValue(destination - 1) > block) {
+                tail_blocks.SetValue(destination,
+                                     tail_blocks.GetValue(destination - 1));
+                tail_masks.SetValue(destination,
+                                    tail_masks.GetValue(destination - 1));
+                --destination;
+            }
+            tail_blocks.SetValue(destination, block);
+            tail_masks.SetValue(destination, mask);
+        }
         for (uint32_t index = 0; index < count; ++index) {
             meta.SetValue(index, tail_blocks.GetValue(index));
             meta.SetValue(UNION_SIZE + index, tail_masks.GetValue(index));
@@ -753,6 +775,56 @@ private:
         SetFlag<HardEvent::V_MTE3>(unpack_ready);
         WaitFlag<HardEvent::V_MTE3>(unpack_ready);
         FlushOutputTile(group, base, count, blocks, masks);
+    }
+
+    __aicore__ inline void WriteMergedOutput(
+        uint32_t group, LocalTensor<int32_t>& union_blocks,
+        LocalTensor<int32_t>& packed_masks, uint32_t rank,
+        LocalTensor<int32_t>& meta, uint32_t tail_count)
+    {
+        const uint32_t tile_capacity = Min(OUTPUT_TILE, width_);
+        LocalTensor<int32_t> union_tile = output_tile_buf_.Get<int32_t>();
+        LocalTensor<int32_t> mask_tile = union_tile[OUTPUT_TILE];
+        // Reuse the released sort workspace for this tile's packed masks.
+        LocalTensor<int32_t> packed_tile = sort_tmp_buf_.Get<int32_t>();
+        uint32_t full = 0, tail = 0, base = 0;
+        while (full < rank || tail < tail_count) {
+            ResetOutputTile(union_tile, mask_tile, tile_capacity);
+            uint32_t current = 0;
+            while (current < tile_capacity &&
+                   (full < rank || tail < tail_count)) {
+                const bool take_full = tail >= tail_count ||
+                    (full < rank && union_blocks.GetValue(full) <
+                                      meta.GetValue(tail));
+                if (take_full) {
+                    union_tile.SetValue(current, union_blocks.GetValue(full));
+                    packed_tile.SetValue(current, packed_masks.GetValue(full));
+                    ++full;
+                } else {
+                    union_tile.SetValue(current, meta.GetValue(tail));
+                    packed_tile.SetValue(
+                        current, meta.GetValue(UNION_SIZE + tail));
+                    ++tail;
+                }
+                ++current;
+            }
+            event_t packed_ready = static_cast<event_t>(
+                GetTPipePtr()->FetchEventID(HardEvent::S_V));
+            SetFlag<HardEvent::S_V>(packed_ready);
+            WaitFlag<HardEvent::S_V>(packed_ready);
+#if __CCE_AICORE__ == 310
+            UnpackPackedMasks(mask_tile, packed_tile, current);
+#else
+            UnpackPackedMasks(mask_tile, packed_tile, current,
+                              fill_buf_.Get<int32_t>());
+#endif
+            event_t unpack_ready = static_cast<event_t>(
+                GetTPipePtr()->FetchEventID(HardEvent::V_MTE3));
+            SetFlag<HardEvent::V_MTE3>(unpack_ready);
+            WaitFlag<HardEvent::V_MTE3>(unpack_ready);
+            FlushOutputTile(group, base, current, union_tile, mask_tile);
+            base += current;
+        }
     }
 
     __aicore__ inline void WritePackedOutput(

@@ -99,6 +99,25 @@ def test_union_tail_merges_with_another_lane_full_group():
     ]
 
 
+def test_union_unmatched_tail_is_merged_in_block_order():
+    compact = torch.full((8, 515), -1, dtype=torch.int32)
+    compact[:7, :512] = torch.arange(512)
+    compact[7, :511] = torch.arange(511)
+    compact[7, 511] = 1025
+    visible = torch.arange(4097, 4105, dtype=torch.int32)
+    row_map = torch.arange(8, dtype=torch.int32).reshape(1, 8)
+    indices, counts, mask = torch.ops._C_ascend.qsa_union_inputs(compact.npu(), visible.npu(), row_map.npu())
+    assert counts.cpu().tolist() == [[514]]
+    actual_indices = indices.cpu()[0, 0, :514]
+    expected_indices = torch.cat((torch.arange(512), torch.tensor([1024, 1025])))
+    torch.testing.assert_close(actual_indices, expected_indices, rtol=0, atol=0)
+    assert torch.all(actual_indices[1:] > actual_indices[:-1]).item()
+    actual_mask = mask.cpu()[0, 0, : 514 * 4].reshape(514, 4)
+    assert actual_mask[511].tolist() == [127, 127, 127, 127]
+    assert actual_mask[512].tolist() == [7, 6, 4, 0]
+    assert actual_mask[513].tolist() == [240, 224, 192, 128]
+
+
 @pytest.mark.parametrize("groups", [1021, 1022, 1023, 1024])
 @torch.inference_mode()
 def test_qsa_union_inputs_count_writeback(groups):
