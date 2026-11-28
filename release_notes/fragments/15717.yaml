@@ -1,0 +1,5 @@
+pr: 15717
+entries:
+  - category: bugfix
+    text: Restored paged-attention selection on Ascend 310P.
+    hardware: [310P]
