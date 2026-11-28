@@ -163,19 +163,14 @@ def _align_hybrid_attention_page_sizes(kv_cache_specs: dict[str, KVCacheSpec], m
     reference = max(attention_specs.values(), key=lambda spec: spec.real_page_size_bytes)
     page_size = reference.real_page_size_bytes
     for layer_name, spec in attention_specs.items():
-        # Ascend packs each layer as [all K blocks][all V blocks]. Equal
-        # padded pages alone do not isolate block IDs: a smaller SWA K segment
-        # can overlap another request's full-attention V block. Grow scheduler
-        # blocks before padding; the backend still splits them into kernel blocks.
-        if (
-            page_size % spec.real_page_size_bytes
-            or spec.head_size * reference.head_size_v != reference.head_size * spec.head_size_v
-        ):
+        if spec.head_size * reference.head_size_v != reference.head_size * spec.head_size_v:
             raise ValueError(
                 f"Cannot align hybrid attention K/V pages for {layer_name}: "
-                "the shared contiguous cache requires matching K/V size ratios "
-                "and divisible unpadded page sizes."
+                "the shared contiguous cache requires matching K/V size ratios."
             )
+        if page_size % spec.real_page_size_bytes:
+            # Keep the logical block size and let the caller pad the physical page.
+            continue
         ratio = page_size // spec.real_page_size_bytes
         if ratio > 1:
             kv_cache_specs[layer_name] = replace(
