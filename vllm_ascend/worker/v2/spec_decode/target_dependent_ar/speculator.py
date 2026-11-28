@@ -48,7 +48,6 @@ from vllm_ascend.attention.indexer import AscendSFAIndexerBackend
 from vllm_ascend.attention.mla_v1 import AscendMLABackend, AscendMLAMetadata
 from vllm_ascend.attention.sfa_v1 import AscendSFABackend
 from vllm_ascend.compilation.updatable_graph import ContextSource, SharedSource
-from vllm_ascend.models.quarot_utils import release_unshared_target_embedding
 from vllm_ascend.utils import model_supports_dcp
 from vllm_ascend.worker.dcp_utils import DCPManager
 from vllm_ascend.worker.v2.aclgraph_utils import _get_graph_update_backend
@@ -195,7 +194,6 @@ class AscendTargetDependentARSpeculator(
             # The draft runs on the last PP stage without an encoder cache.
             # Set this before profiling so compiled inputs stay consistent.
             self.supports_mm_inputs = False
-        release_unshared_target_embedding(target_model, getattr(self, "model", None), self.vllm_config)
 
     @draft_config_context()
     def load_draft_model(

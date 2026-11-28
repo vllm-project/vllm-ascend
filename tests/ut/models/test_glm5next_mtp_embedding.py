@@ -8,12 +8,10 @@ from unittest.mock import patch
 import pytest
 import torch
 from torch import nn
-from vllm.distributed import parallel_state
 from vllm.model_executor.models.utils import PPMissingLayer
 from vllm.v1.worker.gpu.spec_decode.eagle import utils as eagle_utils
 
 from vllm_ascend.models.glm5next import mtp as mtp_module
-from vllm_ascend.models.quarot_utils import release_unshared_target_embedding
 
 
 def _draft_pp_context(pp_size):
@@ -66,26 +64,13 @@ def test_missing_checkpoint_embedding_is_rejected_without_target_copy(mtp):
 
 
 @pytest.mark.parametrize("shared_first", [False, True])
-def test_mtp_specific_embedding_takes_precedence(mtp, shared_first, monkeypatch):
+def test_mtp_specific_embedding_takes_precedence(mtp, shared_first):
     shared = "model.embed_tokens.weight", torch.ones(8, 4)
     own = "model.layers.45.embed_tokens.weight", torch.full((8, 4), 2.0)
     weights = [shared, own] if shared_first else [own, shared]
     mtp.load_weights([*weights, _mtp_weight()])
     torch.testing.assert_close(mtp.model.embed_tokens.weight, own[1])
     assert mtp.has_own_embed_tokens
-
-    # Under PP=1 the target owns its embedding; cleanup must keep it.
-    target_embed = nn.Embedding.from_pretrained(shared[1])
-    target_inner = SimpleNamespace(embed_tokens=target_embed)
-    target = SimpleNamespace(model=target_inner)
-    monkeypatch.setattr(parallel_state, "_PP", SimpleNamespace(is_first_rank=True, is_last_rank=True, world_size=1))
-    with _draft_pp_context(1):
-        eagle_utils.maybe_share_target_embed(mtp, mtp.model, target_inner)
-    config = SimpleNamespace(parallel_config=SimpleNamespace(pipeline_parallel_size=1))
-    release_unshared_target_embedding(target, mtp, config)
-    assert target_inner.embed_tokens is target_embed
-    assert mtp.has_own_embed_tokens
-    torch.testing.assert_close(mtp.model.embed_tokens.weight, own[1])
 
 
 def test_embedding_does_not_hide_missing_mtp_layer(mtp):

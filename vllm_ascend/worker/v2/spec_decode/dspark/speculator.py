@@ -37,7 +37,6 @@ from vllm_ascend.distributed.kv_transfer.kv_p2p.sfa_pd_rd2h.dspark_context impor
     DSparkContextChunk,
     initialize_draft_context_chunk,
 )
-from vllm_ascend.models.quarot_utils import release_unshared_target_embedding
 from vllm_ascend.utils import embedding_tp_enable, lmhead_tp_enable, lmhead_tp_max_num_logits
 from vllm_ascend.worker.dcp_utils import DCPManager
 from vllm_ascend.worker.v2.attn_utils import (
@@ -113,7 +112,6 @@ class AscendDSparkSpeculator(LmheadTPDraftSamplingMixin, DSparkSpeculator):
             model.configure_target_aux_hidden_capture(target_model)
 
         self._lmhead_tp_wrap_draft_logits(model)
-        release_unshared_target_embedding(target_model, model, self.vllm_config)
         return model
 
     def _lmhead_tp_wrap_draft_logits(self, model: torch.nn.Module) -> None:

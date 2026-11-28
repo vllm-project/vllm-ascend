@@ -9,29 +9,20 @@ single-stage math. These tests pin the payload key set (which must match
 ``make_empty_intermediate_tensors``) and the hand-off between two stages.
 """
 
-from contextlib import nullcontext
 from types import SimpleNamespace
-from typing import Any, cast
 
 import pytest
 import torch
-from safetensors.torch import save_file
 from torch import nn
-from vllm.config import LoadConfig, set_current_vllm_config
 from vllm.config.compilation import CompilationMode
 from vllm.distributed import parallel_state
-from vllm.model_executor.model_loader.default_loader import DefaultModelLoader
 from vllm.model_executor.models.utils import PPMissingLayer
 from vllm.sequence import IntermediateTensors
 from vllm.v1.worker.gpu.pp_utils import PPHandler
 from vllm.v1.worker.gpu.spec_decode.eagle import utils as eagle_utils
-from vllm.v1.worker.gpu.spec_decode.target_dependent_ar.speculator import TargetDependentARSpeculator
 
 from vllm_ascend.models.glm5next import model as glm5next_model
-from vllm_ascend.models.glm5next import mtp as mtp_module
-from vllm_ascend.models.glm5next.model import Glm5NextForCausalLM, Glm5NextForConditionalGeneration, Glm5NextModel
-from vllm_ascend.utils import vllm_version_is
-from vllm_ascend.worker.v2.spec_decode.mtp.speculator import AscendMTPSpeculator
+from vllm_ascend.models.glm5next.model import Glm5NextModel
 
 HIDDEN_SIZE = 8
 N_STREAMS = 4
@@ -146,179 +137,6 @@ def test_spec_decode_pp_embedding_is_loaded_by_target(monkeypatch, pp_rank, draf
         draft_inner.embed_tokens = nn.Embedding(4, HIDDEN_SIZE)
         eagle_utils.maybe_share_target_embed(SimpleNamespace(has_own_embed_tokens=False), draft_inner, target)
         assert draft_inner.embed_tokens is target.embed_tokens
-
-
-def _make_pp2_mtp_target_and_configs(tmp_path):
-    hf_text_config = SimpleNamespace(
-        vocab_size=4,
-        hidden_size=HIDDEN_SIZE,
-        index_topk=None,
-        num_hidden_layers=45,
-        num_attention_heads=1,
-        rms_norm_eps=1e-5,
-        n_routed_experts=None,
-        num_nextn_predict_layers=1,
-    )
-    load_config = LoadConfig(
-        load_format="safetensors",
-        model_loader_extra_config={"enable_weights_track": True},
-    )
-    target_model_config = SimpleNamespace(
-        model=str(tmp_path),
-        revision=None,
-        quantization=None,
-        multimodal_config=None,
-        is_moe=False,
-        hf_text_config=hf_text_config,
-    )
-    draft_hf_config = SimpleNamespace(
-        num_hidden_layers=45,
-        num_nextn_predict_layers=1,
-        n_routed_experts=0,
-        index_share_for_mtp_iteration=False,
-    )
-    draft_model_config = SimpleNamespace(
-        model=str(tmp_path),
-        revision=None,
-        quantization=None,
-        multimodal_config=None,
-        is_moe=False,
-        hf_config=draft_hf_config,
-        hf_text_config=hf_text_config,
-        may_use_target_embed=hasattr(mtp_module.Glm5NextMTP, "has_own_embed_tokens"),
-    )
-    target_config = SimpleNamespace(
-        model_config=target_model_config,
-        parallel_config=SimpleNamespace(
-            pipeline_parallel_size=2,
-            use_sequence_parallel_moe=False,
-            enable_expert_parallel=False,
-            enable_ep_weight_filter=False,
-        ),
-        compilation_config=SimpleNamespace(mode=CompilationMode.NONE),
-        load_config=load_config,
-        quant_config=None,
-        speculative_config=SimpleNamespace(
-            method="mtp",
-            uses_target_hidden_states=True,
-            draft_model_config=draft_model_config,
-            draft_load_config=None,
-            draft_lm_head_quantization=None,
-            apply_draft_overrides=lambda cfg: cfg,
-        ),
-    )
-    draft_config = SimpleNamespace(
-        model_config=draft_model_config,
-        parallel_config=SimpleNamespace(
-            pipeline_parallel_size=1,
-            prefill_context_parallel_size=1,
-            enable_expert_parallel=False,
-            enable_ep_weight_filter=False,
-        ),
-        compilation_config=SimpleNamespace(mode=CompilationMode.NONE),
-        load_config=load_config,
-        quant_config=None,
-        speculative_config=target_config.speculative_config,
-    )
-    target_inner = Glm5NextModel(vllm_config=target_config, prefix="language_model.model")
-    causal_lm = Glm5NextForCausalLM.__new__(Glm5NextForCausalLM)
-    nn.Module.__init__(causal_lm)
-    causal_lm.config = hf_text_config
-    causal_lm.model = target_inner
-    target = Glm5NextForConditionalGeneration.__new__(Glm5NextForConditionalGeneration)
-    nn.Module.__init__(target)
-    target.language_model = causal_lm
-    target._language_model_names = ["language_model"]
-    return target, causal_lm, target_inner, target_config, draft_config
-
-
-def _setup_pp2_mtp_loader_env(monkeypatch):
-    pp_group = SimpleNamespace(is_first_rank=False, is_last_rank=True, world_size=2)
-    single_pp_group = SimpleNamespace(is_first_rank=True, is_last_rank=True, world_size=1)
-    monkeypatch.setattr(parallel_state, "_PP", pp_group)
-    if not vllm_version_is("0.34.0"):
-        monkeypatch.setattr(parallel_state, "_PP_SINGLE_STAGE", single_pp_group)
-    monkeypatch.setattr(glm5next_model, "get_tensor_model_parallel_world_size", lambda: 1)
-    monkeypatch.setattr(glm5next_model, "make_layers", lambda *args, **kwargs: (0, 0, nn.ModuleList()))
-    monkeypatch.setattr(glm5next_model, "RMSNorm", lambda *args, **kwargs: nn.Identity())
-    monkeypatch.setattr(
-        glm5next_model, "VocabParallelEmbedding", lambda vocab, hidden, **kw: nn.Embedding(vocab, hidden)
-    )
-    monkeypatch.setattr(mtp_module, "fused_moe_make_expert_params_mapping", lambda *args, **kwargs: [])
-
-
-def _make_pp2_mtp_draft():
-    draft = mtp_module.Glm5NextMTP.__new__(mtp_module.Glm5NextMTP)
-    nn.Module.__init__(draft)
-    draft.config = SimpleNamespace(num_hidden_layers=45, num_nextn_predict_layers=1, n_routed_experts=0)
-    draft.is_rot_weight_used = False
-    draft.model = nn.Module()
-    draft.model.mtp_start_layer_idx = 45
-    draft.model.num_mtp_layers = 1
-    draft.model.embed_tokens = nn.Embedding(4, HIDDEN_SIZE)
-    draft.model.embed_tokens.weight.data.fill_(float("nan"))
-    layer = nn.Module()
-    layer.enorm = nn.LayerNorm(HIDDEN_SIZE, bias=False)
-    layer.enorm.weight.data.fill_(float("nan"))
-    draft.model.layers = nn.ModuleDict({"45": layer})
-    return draft
-
-
-def test_pp2_private_mtp_embedding_releases_target_copy(monkeypatch, tmp_path):
-    _setup_pp2_mtp_loader_env(monkeypatch)
-
-    target_embedding = torch.arange(4 * HIDDEN_SIZE, dtype=torch.float32).reshape(4, HIDDEN_SIZE)
-    private_embedding = torch.full((4, HIDDEN_SIZE), 5.0)
-    mtp_norm = torch.full((HIDDEN_SIZE,), 3.0)
-    save_file(
-        {
-            "model.language_model.embed_tokens.weight": target_embedding,
-            "model.language_model.layers.45.enorm.weight": mtp_norm,
-            "model.language_model.layers.45.embed_tokens.weight": private_embedding,
-        },
-        tmp_path / "model.safetensors",
-    )
-
-    target, _, target_inner, target_config, draft_config = _make_pp2_mtp_target_and_configs(tmp_path)
-    assert isinstance(target_inner.embed_tokens, nn.Embedding)
-    target_inner.embed_tokens.weight.data.fill_(float("nan"))
-
-    target_loader = DefaultModelLoader(target_config.load_config)
-    with set_current_vllm_config(target_config), torch.no_grad():
-        target_loader.load_weights(target, target_config.model_config)
-    torch.testing.assert_close(target_inner.embed_tokens.weight, target_embedding)
-
-    draft = _make_pp2_mtp_draft()
-    private_draft_embed = draft.model.embed_tokens
-
-    def load_draft_from_disk(*, vllm_config, model_config):
-        draft_loader = DefaultModelLoader(vllm_config.load_config)
-        with set_current_vllm_config(vllm_config), torch.no_grad():
-            draft_loader.load_weights(draft, model_config)
-        return draft
-
-    def load_model(speculator, target):
-        speculator.model = speculator.load_draft_model(target, set())
-
-    monkeypatch.setattr(eagle_utils, "get_model", load_draft_from_disk)
-    monkeypatch.setattr(TargetDependentARSpeculator, "load_model", load_model)
-    speculator = AscendMTPSpeculator.__new__(AscendMTPSpeculator)
-    speculator.method = "mtp"
-    speculator.vllm_config = target_config
-    speculator.draft_vllm_config = draft_config
-    draft_ctx = cast(Any, parallel_state).single_pp_stage() if not vllm_version_is("0.34.0") else nullcontext()
-    with draft_ctx:
-        if not vllm_version_is("0.34.0"):
-            assert parallel_state.get_pp_group().world_size == 1
-            assert parallel_state.get_pp_group().is_first_rank is True
-        speculator.load_model(target)
-
-    assert speculator.model is draft
-    torch.testing.assert_close(draft.model.layers["45"].enorm.weight, mtp_norm)
-    assert draft.has_own_embed_tokens is True
-    assert draft.model.embed_tokens is private_draft_embed
-    torch.testing.assert_close(draft.model.embed_tokens.weight, private_embedding)
-    assert isinstance(target_inner.embed_tokens, PPMissingLayer)
 
 
 @pytest.mark.parametrize("mhc", [True, False])
