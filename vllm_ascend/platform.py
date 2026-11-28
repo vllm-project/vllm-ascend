@@ -247,6 +247,7 @@ class NPUPlatform(Platform):
         COMPRESSED_TENSORS_METHOD,
         FP8_METHOD,
         "deepseek_v4_fp8",
+        "mxfp4",
         "modelopt_mxfp8",
         "mxfp8",
     ]
@@ -564,6 +565,7 @@ class NPUPlatform(Platform):
                 AscendFp8Config,
                 AscendModelOptMxFp8Config,
                 AscendModelSlimConfig,
+                AscendMxfp4Config,
             )
         else:
             from vllm_ascend._310p.quantization import AscendModelSlimConfig310  # noqa: F401
