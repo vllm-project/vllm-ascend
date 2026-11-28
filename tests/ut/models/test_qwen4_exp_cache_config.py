@@ -725,7 +725,7 @@ def _plan_qsa_runtime_cache(monkeypatch, text_model_type, outer_model_type, mana
         elif isinstance(spec, MambaSpec):
             backend = PleShortConvAttentionBackend if spec.tp_replicated else AscendGDNAttentionBackend
             if spec.tp_replicated:
-                spec = replace(spec, shapes=((3, 5),))
+                spec = replace(spec, shapes=((3, 5),), page_size_padded=4096)
         elif isinstance(spec, CircularBufferSpec):
             backend = AscendQSAIndexerBackend
             spec = replace(spec, head_size=44, page_size_padded=1024)
@@ -805,6 +805,8 @@ def test_qsa_unified_allocation_preserves_runtime_views(
     assert compressed.dtype == indexer_dtype
     assert conv.shape == (num_blocks, 64, 4) and ssm.shape == (num_blocks, 128, 128)
     assert ple.shape == (num_blocks, 3, 5) and ple.is_contiguous()
+    ple_tensor = next(tensor for tensor in config.kv_cache_tensors if tensor.layers == ["model.ple"])
+    assert ple_tensor.block_stride == 3 * 5 * 2
     assert hidden.shape == (num_blocks, 1, 128, 64)
     components = (keys, values, raw, compressed, conv, ssm, ple, hidden)
     assert len({component.untyped_storage().data_ptr() for component in components}) == 1
