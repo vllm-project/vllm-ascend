@@ -43,9 +43,9 @@ enum NnopbaseHcclServerType {
 
 extern aclnnStatus aclnnInnerDispatchFFNCombineBF16GetWorkspaceSize(const aclTensor* x, const aclTensorList* weight1, const aclTensorList* weight2,
                                                          const aclTensor* expertId, const aclTensorList* scale1, const aclTensorList* scale2,
-                                                         const aclTensor* probs,
+                                                         const aclTensor* probs, const aclTensor* context,
                                                          const char* group, int64_t maxOutputSize,
-                                                         bool transB, bool weightNz, int64_t worldSize,
+                                                         bool transB, bool weightNz, int64_t worldSize, int64_t cclBufferSize,
                                                          const aclTensor* out, const aclTensor* expertTokenNums,
                                                          uint64_t* workspaceSize, aclOpExecutor** executor);
 extern aclnnStatus aclnnInnerDispatchFFNCombineBF16(void *workspace, uint64_t workspaceSize,
@@ -56,16 +56,16 @@ extern "C" void __attribute__((weak)) NnopbaseSetHcclServerType(void *executor, 
 
 aclnnStatus aclnnDispatchFFNCombineBF16GetWorkspaceSize(const aclTensor* x, const aclTensorList* weight1, const aclTensorList* weight2,
                                                     const aclTensor* expertId, const aclTensorList* scale1, const aclTensorList* scale2,
-                                                    const aclTensor* probs,
-                                                    const char* group, int64_t maxOutputSize, int64_t worldSize,
+                                                    const aclTensor* probs, const aclTensor* context,
+                                                    const char* group, int64_t maxOutputSize, int64_t worldSize, int64_t cclBufferSize,
                                                     const aclTensor* out, const aclTensor* expertTokenNums,
                                                     uint64_t* workspaceSize, aclOpExecutor** executor)
 {
     bool transB = false;
     bool weightNz = true;
 
-    aclnnStatus ret = aclnnInnerDispatchFFNCombineBF16GetWorkspaceSize(x, weight1, weight2, expertId, scale1, scale2, probs, group,
-                                                                    maxOutputSize, transB, weightNz, worldSize,
+    aclnnStatus ret = aclnnInnerDispatchFFNCombineBF16GetWorkspaceSize(x, weight1, weight2, expertId, scale1, scale2, probs, context, group,
+                                                                    maxOutputSize, transB, weightNz, worldSize, cclBufferSize,
                                                                     out, expertTokenNums, workspaceSize, executor);
     return ret;
 }

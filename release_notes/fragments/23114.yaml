@@ -1,0 +1,5 @@
+pr: 23114
+entries:
+  - category: hardware
+    text: "Adds Ascend A2 (ascend910b) kernels for the three dispatch_ffn_combine variants (W4A8, W8A8, BF16) used by the fused MC2 path. The operators are not selected yet; enabling them on A2 is a separate change."
+    hardware: [A2]
