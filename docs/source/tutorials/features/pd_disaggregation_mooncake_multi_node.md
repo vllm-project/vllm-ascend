@@ -588,7 +588,6 @@ Modify `run_dp_template.sh` on each node.
     export HCCL_BUFFSIZE=256
     export TASK_QUEUE_ENABLE=1
     export HCCL_OP_EXPANSION_MODE="AIV"
-    export VLLM_USE_V1=1
     export ASCEND_RT_VISIBLE_DEVICES=$1
     vllm serve /path_to_weight/DeepSeek-r1_w8a8_mtp \
       --host 0.0.0.0 \
@@ -640,7 +639,6 @@ Modify `run_dp_template.sh` on each node.
     export HCCL_BUFFSIZE=256
     export TASK_QUEUE_ENABLE=1
     export HCCL_OP_EXPANSION_MODE="AIV"
-    export VLLM_USE_V1=1
     export ASCEND_RT_VISIBLE_DEVICES=$1
     vllm serve /path_to_weight/DeepSeek-r1_w8a8_mtp \
       --host 0.0.0.0 \
@@ -692,7 +690,6 @@ Modify `run_dp_template.sh` on each node.
     export HCCL_BUFFSIZE=600
     export TASK_QUEUE_ENABLE=1
     export HCCL_OP_EXPANSION_MODE="AIV"
-    export VLLM_USE_V1=1
     export ASCEND_RT_VISIBLE_DEVICES=$1
     vllm serve /path_to_weight/DeepSeek-r1_w8a8_mtp \
       --host 0.0.0.0 \
@@ -744,7 +741,6 @@ Modify `run_dp_template.sh` on each node.
     export HCCL_BUFFSIZE=600
     export TASK_QUEUE_ENABLE=1
     export HCCL_OP_EXPANSION_MODE="AIV"
-    export VLLM_USE_V1=1
     export ASCEND_RT_VISIBLE_DEVICES=$1
     vllm serve /path_to_weight/DeepSeek-r1_w8a8_mtp \
       --host 0.0.0.0 \
@@ -799,7 +795,6 @@ Modify `run_dp_template.sh` on each node.
     export HCCL_BUFFSIZE=256
     export TASK_QUEUE_ENABLE=1
     export HCCL_OP_EXPANSION_MODE="AIV"
-    export VLLM_USE_V1=1
     export ASCEND_RT_VISIBLE_DEVICES=$1
     vllm serve /path_to_weight/DeepSeek-r1_w8a8_mtp \
       --host 0.0.0.0 \
@@ -851,7 +846,6 @@ Modify `run_dp_template.sh` on each node.
     export HCCL_BUFFSIZE=256
     export TASK_QUEUE_ENABLE=1
     export HCCL_OP_EXPANSION_MODE="AIV"
-    export VLLM_USE_V1=1
     export ASCEND_RT_VISIBLE_DEVICES=$1
     vllm serve /path_to_weight/DeepSeek-r1_w8a8_mtp \
       --host 0.0.0.0 \
@@ -903,7 +897,6 @@ Modify `run_dp_template.sh` on each node.
     export HCCL_BUFFSIZE=600
     export TASK_QUEUE_ENABLE=1
     export HCCL_OP_EXPANSION_MODE="AIV"
-    export VLLM_USE_V1=1
     export ASCEND_RT_VISIBLE_DEVICES=$1
     vllm serve /path_to_weight/DeepSeek-r1_w8a8_mtp \
       --host 0.0.0.0 \
@@ -955,7 +948,6 @@ Modify `run_dp_template.sh` on each node.
     export HCCL_BUFFSIZE=600
     export TASK_QUEUE_ENABLE=1
     export HCCL_OP_EXPANSION_MODE="AIV"
-    export VLLM_USE_V1=1
     export ASCEND_RT_VISIBLE_DEVICES=$1
     vllm serve /path_to_weight/DeepSeek-r1_w8a8_mtp \
       --host 0.0.0.0 \
