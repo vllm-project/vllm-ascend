@@ -7,6 +7,46 @@ The vllm version must be the same as the main branch of vllm-ascend, for example
 
 ## run
 
+### Messages and Responses in the load-balancing proxy
+
+`load_balance_proxy_server_example.py` also forwards `/v1/messages` and
+`/v1/responses` when both backends expose those APIs. Responses requests
+must supply explicit input history; `background` and `previous_response_id` are
+unsupported.
+
+Without recomputation, the proxy forwards the original response bytes and usage.
+On `stop_reason="recomputed"`, it appends generated text to the original prompt
+using the existing Chat/Completions approach: the first Messages message's content,
+or Responses' string input / first input message's content. It preserves the other
+history entries, reassigns P/D instances, and deducts reported output tokens from
+an explicit `max_tokens` / `max_output_tokens` budget. The final response combines
+the earlier text with the continuation; returned usage is forwarded from the final
+backend attempt without aggregation, following the existing Chat/Completions behavior.
+For Responses list input, continuation requires the first item to be a message
+with `content`; a tool-result item cannot be used as the text prompt.
+`--max-retries` controls transport retries; recompute continuation follows the
+existing Chat/Completions loop without a separate attempt limit. The backend
+validates the remaining token budget. Recompute continuation supports text only.
+Unsupported tool/reasoning continuation is logged and stops the response, using
+the existing proxy error handling. Failures during response generation close the
+response without adding error events or changing the already-sent HTTP status.
+
+All four APIs share the transport, frame-reading, reassignment, and response path.
+Streaming forwards each complete SSE frame immediately; only incomplete frames
+are buffered. Messages continuation keeps one message lifecycle with consecutive
+content-block indexes. Responses continuation keeps one response lifecycle,
+consecutive output indexes and event sequence numbers, and combines output items
+in the final response. Complete JSON bodies are collected for non-streaming requests.
+Chat/Completions retain their text-continuation and transport-retry policy. The
+shared frame reader also prevents coalesced network chunks from duplicating events.
+
+Messages also recognizes `stop_reason="stop_sequence"` with
+`stop_sequence="recomputed"`, unless the caller explicitly requested that stop
+sequence. Current upstream Responses does not expose the scheduler's stop reason;
+its recompute retry path requires a backend that includes that field in the JSON
+response or SSE `response` object. The proxy cannot infer an omitted stop reason.
+No scheduler changes or backend patches are required by this proxy change.
+
 ### 1.Run `prefill` Node
 
 ```shell
