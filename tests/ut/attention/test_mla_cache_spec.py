@@ -19,20 +19,22 @@ from vllm_ascend.core.kv_cache_interface import AscendMLAAttentionSpec
 
 
 @pytest.mark.parametrize(
-    "model_type,heads",
+    "model_type,num_head_slots,heads",
     [
-        ("glm_moe_dsa", 12),
-        ("glm4_moe_lite", 12),
-        ("glm5_next", 12),
-        ("glm5_next_text", 12),
-        ("kimi_linear", 1),
-        ("deepseek_v3", 12),
+        ("glm_moe_dsa", None, 1),
+        ("glm_moe_dsa", 2, 2),
+        ("glm4_moe_lite", None, 12),
+        ("glm5_next", None, 12),
+        ("glm5_next_text", None, 12),
+        ("kimi_linear", None, 1),
+        ("deepseek_v3", None, 12),
     ],
 )
-def test_mla_owner_preserves_upstream_spec_metadata(monkeypatch, model_type, heads):
+def test_mla_owner_preserves_upstream_spec_metadata(monkeypatch, model_type, num_head_slots, heads):
     source = MLAAttentionSpec(
         block_size=128,
         num_kv_heads=1,
+        num_head_slots=num_head_slots,
         head_size=576,
         dtype=torch.bfloat16,
         kv_quant_mode=KVQuantMode.NONE,

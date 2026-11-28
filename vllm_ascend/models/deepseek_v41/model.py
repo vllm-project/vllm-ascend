@@ -942,6 +942,7 @@ class DeepseekV41Attention(DeepseekV41SWAAttention):
                 role.compress_ratio,
                 quant_config=quant_config,
                 is_candidate_source=role.is_candidate_source,
+                main_q_projection=self.dsa_attn.dsa_attn.impl.cv_wq_b,
             )
             if role.is_index_source
             else None

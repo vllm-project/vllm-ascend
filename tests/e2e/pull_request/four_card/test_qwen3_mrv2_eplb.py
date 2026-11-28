@@ -2,6 +2,7 @@
 # SPDX-FileCopyrightText: Copyright contributors to the vLLM Ascend project
 
 import os
+import time
 from typing import Any
 from unittest.mock import patch
 
@@ -34,7 +35,11 @@ EXPECTED_ANSWER_PREFIXES = [
     ("January",),
 ]
 ASYNC_EPLB_CYCLE_CHUNK_TOKENS = 32
-ASYNC_EPLB_CYCLE_MAX_CHUNKS = 12
+# One asynchronous cycle first computes the new placement and then commits one
+# of this model's 48 MoE layers per forward step. A decode step takes only a few
+# milliseconds, so a fixed number of chunks can run out before the placement
+# alone is ready. Bound the wait by wall-clock time instead.
+ASYNC_EPLB_CYCLE_TIMEOUT_SECONDS = 120.0
 
 
 def _assert_expected_answers(outputs, name: str) -> None:
@@ -100,9 +105,8 @@ def _run_dp2_tp2(capfd: pytest.CaptureFixture[str]):
         outputs = runner.generate_greedy(PROMPTS, max_tokens=16)
         captured = capfd.readouterr()
         captured_output += captured.out + captured.err
-        for _ in range(ASYNC_EPLB_CYCLE_MAX_CHUNKS):
-            if ASYNC_EPLB_CYCLE_COMMITTED_LOG in captured_output:
-                break
+        deadline = time.monotonic() + ASYNC_EPLB_CYCLE_TIMEOUT_SECONDS
+        while ASYNC_EPLB_CYCLE_COMMITTED_LOG not in captured_output and time.monotonic() < deadline:
             # The upstream async worker commits one of this model's 48 MoE
             # layers per forward step. Decode in bounded chunks so weight
             # transfers have time to finish, stopping as soon as the cycle is

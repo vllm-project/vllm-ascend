@@ -185,3 +185,13 @@ msgstr "- 在线服务："
 
 msgid "## Prepare model weights"
 msgstr "## 准备模型权重"
+
+msgid ""
+"Sleep-mode CPU backups are retained after wake-up and reused by later sleep\n"
+"cycles; they are released when the allocation is discarded or freed. In\n"
+"colocated RL deployments this increases host memory usage during active\n"
+"inference."
+msgstr ""
+"睡眠模式下的 CPU 备份在唤醒后仍会保留，并被后续的睡眠\n"
+"周期复用；当该分配被丢弃或释放时，这些备份会被释放。在\n"
+"共置 RL 部署中，这会在推理活跃期间增加主机内存占用。"

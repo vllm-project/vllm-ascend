@@ -41,7 +41,7 @@ The following table lists additional configuration options available in vLLM Asc
 | `kv_trace`                  | dict | `{}`    | Per-engine KV cache address diagnostics for Model Runner V2. `enabled` defaults to `false`; `action` accepts `"log"` (default) or `"raise"`. See [KV Trace](../feature_guide/kv_trace.md). |
 | `ascend_compilation_config`         | dict | `{}`    | Configuration options for Ascend compilation                                                              |
 | `ascend_warmup_config`              | dict | `{}`    | Configuration options for startup warmup that overlaps weight loading                                     |
-| `eplb_config`                       | dict | `{}`    | Runner-specific EPLB extensions. See [Expert Parallelism Load Balancer](../feature_guide/expert_parallelism_load_balancer.md). |
+| `eplb_config`                       | dict | `{}`    | Ascend extensions for upstream EPLB. See [Expert Parallelism Load Balancer](../feature_guide/expert_parallelism_load_balancer.md). |
 | `scheduler_config`                  | dict | `{}`    | Configuration options for Ascend scheduler extensions, including balance scheduling, recompute scheduling, DyntraLB, ShortRequestFirst, and dynamic chunked pipeline parallel. |
 | `refresh`                           | bool | `False` | Whether to refresh global Ascend configuration content. This is usually used by rlhf or UT/E2E test case. |
 | `runtime_config_path`               | str  | `None`  | Path to Runtime Guard JSON config. Default: `<cwd>/runtime/config/runtime_config.json`. See [Runtime Guard](../feature_guide/runtime_guard.md). |
@@ -52,7 +52,7 @@ The following table lists additional configuration options available in vLLM Asc
 | `dump_config`                       | dict | `None`  | Inline msprobe dump configuration. vLLM Ascend will materialize it to a temporary JSON file and pass that file to the debugger. |
 | `dump_config_path`                  | str  | `None`  | Configuration file path for msprobe dump (compatible legacy option).                                      |
 | `enable_shared_expert_dp`           | bool | `False` | Replicate shared-expert weights across TP ranks and run the shared expert with data parallelism. This option is independent of upstream MoE sequence parallelism; either feature or both can be enabled. It improves performance but consumes more memory. |
-| `enable_force_eplb`                 | bool | `False` | Force a deterministic round-robin expert routing to measure the EPLB performance ceiling. **Analysis and profiling only — never enable in production.** It replaces the real MoE router output, so model results and accuracy are invalid. For MoE models, startup validation rejects configurations that enable both this option and the legacy `eplb_config.dynamic_eplb` flag. |
+| `enable_force_eplb`                 | bool | `False` | Force a deterministic round-robin expert routing to measure the EPLB performance ceiling. **Analysis and profiling only — never enable in production.** It replaces the real MoE router output, so model results and accuracy are invalid. |
 | `multistream_overlap_shared_expert` | bool | `False` | Whether to enable multi-stream shared expert. This option only takes effect on MoE models with shared experts. |
 | `enable_cpu_binding`                | bool | `True`  | Enables Ascend-native CPU binding on ARM servers. Set to `False` to disable. See [CPU Binding](../feature_guide/cpu_binding.md). |
 | `pa_shape_list`                     | list | `[]`    | The custom shape list of page attention ops.                                                              |
@@ -157,24 +157,32 @@ See the
 [EPLB tuning suggestions table](../feature_guide/expert_parallelism_load_balancer.md#tuning-suggestions)
 for the advanced STAIR fields and their defaults.
 
-The legacy `dynamic_eplb`, `expert_map_path`, `expert_heat_collection_interval`,
-`algorithm_execution_interval`, `expert_map_record_path`,
-`num_redundant_experts`, `eplb_policy_type`, and `eplb_heat_collection_stage`
-fields configured the Model Runner V1 EPLB implementation, which has been
-removed. Model Runner V2 uses the upstream EPLB settings. The legacy fields are still parsed and validated at startup.
-
 | Name | Type | Default | Description |
 | ---- | ---- | ------- | ----------- |
 | `load_collection_phase` | str | `"all"` | Select `"all"`, `"prefill"`, or `"decode"` load submission. Only effective with the STAIR policy; a value other than `"all"` requires `--enable-eplb`. Any batch containing a prefill request is classified entirely as prefill. |
 | `stair_config` | dict | `{}` | Advanced STAIR policy tuning. See the [EPLB tuning suggestions table](../feature_guide/expert_parallelism_load_balancer.md#tuning-suggestions) for all fields, defaults, and ranges. |
 
-**scheduler_config**
+<span id="scheduler_config"></span>**scheduler_config**
 
 The legacy top-level `enable_balance_scheduling`, `recompute_scheduler_enable`, `short_request_first_config` keys remain supported during the migration period, but are deprecated. If both formats provide the same field, the value in `scheduler_config` takes precedence.
 
+!!! warning "Balance scheduling deprecated in v0.33.0"
+
+    Balance scheduling is deprecated as of v0.33.0 and is planned for removal in a future release. Enabling it through either configuration format still activates the feature and emits a startup warning. Moving an enabled value from the legacy key to `scheduler_config` does not remove the feature deprecation. See [RFC #23229](https://github.com/vllm-project/vllm-ascend/issues/23229).
+
+To migrate, merge the following setting into your existing `--additional-config`
+object and remove the legacy top-level `enable_balance_scheduling` key:
+
+```json
+{"scheduler_config": {"enable_balance_scheduling": false}}
+```
+
+This uses the normal scheduler path without the global admission gate. You can
+also remove both forms of the option, since the default is `false`.
+
 | Name | Type | Default | Description |
 | ---- | ---- | ------- | ----------- |
-| `enable_balance_scheduling` | bool | `False` | Whether to enable balance scheduling. The legacy `VLLM_ASCEND_BALANCE_SCHEDULING` environment variable is no longer supported. |
+| `enable_balance_scheduling` | bool | `False` | **Deprecated as of v0.33.0**; planned for removal in a future release. Enabling balance scheduling emits a startup warning; keep `false` to use the normal scheduler path. See [RFC #23229](https://github.com/vllm-project/vllm-ascend/issues/23229). The legacy `VLLM_ASCEND_BALANCE_SCHEDULING` environment variable is no longer supported. |
 | `recompute_scheduler_enable` | bool | `False` | Whether to enable the recompute scheduler. **Only valid on PD-disaggregated D nodes** (`kv_role` is `kv_consumer`). **Do not enable on P nodes or in PD-mixed mode** (no `kv_transfer_config`, `kv_role` is `kv_producer`, or `kv_role` is `kv_both`); startup will fail with a clear error. |
 | `short_request_first_config` | dict | `{}` | Configuration options for ShortRequestFirst prefill scheduling on FCFS synchronous or asynchronous, PD-prefill (P), or PD-mixed nodes. |
 | `batch_job_sched_config` | dict | `{}` | Configuration options for the batch-job-aware scheduler. See [Batch-Job-Aware Scheduler](../feature_guide/batch_job_aware_scheduler.md) for details. |

@@ -6,13 +6,17 @@ from collections.abc import Callable, Sequence
 from contextlib import suppress
 from typing import Any, cast
 
+import numpy as np
 import torch
 from vllm.config import VllmConfig
 from vllm.distributed import (
+    get_pcp_group,
     get_tp_group,
 )
 from vllm.logger import logger
+from vllm.utils.math_utils import cdiv
 from vllm.v1.core.kv_cache_utils import BlockHash
+from vllm.v1.core.single_type_kv_cache_manager import SlidingWindowManager
 from vllm.v1.kv_cache_interface import (
     KVCacheConfig,
     MambaSpec,
@@ -661,8 +665,11 @@ class LayerwiseKVPoolWorker(BaseKVPoolWorker):
         # The final-layer fence drains this rank only. Readers of replicated
         # KV must also wait for the writer before querying the previous step.
         # Use configuration, never local requests/tasks, to gate the collective.
-        if self.use_layerwise_transfer and self.layerwise_offload and self.tp_size > 1:
-            get_tp_group().barrier()
+        if self.use_layerwise_transfer and self.layerwise_offload:
+            if self.tp_size > 1:
+                get_tp_group().barrier()
+            if self.pcp_size > 1:
+                get_pcp_group().barrier()
         self.current_layer = 0
         self._dflash_save_pending = False
         self.layerwise_retrievers: list[Any] = []
@@ -1126,18 +1133,76 @@ class LayerwiseKVPoolWorker(BaseKVPoolWorker):
             if last_task is not None:
                 last_task.write_finish_keys.extend(dict.fromkeys(all_save_keys))
 
+    def _get_continuation_window_pages(
+        self, request: ReqMeta, end: int
+    ) -> list[tuple[int, int, Sequence[int] | np.ndarray, slice]]:
+        """Return logical page ranges needed to resume each rotating sliding-window group."""
+        # This calculation uses the spec page size. AscendStore also scales
+        # sliding-window group page sizes under DCP, so require DCP=1 here.
+        if not self.layerwise_offload or self.cache_coordinator is None or self.dcp_size != 1:
+            return []
+        if not self._reused_layers_by_group or end <= 0 or not request.num_prompt_tokens:
+            return []
+        blocks: Sequence[Sequence[int] | np.ndarray] = request.block_ids_by_group
+        if request.block_ids_by_group_np is not None:
+            blocks = request.block_ids_by_group_np
+        pages = []
+        for spec, groups, manager in self.cache_coordinator.attention_groups:
+            if manager is not SlidingWindowManager:
+                continue
+            first = max(0, end - spec.num_retained_tokens) // spec.block_size
+            stop = cdiv(end, spec.block_size)
+            for group in groups:
+                if group not in self._reused_layers_by_group:
+                    continue
+                ids = blocks[group]
+                pages.append((group, spec.block_size, ids, slice(first, stop)))
+        return pages
+
+    @staticmethod
+    def _validate_window_endpoint(
+        request: ReqMeta, group: int, ids: Sequence[int] | np.ndarray, window: slice, *, private_tail: bool = False
+    ) -> None:
+        if (window.start < window.stop or private_tail) and (window.stop > len(ids) or ids[window.stop - 1] == 0):
+            raise ValueError(f"Window endpoint has no allocated page: request={request.req_id} group={group}")
+
+    def _apply_sliding_window_masks(
+        self,
+        request: ReqMeta,
+        windows: Sequence[tuple[int, int, Sequence[int] | np.ndarray, slice]],
+        masks: list[Sequence[bool] | None],
+        *,
+        include_checkpoint: bool,
+    ) -> None:
+        """Select allocated live-window pages and optionally retain checkpoint pages."""
+        private_tail = include_checkpoint and (
+            request.target_token_len > len(request.block_hashes) * self.hash_block_size
+        )
+        for group, block_size, ids, window in windows:
+            self._validate_window_endpoint(request, group, ids, window, private_tail=private_tail)
+            mask = np.zeros(len(ids), dtype=np.bool_)
+
+            if include_checkpoint:
+                checkpoint = masks[group]
+                limit = min(len(ids), request.save_end_token // block_size)
+                if checkpoint is None:
+                    mask[:limit] = True
+                else:
+                    limit = min(limit, len(checkpoint))
+                    mask[:limit] = checkpoint[:limit]
+
+            mask[window] = True
+            mask &= np.not_equal(ids, 0)
+            masks[group] = cast(Sequence[bool], mask)
+
     def _compute_reachable_store_masks(
         self,
         request: ReqMeta,
     ) -> tuple[Sequence[bool] | None, ...] | None:
-        """Per-group reachable-store masks for the layerwise save path.
+        """Select pages for prefix reuse and for continuation of a running request.
 
-        Mirrors the non-layerwise store path (KVCacheStoreSendingThread):
-        for reachability-limited groups (sliding window / compressor state)
-        only the blocks the KV cache managers consider reachable are
-        persisted, instead of the full sequence. Falls back to None (store
-        everything) when the coordinator is unavailable or the save extent
-        is not aligned.
+        Start with the coordinator's checkpoint mask. Rotating sliding-window
+        groups also save the live pages the next step will need.
         """
         if getattr(self, "block_key_hybrid", False) and request.can_save and request.save_end_token > 0:
             if self.cache_coordinator is None or request.save_end_token % self.cache_transfer_granularity:
@@ -1154,13 +1219,20 @@ class LayerwiseKVPoolWorker(BaseKVPoolWorker):
             except AssertionError:
                 masks = None
         align_groups = getattr(self, "group_uses_align_state", [])
-        if not any(align_groups):
+        windows = (
+            self._get_continuation_window_pages(request, request.target_token_len)
+            if request.can_save and self.can_put
+            else []
+        )
+        if not windows and not any(align_groups):
             return masks
+        result: list[Sequence[bool] | None] = list(masks) if masks is not None else [None] * self.num_kv_cache_groups
+        if windows:
+            self._apply_sliding_window_masks(request, windows, result, include_checkpoint=True)
         # Mamba align slots can be null even when their token range is
         # reachable. They do not contain a state snapshot. Do not allocate
         # readable pool keys or copy block zero for these holes; the
         # non-layerwise path applies the same skip_null_blocks rule.
-        result: list[list[bool] | None] = list(masks) if masks is not None else [None] * self.num_kv_cache_groups
         for group_id, uses_align in enumerate(align_groups):
             if not uses_align:
                 continue
@@ -1396,12 +1468,7 @@ class LayerwiseKVPoolWorker(BaseKVPoolWorker):
         request: ReqMeta,
         cached_tokens: int,
     ) -> tuple[Sequence[bool] | None, ...] | None:
-        """Per-group load masks for the layerwise load path.
-
-        Mirrors the non-layerwise load path: only the blocks the KV cache
-        managers need for a hit of ``cached_tokens`` are fetched, which is a
-        subset of the blocks persisted by the reachable store masks.
-        """
+        """Select pages for a prefix hit or for continuation at cached_tokens."""
         if cached_tokens <= 0:
             return None
         if getattr(self, "block_key_hybrid", False):
@@ -1417,16 +1484,19 @@ class LayerwiseKVPoolWorker(BaseKVPoolWorker):
                 masks = None
         if not self.layerwise_offload or request.load_spec is None or not request.load_spec.layerwise_previous_step:
             return masks
+        windows = self._get_continuation_window_pages(request, cached_tokens)
         reused_state_groups = [
             group_id
             for group_id, uses_align in enumerate(self.group_uses_align_state)
             if uses_align and group_id in self._reused_layers_by_group
         ]
-        if not reused_state_groups:
+        if not windows and not reused_state_groups:
             return masks
-        # Preserve other groups' reachability masks. An aligned recurrent page
-        # represents one endpoint; unaligned state uses the partial GVA path.
         result: list[Sequence[bool] | None] = list(masks) if masks is not None else [None] * self.num_kv_cache_groups
+        if windows:
+            self._apply_sliding_window_masks(request, windows, result, include_checkpoint=False)
+        # Mamba restores one state snapshot. At an aligned endpoint the mask
+        # selects the last full page. GVA handles a partial page separately.
         for group_id in reused_state_groups:
             block_ids = request.block_ids_by_group[group_id]
             mask = [False] * len(block_ids)

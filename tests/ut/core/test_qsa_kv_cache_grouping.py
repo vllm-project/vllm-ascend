@@ -64,8 +64,8 @@ def test_non_qsa_config_uses_upstream_vllm_planner(monkeypatch) -> None:
     expected = SimpleNamespace()
     upstream_planner = Mock(return_value=expected)
     monkeypatch.setattr(
-        kv_cache_config_builder,
-        "_upstream_get_kv_cache_config_from_groups",
+        kv_cache_config_builder.DefaultKVCacheConfigBuilder,
+        "get_kv_cache_config_from_groups",
         upstream_planner,
     )
     monkeypatch.setattr(
@@ -80,11 +80,7 @@ def test_non_qsa_config_uses_upstream_vllm_planner(monkeypatch) -> None:
     )
 
     vllm_config = _ordinary_config()
-    actual = kv_cache_config_builder.get_ascend_kv_cache_config_from_groups(
-        vllm_config,
-        groups,
-        available_memory=123456,
-    )
+    actual = kv_cache_config_builder.get_ascend_kv_cache_config_from_groups(vllm_config, groups, num_blocks=123456)
 
     assert actual is expected
     upstream_planner.assert_called_once_with(vllm_config, groups, 123456)

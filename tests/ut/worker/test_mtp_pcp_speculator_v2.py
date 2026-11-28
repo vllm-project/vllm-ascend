@@ -29,6 +29,7 @@ from vllm.v1.worker.gpu.spec_decode.eagle import utils as eagle_utils
 from vllm.v1.worker.gpu.spec_decode.mtp.speculator import MTPSpeculator
 from vllm.v1.worker.gpu.spec_decode.target_dependent_ar import speculator as target_speculator_module
 
+from vllm_ascend._310p.worker.v2.spec_decode.mtp_speculator import AscendMTPSpeculator310
 from vllm_ascend.attention.mla_v1 import AscendMLADecodeMetadata, AscendMLAMetadata
 from vllm_ascend.patch.worker import patch_dspark
 from vllm_ascend.platform import _validate_eplb_config
@@ -36,6 +37,7 @@ from vllm_ascend.worker.v2.spec_decode.eagle.speculator import AscendEagleSpecul
 from vllm_ascend.worker.v2.spec_decode.mtp.speculator import (
     AscendMTPSpeculator,
 )
+from vllm_ascend.worker.v2.spec_decode.multi_module_mtp.speculator import AscendMultiModuleMTPSpeculator
 from vllm_ascend.worker.v2.spec_decode.pcp_utils import build_dspark_draft_config
 from vllm_ascend.worker.v2.spec_decode.target_dependent_ar import (
     speculator as speculator_module,
@@ -274,6 +276,42 @@ def test_dspark_loader_reconstructs_physical_topology_then_exposes_query_view(ep
     assert parallel.prefill_context_parallel_size == parallel.decode_context_parallel_size == 8
     with pytest.raises(ValueError, match="must be divisible"):
         patch_dspark.dspark_utils.replace(parallel, prefill_context_parallel_size=1)
+
+
+@pytest.mark.parametrize("speculator_cls", [AscendMultiModuleMTPSpeculator, AscendMTPSpeculator310])
+@pytest.mark.parametrize("is_moe", [False, True], ids=["dense", "moe"])
+def test_mtp_loader_uses_draft_expert_parallelism(eplb_worker_config, speculator_cls, is_moe):
+    target = eplb_worker_config
+    spec = target.speculative_config
+    draft = spec.draft_model_config
+    if not is_moe:
+        draft.model_arch_config = dataclass_replace(draft.model_arch_config, num_experts=0)
+    parallel = target.parallel_config
+    parallel.eplb_config.num_redundant_experts = 8
+    spec.draft_parallel_config = SpeculativeConfig.create_draft_parallel_config(
+        parallel, parallel.tensor_parallel_size, draft
+    )
+    assert spec.draft_parallel_config.enable_expert_parallel is is_moe
+    loader = object.__new__(speculator_cls)
+    loader.vllm_config = target
+    loader.speculative_config = spec
+    loader.draft_model_config = draft
+
+    loaded = loader._create_draft_vllm_config().parallel_config
+    assert loaded.enable_expert_parallel is is_moe
+    assert loaded.enable_eplb is is_moe
+    assert loaded.pipeline_parallel_size == 1
+    assert loaded.prefill_context_parallel_size == parallel.prefill_context_parallel_size == 8
+    assert parallel.enable_expert_parallel and parallel.enable_eplb
+    assert parallel.eplb_config.num_redundant_experts == 8
+    if not is_moe:
+        assert loaded.eplb_config.num_redundant_experts == 0
+        assert loaded.eplb_config is not parallel.eplb_config
+        # An invalid dense draft must still reach the upstream TP validator.
+        target.parallel_config = replace(parallel, tensor_parallel_size=2)
+        draft.model_arch_config = dataclass_replace(draft.model_arch_config, total_num_attention_heads=3)
+        with pytest.raises(ValueError, match="divisible by tensor parallel size"):
+            loader._create_draft_vllm_config()
 
 
 def test_mtp_draft_config_keeps_target_pcp_topology(eplb_worker_config):

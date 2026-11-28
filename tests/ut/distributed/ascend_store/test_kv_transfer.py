@@ -1462,7 +1462,7 @@ class TestKVCacheStoreRecvingThread(unittest.TestCase):
 
         def sdk_get(keys, addresses, sizes, direction):
             batches.append((direction, len(keys)))
-            if len(batches) == 3:
+            if len(batches) == 4:
                 return [-3106]
             dst = host if direction == MmcDirect.COPY_G2H.value else device
             data = expected[0 if dst is host else 1]
@@ -1474,8 +1474,7 @@ class TestKVCacheStoreRecvingThread(unittest.TestCase):
 
         backend.store.batch_get_into_layers.side_effect = sdk_get
         with patch(
-            "vllm_ascend.distributed.kv_transfer.kv_pool.ascend_store.backend.memcache_backend."
-            "_HISPARSE_HOST_GET_MAX_BYTES",
+            "vllm_ascend.distributed.kv_transfer.kv_pool.ascend_store.backend.memcache_backend._HISPARSE_GET_MAX_BYTES",
             16,
         ):
             for req_id in ("failed", "retry"):
@@ -1500,9 +1499,8 @@ class TestKVCacheStoreRecvingThread(unittest.TestCase):
                 else:
                     assert host.raw[16:] == expected[0]
 
-        assert (
-            batches == [(MmcDirect.COPY_G2L.value, 2), (MmcDirect.COPY_G2H.value, 1), (MmcDirect.COPY_G2H.value, 1)] * 2
-        )
+        expected_batches = [(MmcDirect.COPY_G2L.value, 1)] * 2 + [(MmcDirect.COPY_G2H.value, 1)] * 2
+        assert batches == expected_batches * 2
         assert thread.request_queue.unfinished_tasks == 0
 
     def test_hybrid_receive_results_wait_for_all_ranks_and_report_once(self):
