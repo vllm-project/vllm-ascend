@@ -41,6 +41,7 @@ from vllm_ascend.attention.utils import (
     AscendCommonAttentionMetadata,
     KVCacheRuntimeShapes,
     get_or_register_attention_buffer,
+    get_sparse_flash_mla_plan_buffer_size,
     is_pcp_enabled,
     maybe_save_kv_layer_to_connector,
     notify_kv_cache_written,
@@ -98,10 +99,7 @@ else:
     dspark_swa_indices_supported = None  # type: ignore
 
 
-# The current SparseFlashMla and MixedQuant SAS ops use 2048 int32 elements;
-# QLI and the legacy metadata op use 1024.
 SAS_METADATA_BUFFER_SIZE = 1024
-SPARSE_FLASH_MLA_METADATA_BUFFER_SIZE = 2048
 QLI_METADATA_BUFFER_SIZE = 1024
 
 
@@ -496,7 +494,6 @@ class AscendDSAReqMetadata:
     # key lets the compressor metadata be computed once per group per substep.
     cache_group_key: str = ""
     sas_metadata: torch.Tensor = None
-    sas_metadata_group_id: int | None = None
     qli_metadata: torch.Tensor = None
     qli_cu_seqlens_q: torch.Tensor = None
     qli_seqused_k: torch.Tensor = None
@@ -812,7 +809,7 @@ class AscendDSAMetadataBuilder(AttentionMetadataBuilder[AscendDSAMetadata]):
         sas_plan = get_dsa_attn_kv_plan(vllm_config, self.compressor_ratio)
         # Size the buffer for the metadata operator selected by the cache plan.
         self.sas_metadata_buffer_size = (
-            SPARSE_FLASH_MLA_METADATA_BUFFER_SIZE
+            get_sparse_flash_mla_plan_buffer_size(self.device)
             if sas_plan.get_dsa_sparse_attn_metadata_op()
             in (
                 sparse_flash_mla_metadata,
@@ -1605,25 +1602,28 @@ class AscendDSAMetadataBuilder(AttentionMetadataBuilder[AscendDSAMetadata]):
             )
             if not has_prefill:
                 assert self.spec_sas_metadata is not None
-                output = self.spec_sas_metadata[draft_index - 1]
-                size = result.numel()
-                if size == 0:
-                    raise ValueError("SAS metadata plan is empty")
-                if size != output.numel():
-                    output = output.narrow(0, 0, size)
-                return output.copy_(result)
+                self.spec_sas_metadata[draft_index - 1][: self.sas_metadata_buffer_size].copy_(
+                    result[: self.sas_metadata_buffer_size]
+                )
+                return self.spec_sas_metadata[draft_index - 1]
             return result
 
-        self._device_metadata_tasks = ()
         if build_dspark_swa is not None:
-            assert self.spec_sas_metadata is not None
             sas_metadata = self.spec_sas_metadata[draft_index - 1]
+
+            def run_attention_metadata() -> None:
+                build_attention_metadata()
+
+            self._device_metadata_tasks = (
+                DeviceMetadataTask(DeviceMetadataStage.ATTENTION, run_attention_metadata, id(sas_metadata)),
+            )
         else:
+            self._device_metadata_tasks = ()
             sas_metadata = build_attention_metadata()
 
         assert self.spec_slot_mapping is not None
         slot_mapping = self.spec_slot_mapping[draft_index - 1][: self.num_actual_tokens]
-        req_metadata = AscendDSAReqMetadata(
+        return AscendDSAReqMetadata(
             block_table=self.block_table[:num_reqs, ...],
             seq_lens=seq_lens,
             slot_mapping=slot_mapping,
@@ -1643,17 +1643,6 @@ class AscendDSAMetadataBuilder(AttentionMetadataBuilder[AscendDSAMetadata]):
             ori_win_right=ori_win_right,
             dspark_swa_indices=dspark_swa_indices,
         )
-        if build_dspark_swa is not None:
-            group_id = id(sas_metadata)
-            req_metadata.sas_metadata_group_id = group_id
-
-            def run_attention_metadata() -> None:
-                req_metadata.sas_metadata = build_attention_metadata()
-
-            self._device_metadata_tasks = (
-                DeviceMetadataTask(DeviceMetadataStage.ATTENTION, run_attention_metadata, group_id),
-            )
-        return req_metadata
 
     def build_for_graph_capture(
         self,
@@ -1782,12 +1771,7 @@ class AscendDSAAttentionMetadataBuilder(AscendDSAMetadataBuilder):
             if key not in self._sas_variant_buffers:
                 self._sas_variant_buffers[key] = torch.empty_like(output)
             output = self._sas_variant_buffers[key]
-        size = sas_metadata.numel()
-        if size == 0:
-            raise ValueError("SAS metadata plan is empty")
-        if size != output.numel():
-            output = output.narrow(0, 0, size)
-        output.copy_(sas_metadata)
+        output[: self.sas_metadata_buffer_size] = sas_metadata
         if use_specialized_metadata:
             metadata_cache[output_key] = output
         return output
@@ -1918,16 +1902,10 @@ class AscendDSAAttentionMetadataBuilder(AscendDSAMetadataBuilder):
             )
 
         if self._device_metadata_enabled:
-            group_id = id(self.sas_metadata_buffer)
-
-            def run_sas_metadata() -> None:
-                req.sas_metadata = build_sas_metadata()
-
             self._device_metadata_tasks += (
-                DeviceMetadataTask(DeviceMetadataStage.ATTENTION, run_sas_metadata, group_id),
+                DeviceMetadataTask(DeviceMetadataStage.ATTENTION, build_sas_metadata, id(self.sas_metadata_buffer)),
             )
             req.sas_metadata = self.sas_metadata_buffer
-            req.sas_metadata_group_id = group_id
         else:
             req.sas_metadata = build_sas_metadata()
         req.cu_cmp_seqlen_list = cu_seqlens_cmp_kv
@@ -2940,10 +2918,7 @@ class AscendDSAImpl(AttentionImplBase[Any]):
             )
 
         notify_kv_cache_written(layer_name)
-        group_id = common_metadata.sas_metadata_group_id
-        if group_id is None:
-            group_id = id(common_metadata.sas_metadata)
-        wait_for_device_metadata(DeviceMetadataStage.ATTENTION, group_id)
+        wait_for_device_metadata(DeviceMetadataStage.ATTENTION, id(common_metadata.sas_metadata))
         record_attention_compute_start()
         kv_plan = self.get_kv_plan()
         attn_op = kv_plan.get_dsa_sparse_attn_op()

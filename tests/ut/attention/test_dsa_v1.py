@@ -335,11 +335,7 @@ def test_num_compressor_metadata_rows(
 
 
 def test_draft_swa_and_sas_share_attention_task():
-    initial_plan = _mock_dsa_kv_plan(get_dsa_sparse_attn_metadata_op=sparse_flash_mla_metadata)
-    initial_plan.requires_block_offset_slots = False
-    initial_plan.uses_sparse_flash_mla = False
-    with patch("vllm_ascend.attention.dsa_v1.get_dsa_attn_kv_plan", return_value=initial_plan):
-        builder = _make_builder(1, num_speculative_tokens=3)
+    builder = _make_builder(1, num_speculative_tokens=3)
     builder.enable_dspark_device_metadata(max_num_tokens=16)
     assert builder.dspark_swa_indices_buffer is not None
     sas_result = torch.arange(SAS_METADATA_BUFFER_SIZE, dtype=torch.int32)
@@ -369,16 +365,9 @@ def test_draft_swa_and_sas_share_attention_task():
         metadata_op.assert_not_called()
         assert metadata.dspark_swa_indices.data_ptr() == builder.dspark_swa_indices_buffer.data_ptr()
         assert task[0].stage == DeviceMetadataStage.ATTENTION
-        sas_buffer = metadata.sas_metadata
-        group_id = metadata.sas_metadata_group_id
-        assert sas_buffer.numel() == SPARSE_FLASH_MLA_LEGACY_PLAN_SIZE
-        assert group_id == id(sas_buffer)
-        assert task[0].group_id == group_id
+        assert task[0].group_id == id(metadata.sas_metadata)
 
         task[0].run()
-        assert metadata.sas_metadata.data_ptr() == sas_buffer.data_ptr()
-        assert metadata.sas_metadata.numel() == sas_result.numel()
-        assert metadata.sas_metadata_group_id == group_id
 
         first_indices = metadata.dspark_swa_indices.clone()
         next_metadata = _build_draft_req_metadata(
