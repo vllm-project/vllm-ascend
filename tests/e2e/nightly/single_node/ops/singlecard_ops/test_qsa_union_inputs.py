@@ -109,7 +109,7 @@ def test_union_unmatched_tail_is_merged_in_block_order():
     indices, counts, mask = torch.ops._C_ascend.qsa_union_inputs(compact.npu(), visible.npu(), row_map.npu())
     assert counts.cpu().tolist() == [[514]]
     actual_indices = indices.cpu()[0, 0, :514]
-    expected_indices = torch.cat((torch.arange(512), torch.tensor([1024, 1025])))
+    expected_indices = torch.cat((torch.arange(512, dtype=torch.int32), torch.tensor([1024, 1025], dtype=torch.int32)))
     torch.testing.assert_close(actual_indices, expected_indices, rtol=0, atol=0)
     assert torch.all(actual_indices[1:] > actual_indices[:-1]).item()
     actual_mask = mask.cpu()[0, 0, : 514 * 4].reshape(514, 4)
