@@ -665,6 +665,10 @@ class AscendConfig:
     )
     enable_prefill_mc2: bool = False
     multistream_overlap_shared_expert: bool = False
+    # Force the legacy rejection-corrected exact host seq-lens sync during
+    # speculative decoding (escape hatch for models whose backends were not
+    # yet audited against the device-native default).
+    force_exact_host_seq_lens: bool = False
     enable_kv_nz: bool = False
     kv_trace: KVTraceConfig = dataclasses.field(default_factory=KVTraceConfig)
     kv_pool_range_debug: bool = False

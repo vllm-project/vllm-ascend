@@ -1,0 +1,10 @@
+pr: 17689
+entries:
+  - category: performance
+    # One to three short English sentences for users of the released artifact, not reviewers.
+    # What changed for them and what they must do. Perf: scenario + effect (no invented
+    # numbers). Breaking/config: old -> new, exact switch, migration step. Bugfix: the
+    # user-visible symptom, not the root cause. Full rules: release_notes/README.md.
+    # Do not append the PR link; the release tooling adds it automatically.
+    text: Speculative decoding no longer synchronizes the rejection-corrected exact host sequence lengths by default; the per-step CPU blocking wait now runs only for legacy attention backends (FIA/GQA and MLA metadata builders). If a model shows wrong speculative-decoding results, force the old behavior with the new `force_exact_host_seq_lens` additional-config key.
+    highlight: true
