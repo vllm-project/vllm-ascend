@@ -776,7 +776,7 @@ class DeepseekV4DecoderLayer(nn.Module):
         llama_4_scaling: torch.Tensor | None = None,
         input_ids: torch.Tensor | None = None,
     ) -> tuple[torch.Tensor, torch.Tensor]:
-        residual = hidden_states.clone()
+        residual = hidden_states
         full_num_tokens = positions.shape[0]
         hidden_states, post, comb = self.hc_pre(hidden_states, self.hc_attn_fn, self.hc_attn_scale, self.hc_attn_base)
         hidden_states = self.input_layernorm(hidden_states)
@@ -792,7 +792,7 @@ class DeepseekV4DecoderLayer(nn.Module):
 
         hidden_states = self.hc_post(hidden_states, residual, post, comb)
 
-        residual = hidden_states.clone()
+        residual = hidden_states
         hidden_states, post, comb = self.hc_pre(hidden_states, self.hc_ffn_fn, self.hc_ffn_scale, self.hc_ffn_base)
         hidden_states = self.post_attention_layernorm(hidden_states)
         hidden_states = self.mlp(hidden_states, input_ids=input_ids)
