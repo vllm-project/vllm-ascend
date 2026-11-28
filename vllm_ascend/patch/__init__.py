@@ -1776,17 +1776,19 @@
 
 # ** File: worker/patch_mm_input_norm.py **
 # ~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~
-#   1. `vllm.model_executor.layers.fusion.mm_input_norm.FusedMMInputNorm`
+#   1. `vllm.model_executor.models.vision.FusedInputNorm`
 #    Why:
 #       Processor-derived normalization buffers must not be required in legacy
-#       sharded checkpoints or overwritten by dummy weight initialization.
+#       sharded checkpoints or overwritten by dummy weight initialization
+#       and layerwise weight updates. Qwen3.5-VL uses this v0.30 class through
+#       Ascend's device-preprocessing mixin (model.input_norm).
 #    How:
-#       Backport vllm-ascend #20008: wrap construction once and register
-#       weight/bias as nonpersistent buffers without changing their values.
-#       Skip installation when the module is absent (as in vLLM v0.30.0).
+#       Apply the buffer-persistence fix from vllm-ascend #20008 to the older
+#       FusedInputNorm class: wrap construction once and register weight/bias
+#       as nonpersistent buffers, preserving values, device and identity mode.
 #    Related PR:
 #       https://github.com/vllm-project/vllm/pull/62767
 #       https://github.com/vllm-project/vllm-ascend/pull/20008
 #    Future Plan:
-#       Remove when every supported vLLM baseline either predates this module
-#       or includes commit 90c4a1a73eecea0428ee4303ad96c9fdeaac3f80 (or its fix).
+#       Remove when the supported vLLM baseline registers FusedInputNorm's
+#       constants as nonpersistent, or migrates to the fixed FusedMMInputNorm.
