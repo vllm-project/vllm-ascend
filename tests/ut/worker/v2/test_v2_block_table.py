@@ -21,17 +21,13 @@ def _parent_init(
     max_num_batched_tokens,
     max_num_blocks_per_group,
     device,
-    kernel_block_sizes=None,
     cp_size=1,
     cp_rank=0,
     cp_interleave=1,
     slot_mapping_enabled=None,
+    dcp_sharded=None,
 ):
     self.block_sizes = block_sizes
-    # vLLM main dropped `kernel_block_sizes` from BlockTables; only the release
-    # lane forwards it.
-    if kernel_block_sizes is not None:
-        self.kernel_block_sizes = kernel_block_sizes
     self.num_kv_cache_groups = len(block_sizes)
     self.max_num_batched_tokens = max_num_batched_tokens
     self.device = device
@@ -39,6 +35,7 @@ def _parent_init(
     self.cp_rank = cp_rank
     self.cp_interleave = cp_interleave
     self.slot_mapping_enabled = slot_mapping_enabled
+    self.dcp_sharded = dcp_sharded
     self.block_tables = [SimpleNamespace(gpu=torch.zeros(2, 8))]
     self.block_table_ptrs = MagicMock()
     self.block_table_strides = MagicMock()
@@ -58,9 +55,9 @@ def _init_tables(*args, next_power_of_2=16, **kwargs):
         return AscendBlockTables(*args, **kwargs)
 
 
-def test_init_defaults_kernel_sizes_and_rebuilds_int32_slots():
+def test_init_rebuilds_int32_slots_without_kernel_sizes():
     tables = _init_tables([4], 2, 8, [4], torch.device("cpu"))
-    assert tables.kernel_block_sizes == [4]
+    assert not hasattr(tables, "kernel_block_sizes")
     assert tables.slot_mappings.dtype == torch.int32
     assert tables.slot_mappings.shape == (1, 8)
     if hasattr(tables, "_triton_block_size"):
@@ -71,20 +68,14 @@ def test_init_defaults_kernel_sizes_and_rebuilds_int32_slots():
         assert tables._block_table_pad_size == 16
 
 
-def test_init_keeps_explicit_kernel_block_sizes():
-    tables = _init_tables(
-        [8],
-        2,
-        4,
-        [2],
-        torch.device("cpu"),
-        kernel_block_sizes=[4],
-    )
-    assert tables.kernel_block_sizes == [4]
-    # vLLM #57169 dropped the expansion from BlockTables on main; a manager
-    # block still covers `blocks_per_kv_block` kernel entries (block 7 ->
-    # [14, 15]) because Ascend kernels address kernel blocks.
-    assert tables.blocks_per_kv_block == [2]
+def test_init_uses_upstream_positional_cp_arguments():
+    # cp_size follows device in the upstream interface.
+    tables = _init_tables([8], 2, 4, [2], torch.device("cpu"), 2, 1, 4)
+    assert tables.block_sizes == [8]
+    assert tables.cp_size == 2
+    assert tables.cp_rank == 1
+    assert tables.cp_interleave == 4
+    assert not hasattr(tables, "kernel_block_sizes")
 
 
 def test_init_forwards_slot_mapping_enabled_on_newer_vllm():
@@ -96,6 +87,7 @@ def test_init_forwards_slot_mapping_enabled_on_newer_vllm():
         _parent_init(self, *args, **kwargs)
 
     enabled = [True, False]
+    sharded = [True, False]
     with (
         patch.object(BlockTables, "__init__", recording_init),
         patch(
@@ -104,8 +96,9 @@ def test_init_forwards_slot_mapping_enabled_on_newer_vllm():
             create=True,
         ),
     ):
-        AscendBlockTables([4], 2, 8, [4], torch.device("cpu"), slot_mapping_enabled=enabled)
+        AscendBlockTables([4, 4], 2, 8, [4, 8], torch.device("cpu"), slot_mapping_enabled=enabled, dcp_sharded=sharded)
     assert seen["kwargs"]["slot_mapping_enabled"] is enabled
+    assert seen["kwargs"]["dcp_sharded"] is sharded
 
 
 def test_init_forwards_single_group_slot_mapping_enabled():
@@ -137,6 +130,7 @@ def _make_uninitialized_tables():
     tables.block_sizes_tensor = MagicMock(name="sizes")
     tables.kernel_block_sizes_tensor = MagicMock(name="kernel_sizes")
     tables.slot_mapping_enabled = MagicMock(name="enabled")
+    tables.dcp_sharded = torch.tensor([True, False])
     tables.cp_rank = 1
     tables.cp_size = 2
     tables.cp_interleave = 4
@@ -192,6 +186,7 @@ def test_compute_slot_mappings_passes_enabled_mask_on_newer_vllm():
 
     kwargs = kernel.__getitem__.return_value.call_args.kwargs
     assert kwargs["HAS_SLOT_MAPPING_ENABLED"] is True
+    assert kwargs["dcp_sharded"] is tables.dcp_sharded
     assert kwargs["slot_mapping_enabled"] is enabled
 
 

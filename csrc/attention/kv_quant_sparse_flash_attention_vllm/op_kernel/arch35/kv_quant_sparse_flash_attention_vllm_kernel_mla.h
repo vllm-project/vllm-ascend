@@ -714,7 +714,8 @@ __aicore__ inline void KvQuantSparseFlashAttentionVllmMla<CubeBlockType, VecBloc
     // GS1合轴, 不切G, 只切S1
     runParam.s1oIdx = gS1Index * runParam.qSNumInOneBlock;
     if constexpr (IS_SPLIT_G) {
-        runParam.goIdx = (aicIdx % 2 == 0) ? 0 : 64; // N1=128场景，相邻cube核处理一个s1，第一个cube核承担0-63行g，第二个cube核承担后64行g
+        // The first cube core handles the extra head when G is odd.
+        runParam.goIdx = (aicIdx % 2 == 0) ? 0 : (this->constInfo.gSize + 1) / 2;
     } else {
         runParam.goIdx = 0;
     }

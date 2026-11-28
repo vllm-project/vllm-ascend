@@ -100,13 +100,16 @@ def _mamba_block_aligned_split(
     the split off would only erase cacheable hit length.
     """
     kv_transfer_config = self.vllm_config.kv_transfer_config
-    # A consumer only needs the unsplit verifier window after some prefix has
-    # already been computed locally or loaded from the connector.  ``kv_both``
-    # also handles cold prefills; bypassing alignment for those requests means
-    # no reusable Mamba state is ever materialized, so neither HBM nor the KV
-    # pool can cache the prefix.
-    has_computed_prefix = request.num_computed_tokens + num_new_local_computed_tokens + num_external_computed_tokens > 0
-    if kv_transfer_config is not None and kv_transfer_config.is_kv_consumer and has_computed_prefix:
+    # Extra verifier or asynchronous output rows need an unsplit window.
+    # Ordinary prefills must still stop at reusable checkpoints.
+    num_computed_tokens = request.num_computed_tokens + num_new_local_computed_tokens + num_external_computed_tokens
+    remaining_tokens = max(request.num_tokens - num_computed_tokens, 0)
+    if (
+        kv_transfer_config is not None
+        and kv_transfer_config.is_kv_consumer
+        and num_computed_tokens > 0
+        and num_new_tokens > remaining_tokens
+    ):
         return num_new_tokens
 
     # Pure PD prefill producer or standalone instance: suppress the EAGLE
@@ -114,7 +117,6 @@ def _mamba_block_aligned_split(
     # early-return path below must observe it too (it previously ran under
     # a temporary bit clear from the outer producer wrapper).
     if _get_sparse_index_kpool(self.vllm_config.model_config) is not None:
-        num_computed_tokens = request.num_computed_tokens + num_new_local_computed_tokens + num_external_computed_tokens
         if num_computed_tokens < max(
             request.num_prompt_tokens,
             request.num_tokens - 1,
@@ -149,13 +151,31 @@ def _mamba_block_aligned_split(
     for name in drop_attrs:
         setattr(self, name, False)
     try:
-        return _original_mamba_block_aligned_split(
+        result = _original_mamba_block_aligned_split(
             self,
             request,
             num_new_tokens,
             num_new_local_computed_tokens,
             num_external_computed_tokens,
         )
+        # A resend must recompute its last input token for logits. When the
+        # prompt ends exactly on a state-page boundary, its reusable state is
+        # therefore one page earlier. Materialize that checkpoint before the
+        # final chunk; retaining only the terminal state makes the first hot
+        # replay miss every Mamba group. PD crops one token before scheduling,
+        # so this also covers API prompts of k * block_size + 1 tokens.
+        block_size = self.cache_config.block_size
+        if (
+            getattr(self.cache_config, "enable_prefix_caching", True)
+            and self.hash_block_size == block_size
+            and not getattr(self, "mamba_has_prefill_checkpoint_blocks", False)
+            and request.num_prompt_tokens % block_size == 0
+        ):
+            start = request.num_computed_tokens + num_new_local_computed_tokens + num_external_computed_tokens
+            replay_boundary = max(request.num_prompt_tokens - block_size, 0)
+            if start < replay_boundary < start + result:
+                result = replay_boundary - start
+        return result
     finally:
         for name, value in original_drop_values.items():
             setattr(self, name, value)

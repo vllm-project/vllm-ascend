@@ -74,7 +74,6 @@ _DEFAULT_BUFFER_SIZE = 200
 _MIN_DP_BUFFER_SIZE = 50
 SLEEP_LIFECYCLE_ANCHOR_GROUP_NAME = "sleep_lifecycle_anchor"
 SLEEP_LIFECYCLE_ANCHOR_BUFFER_SIZE = 1
-_DYNAMIC_EPLB_BUFFER_SIZE = 100
 _IS_MOE_MODEL = None
 _IS_DRAFTER_MOE_MODEL = None
 _IS_VL_MODEL = None
@@ -87,13 +86,59 @@ _CUSTOM_OP_BASE_DIR = (
 _IS_ROT_WEIGHT_USED = None
 
 
-def is_gqa_pcp_dcp_config(model_config: Any, parallel_config: Any) -> bool:
-    """Whether a GQA/MQA model enables both PCP and DCP."""
-    return (
-        parallel_config.decode_context_parallel_size > 1
-        and parallel_config.prefill_context_parallel_size > 1
-        and not model_config.use_mla
+def get_max_replicated_pcp_prefill(pcp_size: int) -> int:
+    """Largest prefill that cannot give each rank a full head and a nonempty tail."""
+    # At 3P - 1 tokens the P heads take 2P tokens, leaving only P - 1 tails.
+    # From 3P on, the P tails all fit even when the head width rounds up.
+    return 3 * pcp_size - 1
+
+
+def get_pcp_profile_num_tokens(vllm_config: VllmConfig, max_num_tokens: int, max_num_reqs: int) -> int:
+    """Keep replicated draft requests when profiling PCP-local prefill.
+
+    Initial profiling runs before KV cache initialization. DFlash and DSpark
+    gather global context from the local target outputs for their replicated drafts.
+    The runner validates PCP support before using this budget.
+    """
+    pcp_size = vllm_config.parallel_config.prefill_context_parallel_size
+    if pcp_size <= 1:
+        return max_num_tokens
+    spec = vllm_config.speculative_config
+
+    # PCP: bound replicated decodes, including uneven whole-request sharding.
+    # Shared config keeps this bound identical across pipeline stages.
+    max_replicated_query = 1 + spec.num_speculative_tokens if spec is not None else 1
+    # PCP + DCP also replicates prefills too short for a tail on every rank.
+    if vllm_config.parallel_config.decode_context_parallel_size > 1:
+        max_replicated_query = max(max_replicated_query, get_max_replicated_pcp_prefill(pcp_size))
+    replicated_tokens = min(max_num_tokens, max_num_reqs * max_replicated_query)
+    remaining_tokens = max_num_tokens - replicated_tokens
+    # DualChunkSwap rounds two chunks per request on each PCP rank.
+    profile_tokens = min(
+        max_num_tokens,
+        replicated_tokens + (remaining_tokens + pcp_size - 1) // pcp_size + 2 * max_num_reqs,
     )
+
+    from vllm.config import CUDAGraphMode
+
+    # Graph mode: the largest enabled prefill capture is a local lower bound.
+    compilation_config = vllm_config.compilation_config
+    if not vllm_config.model_config.enforce_eager and compilation_config.cudagraph_mode in (
+        CUDAGraphMode.PIECEWISE,
+        CUDAGraphMode.FULL_AND_PIECEWISE,
+    ):
+        # Capture sizes are already PCP-local, including graph padding.
+        # Older vLLM versions use the shared token grid instead of a prefill grid.
+        prefill_sizes = getattr(compilation_config, "prefill_cudagraph_capture_token_sizes", None)
+        if prefill_sizes is None:
+            prefill_sizes = compilation_config.cudagraph_capture_sizes
+        profile_tokens = max(profile_tokens, max(prefill_sizes or [], default=0))
+    return profile_tokens
+
+
+def model_supports_dcp(model_config: Any) -> bool:
+    """Whether the model enables MLA or uses Ascend SFA attention."""
+    return getattr(model_config, "use_mla", False) or model_uses_sfa_sparse(model_config)
 
 
 def extract_dsv4_layer_index(config: Any, layer_name: str) -> int:
@@ -193,6 +238,13 @@ def normalize_deepseek_v41_config(hf_config: Any) -> Any:
     return hf_config
 
 
+def model_uses_kimi_kda(model_config: Any | None) -> bool:
+    text = getattr(model_config, "hf_text_config", None)
+    return getattr(text, "model_type", None) in ("kimi_linear", "kimi_k31") and bool(
+        getattr(text, "linear_attn_config", None)
+    )
+
+
 def model_uses_kpool_indexer(model_config: Any | None) -> bool:
     """Return True for GLM-5.3-Flash style kpool indexer models.
 
@@ -235,6 +287,19 @@ def enable_sfa_dcp_replicated_indexer(vllm_config: VllmConfig | None = None) -> 
 
     parallel_config = vllm_config.parallel_config
     return model_uses_sfa_sparse(vllm_config.model_config) and parallel_config.decode_context_parallel_size > 1
+
+
+def enable_sfa_dcp_sharded_indexer(vllm_config: VllmConfig | None = None) -> bool:
+    """Kimi's uncompressed indexer uses the same token owners as MLA."""
+    if vllm_config is None:
+        from vllm.config import get_current_vllm_config
+
+        vllm_config = get_current_vllm_config()
+    text = vllm_config.model_config.hf_text_config
+    return enable_sfa_dcp_replicated_indexer(vllm_config) and getattr(text, "model_type", None) in (
+        "kimi_linear",
+        "kimi_k31",
+    )
 
 
 def clear_enable_sp():
@@ -382,6 +447,18 @@ def _should_trans_nz(weight: torch.Tensor) -> bool:
 
     # Quantized or other supported dtypes convert by default.
     return True
+
+
+def is_internal_npu_format(tensor: torch.Tensor) -> bool:
+    """Whether a tensor's storage uses a device-internal layout rather than ND.
+
+    FRACTAL_NZ is not a single format: a weight cast with
+    ``customize_dtype``/``input_dtype`` reports a C0 variant such as
+    FRACTAL_NZ_C0_16, so checking against FRACTAL_NZ alone misses it.
+    """
+    if tensor.device.type != "npu":
+        return False
+    return int(torch_npu.get_npu_format(tensor)) not in (0, ACL_FORMAT_FRACTAL_ND)
 
 
 # NZ conversion policy:
@@ -553,9 +630,6 @@ def enable_custom_op():
 
     # There are some customed operators which aren't implemented
     # with batch invariant in vllm-ascend, we need to disable them.
-    # FIXME(linfeng): Currently custom op compilation and execution are partially available
-    # in ASCEND950 chip, we temporarily disable all custom ops. Please refer to
-    # https://github.com/vllm-project/vllm-ascend/issues/7157 for latest update about custom op.
     if envs.VLLM_BATCH_INVARIANT or not get_current_hardware_profile().supports(HardwareCapability.RUNTIME_CUSTOM_OPS):
         _CUSTOM_OP_ENABLED = False
         return _CUSTOM_OP_ENABLED
@@ -829,6 +903,7 @@ def register_ascend_customop(vllm_config: VllmConfig | None = None):
         AscendQuickGELU,
         AscendSiluAndMul,
         AscendSiluAndMulWithClamp,
+        AscendSwigluStepAndMul,
     )
     from vllm_ascend.ops.bailing_moe_linear_attn import AscendBailingMoELinearAttention
     from vllm_ascend.ops.conv import AscendConv3dLayer
@@ -866,6 +941,7 @@ def register_ascend_customop(vllm_config: VllmConfig | None = None):
         "QuickGELU": AscendQuickGELU,
         "SiluAndMul": AscendSiluAndMul,
         "SiluAndMulWithClamp": AscendSiluAndMulWithClamp,
+        "SwigluStepAndMul": AscendSwigluStepAndMul,
         "RotaryEmbedding": AscendRotaryEmbedding,
         "Gemma4RotaryEmbedding": AscendGemma4RotaryEmbedding,
         "MRotaryEmbedding": AscendMRotaryEmbedding,
@@ -907,10 +983,10 @@ def register_ascend_customop(vllm_config: VllmConfig | None = None):
 
     # Override selected ops when the compatibility implementations are required.
     if get_current_hardware_profile().supports(HardwareCapability.COMPATIBILITY_OP_IMPLEMENTATIONS):
+        from vllm_ascend._310p.attention.gdn_310 import AscendGatedDeltaNetAttention310
         from vllm_ascend._310p.fused_moe.fused_moe import AscendMoERunner310, AscendRoutedExperts310
         from vllm_ascend._310p.ops.activation import AscendSiluAndMul310
         from vllm_ascend._310p.ops.conv import AscendConv3dLayer310
-        from vllm_ascend._310p.ops.fla.gdn_310 import AscendGatedDeltaNetAttention310
         from vllm_ascend._310p.ops.layernorm import (
             AscendGemmaRMSNorm310,
             AscendRMSNorm310,
@@ -941,7 +1017,7 @@ def register_ascend_customop(vllm_config: VllmConfig | None = None):
             }
         )
     else:
-        from vllm_ascend.ops.gdn import AscendGatedDeltaNetAttention
+        from vllm_ascend.attention.gdn import AscendGatedDeltaNetAttention
 
         REGISTERED_ASCEND_OPS["GatedDeltaNetAttention"] = AscendGatedDeltaNetAttention
 
@@ -970,6 +1046,13 @@ def register_ascend_fla_customop():
 
 def lmhead_tp_enable() -> bool:
     return get_ascend_config().finegrained_tp_config.lmhead_tensor_parallel_size > 1
+
+
+def requires_lmhead_dp_sync(vllm_config: VllmConfig) -> bool:
+    """V2 reduced LMHead padding requires real, synchronized DP token buckets."""
+    # TODO: Merge the requires_lmhead_dp_sync interface into
+    # should_skip_allreduce_across_dp_group in a future refactor.
+    return vllm_config.parallel_config.decode_context_parallel_size == 1 and lmhead_tp_enable()
 
 
 def lmhead_tp_max_num_logits(max_num_reqs: int, logits_rows_per_req: int) -> int:
@@ -1003,6 +1086,10 @@ def oproj_tp_enable() -> bool:
     return get_ascend_config().finegrained_tp_config.oproj_tensor_parallel_size > 1
 
 
+def shared_expert_tp_enable() -> bool:
+    return get_ascend_config().finegrained_tp_config.shared_expert_tensor_parallel_size > 1
+
+
 def mlp_tp_enable() -> bool:
     return get_ascend_config().finegrained_tp_config.mlp_tensor_parallel_size > 1
 
@@ -1019,7 +1106,37 @@ def enable_sp(vllm_config=None) -> bool:
     if vllm_config is None:
         return False
 
-    return bool(vllm_config.parallel_config.use_sequence_parallel_moe)
+    if bool(vllm_config.parallel_config.use_sequence_parallel_moe):
+        return True
+
+    # Dense-family sequence parallelism: the predicate is owned by the
+    # Qwen3.5 patch (vllm_ascend.patch.worker.patch_qwen3_5). The lazy import
+    # keeps this module free of the patch module's import-time monkey
+    # patches. Mirror the STANDARD_WORKER_PATCHES gate from
+    # patch/worker/__init__.py: patch_qwen3_5 imports vllm_ascend.attention.gdn
+    # (fla_npu) at module level, which 310P runners do not install, so
+    # devices excluded from the standard worker patch bundle must not
+    # import it from here either.
+    from vllm_ascend.device.hardware_profile import HardwareCapability, get_current_hardware_profile
+
+    if not get_current_hardware_profile().supports(HardwareCapability.STANDARD_WORKER_PATCHES):
+        return False
+
+    from vllm_ascend.patch.worker.patch_qwen3_5 import enable_dense_sp
+
+    return enable_dense_sp(vllm_config)
+
+
+def pad_num_tokens(
+    num_tokens: int,
+    vllm_config: VllmConfig,
+    enable_shared_expert_dp: bool = False,
+) -> int:
+    """Pad TP-shared token rows to the tensor-parallel world size."""
+    tp_size = vllm_config.parallel_config.tensor_parallel_size
+    if tp_size <= 1 or not (enable_sp(vllm_config) or enable_shared_expert_dp):
+        return num_tokens
+    return (num_tokens + tp_size - 1) // tp_size * tp_size
 
 
 def pad_sequence_parallel_tokens(hidden_states: torch.Tensor) -> torch.Tensor:
@@ -1218,7 +1335,6 @@ def get_hccl_config_for_pg_options(group_name: str) -> dict | None:
         return {"hccl_buffer_size": SLEEP_LIFECYCLE_ANCHOR_BUFFER_SIZE}
     hccl_config_map = {
         "dp": {"hccl_buffer_size": calculate_dp_buffer_size()},
-        "dynamic_eplb": {"hccl_buffer_size": _DYNAMIC_EPLB_BUFFER_SIZE},
     }
     return hccl_config_map.get(group_name, get_default_buffer_config())
 
@@ -1360,6 +1476,14 @@ def should_skip_allreduce_across_dp_group(vllm_config: VllmConfig, is_draft_mode
     is_context_moe_model = is_drafter_moe_model(vllm_config) if is_draft_model else is_moe_model(vllm_config)
     if not is_context_moe_model:
         return True
+    if getattr(ascend_config.finegrained_tp_config, "qkv_iproj_tensor_parallel_size", 1) > 1:
+        # MoE target/draft QKV exchanges need a uniform capacity. Dense
+        # drafters returned above and do not execute these projections.
+        return False
+    # Projection collectives belong to the target's execution plan. A dense
+    # drafter does not run them and must retain its rank-local K=0 fast path.
+    if not is_draft_model and ascend_config.finegrained_tp_config.requires_graph(vllm_config):
+        return False
 
     # Only applicable to MoE models on KV consumer ranks.
     is_kv_consumer = vllm_config.kv_transfer_config is not None and vllm_config.kv_transfer_config.is_kv_consumer
@@ -1409,6 +1533,20 @@ def is_c8_mxfp_kv_quant(vllm_config: VllmConfig) -> bool:
     # a missing cache_config means the mxfp8 KV cache dtype is not enabled.
     cache_config = getattr(vllm_config, "cache_config", None)
     return cache_config is not None and cache_config.cache_dtype == C8_MXFP_KV_CACHE_DTYPE
+
+
+# HIF8 C8 for sparse-attention MLA models (e.g. GLM-5.3-Flash): both the latent
+# KV cache and the absorbed query are quantized to HIF8 with per-tensor scales (Ascend
+# 950PR/950DT). Enabled with ``--kv-cache-dtype hif8``; the ModelSlim
+# ``QK_HIF8_PER_TENSOR`` recipe (fa_q/fa_k scale) must be present.
+HIF8_C8_KV_CACHE_DTYPE = "hif8"
+
+
+def is_hif8_c8_kv_quant(vllm_config: VllmConfig) -> bool:
+    # Tolerate partially constructed configs (e.g. SimpleNamespace in tests):
+    # a missing cache_config means the hif8 KV cache dtype is not enabled.
+    cache_config = getattr(vllm_config, "cache_config", None)
+    return cache_config is not None and cache_config.cache_dtype == HIF8_C8_KV_CACHE_DTYPE
 
 
 def refresh_block_size(vllm_config):
@@ -1560,6 +1698,32 @@ def is_gqa_backend(vllm_config: VllmConfig) -> bool:
 def uses_mooncake_connector(kv_transfer_config: Any) -> bool:
     mooncake_connector_names = {"MooncakeConnector", "MooncakeConnectorV1", "MooncakeConnectorV2"}
     return bool(_collect_kv_connector_names(kv_transfer_config) & mooncake_connector_names)
+
+
+def uses_ascend_store_memcache(kv_transfer_config: Any) -> bool:
+    """Find an AscendStoreConnector using the Memcache backend, including in MultiConnector."""
+    if isinstance(kv_transfer_config, (list, tuple)):
+        return any(uses_ascend_store_memcache(item) for item in kv_transfer_config)
+
+    if isinstance(kv_transfer_config, dict):
+        connector = kv_transfer_config.get("kv_connector")
+        extra_config = kv_transfer_config.get("kv_connector_extra_config")
+    else:
+        connector = getattr(kv_transfer_config, "kv_connector", None)
+        extra_config = getattr(kv_transfer_config, "kv_connector_extra_config", None)
+
+    if isinstance(extra_config, dict):
+        backend = extra_config.get("backend", "mooncake")
+        connectors = extra_config.get("connectors", [])
+    else:
+        backend = getattr(extra_config, "backend", "mooncake")
+        connectors = getattr(extra_config, "connectors", [])
+
+    if connector == "AscendStoreConnector":
+        if isinstance(backend, str) and backend.lower() == "memcache":
+            return True
+
+    return uses_ascend_store_memcache(connectors)
 
 
 def _collect_kv_connector_names(value: Any) -> set[str]:
@@ -1875,9 +2039,16 @@ def get_rotation_matrix(rotation_path: Path | None) -> torch.Tensor:
 def use_updatable_graph(
     attn_backend,
 ) -> bool:
+    if attn_backend is None:
+        return False
+
     from vllm_ascend.attention.attention_v1 import AscendAttentionBackend
 
-    return attn_backend is not None and issubclass(attn_backend, AscendAttentionBackend)
+    if issubclass(attn_backend, AscendAttentionBackend):
+        return True
+    from vllm_ascend.attention.mla_v1 import AscendMLABackend
+
+    return issubclass(attn_backend, AscendMLABackend)
 
 
 def _is_glm_model(model_config) -> bool:

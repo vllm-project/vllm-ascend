@@ -22,7 +22,7 @@ sentinel so workers know whether to continue or exit.
 
 Protocol files under ``<coord_dir>/round_<N>/``::
 
-    command.json                {round, commit, rebuild, action, version_targets, version_checks}
+    command.json                {round, commit, rebuild, action}
     ready_<idx>.json            {node, head}
     start.json                  {}                                  (master, after the barrier)
     verdict.json                {verdict}            (master, after the trial)
@@ -97,18 +97,12 @@ class Coordinator:
         commit: str,
         rebuild: bool,
         action: str = "RUN",
-        version_targets: dict[str, str] | None = None,
-        version_checks: tuple[str, ...] | list[str] | None = None,
     ) -> None:
         """Publish the per-round command. ``action`` is "RUN" (deploy + run the
         distributed test) or "SKIP" (this commit is pre-skipped, e.g. vLLM
         mismatch -- workers consume the command but do not deploy/run, keeping
         leader/worker rounds in lockstep)."""
         command = {"round": rnd, "commit": commit, "rebuild": rebuild, "action": action}
-        if version_targets is not None:
-            command["version_targets"] = version_targets
-        if version_checks is not None:
-            command["version_checks"] = list(version_checks)
         path = self._round_dir(rnd) / "command.json"
         _atomic_write(path, json.dumps(command))
         logger.info("[coord] published command round=%d commit=%s action=%s", rnd, commit[:12], action)
@@ -132,6 +126,22 @@ class Coordinator:
         path = self._round_dir(rnd) / f"ready_{self.node_index}.json"
         _atomic_write(path, json.dumps({"node": self.node_index, "head": head}))
         logger.info("[coord] node %d ready for round %d at %s", self.node_index, rnd, head[:12])
+
+    def signal_finished(self, rnd: int) -> None:
+        """Report that this node's test and stray processes have exited."""
+        path = self._round_dir(rnd) / f"finished_{self.node_index}.json"
+        _atomic_write(path, json.dumps({"node": self.node_index}))
+
+    def wait_all_finished(self, rnd: int, timeout_s: float) -> None:
+        """Do not permit a new round while another node still uses old CANN."""
+        directory = self._round_dir(rnd)
+        deadline = time.time() + timeout_s
+        while time.time() < deadline:
+            if len(list(directory.glob("finished_*.json"))) >= self.num_nodes:
+                return
+            time.sleep(_POLL_INTERVAL_S)
+        finished = sorted(path.name for path in directory.glob("finished_*.json"))
+        raise TimeoutError(f"Round {rnd} finish barrier timed out: {finished}")
 
     @staticmethod
     def _fresh(path: Path, since_ts: float | None) -> bool:

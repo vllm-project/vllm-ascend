@@ -24,10 +24,11 @@ def test_native_main_c8_cache_preserves_packing_and_padding(tokens):
     slots = torch.arange(padded, dtype=torch.int32, device="npu") + 37
     slots[tokens:] = -1
     impl = AscendSFAImpl.__new__(AscendSFAImpl)
+    impl.pcp_enabled = False
     impl.enable_sparse_sfa_c8 = True
     impl.enable_sparse_sfa_turboquant = False
     impl.sfa_qsfa_packed_kv_head_dim = 656
-    impl._store_parallel_kv(k_pe, k_nope, scale, (cache,), slots, SimpleNamespace(num_actual_tokens=tokens))
+    impl._store_packed_kv_cache(k_pe, k_nope, scale, (cache,), slots, SimpleNamespace())
     torch.npu.synchronize()
     reference = torch.full_like(cache, -7, device="cpu")
     reference.view(-1, 656)[slots[:tokens].cpu().long()] = packed[:tokens].cpu()

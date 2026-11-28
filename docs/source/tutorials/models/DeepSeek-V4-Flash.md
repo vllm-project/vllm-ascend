@@ -32,7 +32,7 @@ Refer to [Feature Guide](../../user_guide/feature_guide/index.md) to get the fea
 |  Weight Version                              | Hardware Requirements                                                      | Download Links |
 |----------------------------------------------|----------------------------------------------------------------------------|----------------|
 | `DeepSeek-V4-Flash-0731-w8a8` | 1 Atlas 800I A3 (128GB × 8) node or 1 Atlas 800I A2 (64GB × 8) node | [ModelScope](https://www.modelscope.cn/models/Eco-Tech/DeepSeek-V4-Flash-0731-w8a8) |
-| `DeepSeek-V4-Flash-0731` | 1 950DT node (96GB × 8)| [Hugging Face](https://huggingface.co/deepseek-ai/DeepSeek-V4-Flash-0731) |
+| `DeepSeek-V4-Flash-0731` | 1 950DT node (96GB × 8)| [ModelScope](https://www.modelscope.cn/models/deepseek-ai/DeepSeek-V4-Flash-0731) \| [Hugging Face](https://huggingface.co/deepseek-ai/DeepSeek-V4-Flash-0731) |
 | `DeepSeek-V4-Flash-0731-w4a4c8` | 950PR&950DT products | Quantize locally with [msmodelslim](https://gitcode.com/Ascend/msmodelslim/blob/master/lab_practice/deepseek_v4/deepseek_v4_flash_w4a4c8.yaml) |
 
 - `DeepSeek-V4-Flash-0731-w4a4c8` (W4A4 MXFP4 mixed-precision quantization): For how the ultra-low-bit quantization preserves accuracy, see the [W4A4C8 FAQ](#q-how-do-the-w4a4c8-ultra-low-bit-quantized-weights-preserve-accuracy).
@@ -49,6 +49,8 @@ If you want to deploy a multi-node environment, you need to verify multi-node co
 
 ### 4.1 Docker Image Installation
 
+{% include "getting_started/installation/ascend_docker_runtime.inc.md" %}
+
 Select an image based on your machine type and start the docker image on your node, refer to [using docker](../../getting_started/installation.md#installation-prebuilt-image).
 
 === "950DT products"
@@ -59,27 +61,13 @@ Select an image based on your machine type and start the docker image on your no
     export IMAGE=quay.io/ascend/vllm-ascend:v0.30.0rc2-a5
     export NAME=vllm-ascend
     docker run --rm \
+        -e ASCEND_VISIBLE_DEVICES=0-7 \
         --name $NAME \
         --net=host \
         --shm-size=512g \
-        --device /dev/davinci0 \
-        --device /dev/davinci1 \
-        --device /dev/davinci2 \
-        --device /dev/davinci3 \
-        --device /dev/davinci4 \
-        --device /dev/davinci5 \
-        --device /dev/davinci6 \
-        --device /dev/davinci7 \
-        --device /dev/davinci_manager \
-        --device /dev/hisi_hdc \
-        --device /dev/ummu \
-        --device /dev/uburma \
         -v /usr/local/Ascend/driver:/usr/local/Ascend/driver \
-        -v /etc/ascend_install.info:/etc/ascend_install.info \
         -v /root/.cache:/root/.cache \
         -v /usr/local/sbin:/usr/local/sbin \
-        -v /usr/local/dcmi:/usr/local/dcmi \
-        -v /usr/local/bin/npu-smi:/usr/local/bin/npu-smi \
         -v /usr/local/sbin/npu-smi:/usr/local/sbin/npu-smi \
         -itd $IMAGE bash
     ```
@@ -92,35 +80,11 @@ Select an image based on your machine type and start the docker image on your no
 
     export IMAGE=quay.io/ascend/vllm-ascend:v0.30.0rc2-a3
     docker run --rm \
+        -e ASCEND_VISIBLE_DEVICES=0-15 \
         --name vllm-ascend \
         --shm-size=512g \
         --net=host \
-        --privileged=true \
-        --device /dev/davinci0 \
-        --device /dev/davinci1 \
-        --device /dev/davinci2 \
-        --device /dev/davinci3 \
-        --device /dev/davinci4 \
-        --device /dev/davinci5 \
-        --device /dev/davinci6 \
-        --device /dev/davinci7 \
-        --device /dev/davinci8 \
-        --device /dev/davinci9 \
-        --device /dev/davinci10 \
-        --device /dev/davinci11 \
-        --device /dev/davinci12 \
-        --device /dev/davinci13 \
-        --device /dev/davinci14 \
-        --device /dev/davinci15 \
-        --device /dev/davinci_manager \
-        --device /dev/devmm_svm \
-        --device /dev/hisi_hdc \
-        -v /usr/local/dcmi:/usr/local/dcmi \
         -v /usr/local/Ascend/driver/tools/hccn_tool:/usr/local/Ascend/driver/tools/hccn_tool \
-        -v /usr/local/bin/npu-smi:/usr/local/bin/npu-smi \
-        -v /usr/local/Ascend/driver/lib64/:/usr/local/Ascend/driver/lib64/ \
-        -v /usr/local/Ascend/driver/version.info:/usr/local/Ascend/driver/version.info \
-        -v /etc/ascend_install.info:/etc/ascend_install.info \
         -v /etc/hccn.conf:/etc/hccn.conf \
         -v /root/.cache:/root/.cache \
         -it $IMAGE bash
@@ -132,30 +96,14 @@ Select an image based on your machine type and start the docker image on your no
 
     ```bash
     # Use the DSpark image for the A2 example in Section 5.1.
-    export IMAGE=quay.io/ascend/vllm-ascend:nightly-main
+    export IMAGE=quay.io/ascend/vllm-ascend:{{ vllm_ascend_version }}
 
     docker run --rm \
+        -e ASCEND_VISIBLE_DEVICES=0-7 \
         --name vllm-ascend \
         --shm-size=512g \
         --net=host \
-        --privileged=true \
-        --device /dev/davinci0 \
-        --device /dev/davinci1 \
-        --device /dev/davinci2 \
-        --device /dev/davinci3 \
-        --device /dev/davinci4 \
-        --device /dev/davinci5 \
-        --device /dev/davinci6 \
-        --device /dev/davinci7 \
-        --device /dev/davinci_manager \
-        --device /dev/devmm_svm \
-        --device /dev/hisi_hdc \
-        -v /usr/local/dcmi:/usr/local/dcmi \
         -v /usr/local/Ascend/driver/tools/hccn_tool:/usr/local/Ascend/driver/tools/hccn_tool \
-        -v /usr/local/bin/npu-smi:/usr/local/bin/npu-smi \
-        -v /usr/local/Ascend/driver/lib64/:/usr/local/Ascend/driver/lib64/ \
-        -v /usr/local/Ascend/driver/version.info:/usr/local/Ascend/driver/version.info \
-        -v /etc/ascend_install.info:/etc/ascend_install.info \
         -v /etc/hccn.conf:/etc/hccn.conf \
         -v /root/.cache:/root/.cache \
         -it $IMAGE bash
@@ -175,7 +123,7 @@ If you want to deploy a multi-node environment, you need to set up the environme
 
 !!! note
 
-    In this tutorial, we suppose you downloaded the model weight to `/root/.cache/modelscope/hub/models/vllm-ascend/`. Feel free to change it to your own path.
+    In this tutorial, we suppose you downloaded the model weight to `/root/.cache/DeepSeek-V4-Flash-0731`. Feel free to change it to your own path.
 
     It is recommended that the following service code be encapsulated in a .sh script file and executed in Bash mode.
 
@@ -305,7 +253,7 @@ Single-node deployment completes both Prefill and Decode within the same node. T
 
 Key Parameter Descriptions:
 
-- `--max-model-len` specifies the maximum context length - that is, the sum of input and output tokens for a single request. Adjust it according to your actual scenario.
+- `--max-model-len` specifies the maximum context length — that is, the sum of input and output tokens for a single request. Adjust it according to your actual scenario.
 - `--max-num-seqs` indicates the maximum number of requests that each DP group is allowed to process. If the number of requests sent to the service exceeds this limit, the excess requests will remain in a waiting state and will not be scheduled. Note that the time spent in the waiting state is also counted in metrics such as TTFT and TPOT. Therefore, when testing performance, it is generally recommended that `--max-num-seqs` * `--data-parallel-size` >= the actual total concurrency.
 - `--max-num-batched-tokens` is the maximum number of tokens processed in one scheduler step. A larger value can improve prefill efficiency but consumes more activation memory.
 - `--data-parallel-size` sets the global number of data parallel ranks, while `--tensor-parallel-size` sets the tensor parallel size within each DP rank. Configure them together according to the deployment topology and available NPUs.
@@ -345,7 +293,7 @@ The service returns HTTP 200 OK with a JSON response containing the `choices` fi
 
 ### 5.2 PD Separation Deployment
 
-We recommend using Mooncake for deployment: [Mooncake](../features/pd_disaggregation_mooncake_multi_node.md).
+We recommend using Mooncake for deployment: [Prefill-Decode Disaggregation (DeepSeek)](../features/pd_disaggregation_mooncake_multi_node.md).
 
 In the standard single-node deployment mode, Prefill (prompt processing) and Decode (token generation) tasks run on the same set of NPUs. This can lead to two issues:
 
@@ -484,7 +432,7 @@ The following sections describe multi-node PD separation deployment on Atlas 800
 
             export VLLM_USE_V2_MODEL_RUNNER=1
             export VLLM_EXECUTE_MODEL_TIMEOUT_SECONDS=3000
-            export HCCL_EXEC_TIMEOUT=204
+            export HCCL_EXEC_TIMEOUT=3600
             export HCCL_CONNECT_TIMEOUT=120
             export OMP_PROC_BIND=false
             export OMP_NUM_THREADS=10
@@ -557,7 +505,7 @@ The following sections describe multi-node PD separation deployment on Atlas 800
 
             export VLLM_USE_V2_MODEL_RUNNER=1
             export VLLM_EXECUTE_MODEL_TIMEOUT_SECONDS=3000
-            export HCCL_EXEC_TIMEOUT=204
+            export HCCL_EXEC_TIMEOUT=3600
             export HCCL_CONNECT_TIMEOUT=120
             export OMP_PROC_BIND=false
             export OMP_NUM_THREADS=10
@@ -616,7 +564,7 @@ The following sections describe multi-node PD separation deployment on Atlas 800
                     }
                 }' \
                 --additional-config '{"ascend_compilation_config": {"enable_npugraph_ex": true,"enable_static_kernel": false},
-                    "enable_cpu_binding": true,"multistream_overlap_shared_expert": true,"recompute_scheduler_enable": true,"enable_shared_expert_dp": true,"combine_quant_mode": 4
+                    "enable_cpu_binding": true,"multistream_overlap_shared_expert": true,"scheduler_config": {"recompute_scheduler_enable": true},"enable_shared_expert_dp": true,"combine_quant_mode": 4
                 }' \
                 2>&1 | tee "v4_flash_d_dp${4}.log"
             ```
@@ -733,7 +681,7 @@ The following sections describe multi-node PD separation deployment on Atlas 800
             parser.add_argument(
                 "--dp-rpc-port",
                 type=str,
-                default=12345,
+                default="12345",
                 help="Port for data parallel master node."
             )
             parser.add_argument(
@@ -820,7 +768,7 @@ The following sections describe multi-node PD separation deployment on Atlas 800
             export HCCL_SOCKET_IFNAME=$nic_name
             export VLLM_RPC_TIMEOUT=3600000
             export VLLM_EXECUTE_MODEL_TIMEOUT_SECONDS=30000
-            export HCCL_EXEC_TIMEOUT=204
+            export HCCL_EXEC_TIMEOUT=3600
             export HCCL_CONNECT_TIMEOUT=120
             export OMP_PROC_BIND=false
             export OMP_NUM_THREADS=10
@@ -844,7 +792,7 @@ The following sections describe multi-node PD separation deployment on Atlas 800
                 --enable-expert-parallel \
                 --seed 1024 \
                 --served-model-name dsv4 \
-                --max-model-len 1048576 \
+                --max-model-len 512000 \
                 --max-num-batched-tokens 16384 \
                 --max-num-seqs 16 \
                 --no-disable-hybrid-kv-cache-manager \
@@ -887,7 +835,7 @@ The following sections describe multi-node PD separation deployment on Atlas 800
             export TASK_QUEUE_ENABLE=1
             export VLLM_RPC_TIMEOUT=3600000
             export VLLM_EXECUTE_MODEL_TIMEOUT_SECONDS=30000
-            export HCCL_EXEC_TIMEOUT=204
+            export HCCL_EXEC_TIMEOUT=3600
             export HCCL_CONNECT_TIMEOUT=120
             export HCCL_IF_IP=$local_ip
             export GLOO_SOCKET_IFNAME=$nic_name
@@ -911,7 +859,7 @@ The following sections describe multi-node PD separation deployment on Atlas 800
                 --enable-expert-parallel \
                 --seed 1024 \
                 --served-model-name dsv4 \
-                --max-model-len 1048576 \
+                --max-model-len 512000 \
                 --max-num-batched-tokens 480 \
                 --max-num-seqs 60 \
                 --async-scheduling \
@@ -950,7 +898,7 @@ The following sections describe multi-node PD separation deployment on Atlas 800
                     },
                     "enable_cpu_binding":true,
                     "multistream_overlap_shared_expert":true,
-                    "recompute_scheduler_enable":true
+                    "scheduler_config": {"recompute_scheduler_enable": true}
                 }'
             ```
 
@@ -980,7 +928,7 @@ The following sections describe multi-node PD separation deployment on Atlas 800
 
     #### A2 Series PD Separation Deployment with DSpark (2P2D, 32 cards) {: #525-a2-series-pd-separation-deployment-with-dspark-2p2d-32-cards }
 
-    Use `DeepSeek-V4-Flash-0731-w8a8` on four Atlas 800I A2 servers (8 NPUs per server). Choose the workload settings from the table before starting either role. The settings below retain the configurations selected in completed A2 measurements; they are starting points for the listed workloads, not a universal optimum across workloads or software versions.
+    Use `DeepSeek-V4-Flash-0731-w8a8` on four Atlas 800I A2 servers (8 NPUs per server). The Prefill instance runs DP2 with PCP8 across the two nodes; each Decode node runs eight DP ranks. Both roles use `--max-model-len 262144`. Choose the workload settings from the table before starting either role; they are starting points, not a universal optimum across workloads or software versions.
 
     | Role | Nodes / NPUs | Parallelism | HTTP endpoints |
     |---|---|---|---|
@@ -988,21 +936,21 @@ The following sections describe multi-node PD separation deployment on Atlas 800
     | Decode | 2 / 16 | DP16 × TP1, eight processes per node | 7100–7107 on each node |
 
     !!! note "Measurement and version scope"
-        The measured setup used the A2 `dev-26.2.0.day20261021` image, MRv2, P eager and D target/draft graph mode. It also included runtime changes for UVA dirty tracking, exact request-hash reuse and RoPE capacity; those changes are not delivered by this documentation update. Pin the image, model and loaded code when reproducing measurements. Revalidate these settings on a different build, including the `nightly-main` A2 image described in Section 4.1.
+        The measured setup used the A2 DSpark image, Model Runner V2, Prefill eager mode and Decode target/draft graph mode. It also included runtime changes for UVA dirty tracking, exact request-hash reuse and RoPE capacity, which this documentation update does not deliver. Pin the image, model and loaded code when reproducing measurements. Revalidate these settings on a different build, including the A2 image described in Section 4.1.
 
     !!! warning "Topology and dispatch limits"
-        Keep `PP1 × PCP8` with `MooncakeHybridConnector`. The validated implementation rejects simultaneous PP>1 and PCP>1. Its A2 dispatch path also requires `D max-num-seqs × (1 + draft tokens) <= 256`: the measured pairs are 5/42, 2/85 and 1/128. A different draft length changes the legal request capacity; 42 is not a universal maximum.
+        Keep `PP1 × PCP8` with `MooncakeHybridConnector`. The validated implementation rejects simultaneous PP>1 and PCP>1. The A2 dispatch path requires `D max-num-seqs × (1 + draft tokens) <= 256`; the standard pair is `42 × (1 + 5) = 252`. Other measured pairs (for example 2/85, 4/51 and 1/128) are scenario-specific; changing the draft length changes the legal request capacity. The standard is 5/42.
 
-    **Choose the server settings and client load.** D uses `--max-num-batched-tokens 720` and `--gpu-memory-utilization 0.97` in every configuration. P uses `--max-num-seqs 16`, `--api-server-count 4`, `--gpu-memory-utilization 0.96` and draft5/eager.
+    **Standard server settings.** Use the P/D scripts below as the standard. P `--max-num-batched-tokens 8192` applies to every profile; revalidate KV capacity before raising it.
 
     | Configuration | Workload / native window | P token budget / prefix cache | D draft / max-num-seqs | Proxy workers |
     |---|---|---|---|---:|
-    | `decode-4k-total` | 4K input / 2K output, pure D, total | 4096 / on | 2 / 85 | 4 |
-    | `decode-4k-stable` | 4K / 2K, pure D, native stable | 4096 / on | 4 / 51 | 4 |
-    | `decode-16k` | 16K / 1K, pure D | 4096 / on | 4 / 51 | 4 |
-    | `decode-long` | 64K / 1K or 128K / 1K, pure D | 4096 / on | 5 / 42 | 1 |
-    | `cold-pd` | PC0 pure P or full PD | 8192 / off | 1 / 128 | 4 |
-    | `pc90` | Distinct-suffix, multiple-prefix pooling; see [A2 KV Pooling](#526-a2-kv-pooling-mooncake-ssd-profile-and-memcache-integration) | 8192 / on | 1 / 128 | 4 |
+    | `decode-4k-total` | 4k input / 2k output, pure D, total | 8192 / on | 5 / 42 | 4 |
+    | `decode-4k-stable` | 4k / 2k, pure D, native stable | 8192 / on | 5 / 42 | 4 |
+    | `decode-16k` | 16k / 1k, pure D | 8192 / on | 5 / 42 | 4 |
+    | `decode-long` | 64k / 1k or 128k / 1k, pure D | 8192 / on | 5 / 42 | 1 |
+    | `cold-pd` | PC0 pure P or full PD | 8192 / off | 5 / 42 | 4 |
+    | `pc90` | Distinct-suffix, multiple-prefix pooling; see [A2 KV Pooling](#526-a2-kv-pooling-mooncake-ssd-profile-and-memcache-integration) | 8192 / on | 5 / 42 | 4 |
 
     The recorded client loads below are separate from the server profiles. Input counts include the measured client's 84-token template offset for these ordinary-length cases. Keep the payload definition and tokenizer unchanged when comparing them.
 
@@ -1012,16 +960,16 @@ The following sections describe multi-node PD separation deployment on Atlas 800
     | `decode-4k-stable` / native stable | 4180 / 2048 | 8192 / 2304 / 0; stable subset chosen by AISBench |
     | `decode-16k` / total, TTFT trial | 16468 / 1024 | 8192 / 2048 / 0 |
     | `decode-16k` / recorded native stable | 16468 / 1024 | 8192 / 2304 / 0; do not substitute the CC2048 total result |
-    | `decode-long` / 64K total or native stable | 65620 / 1024 | 3840 / 576 / 0 |
-    | `decode-long` / 128K total | 131156 / 1024 | 3920 / 960 / 0 |
-    | `decode-long` / 128K native stable | 131156 / 1024 | 2960 / 960 / 0 |
+    | `decode-long` / 64k total or native stable | 65620 / 1024 | 3840 / 576 / 0 |
+    | `decode-long` / 128k total | 131156 / 1024 | 3920 / 960 / 0 |
+    | `decode-long` / 128k native stable | 131156 / 1024 | 2960 / 960 / 0 |
     | `cold-pd` / full PD total | 16468 / 1024 | 240 / 60 / 0 |
 
-    The complete scripts below use the measured 16K pure-D setting: P token budget4096/APC on, D draft4/mns51/GMU0.97. For other workloads, replace the explicit values listed in the table; for `cold-pd`, replace the P cache switch with `--no-enable-prefix-caching`. No external helper or profile file is required.
+    The standard runs at `--max-model-len 262144` on both roles, which covers every ordinary-length workload in this section.
 
-    The measured context budgets are intentionally asymmetric: `--max-model-len 150000` on P and `508576` on D. The larger D budget does not extend the prompt length that P can prefill. All ordinary-length workloads listed here fit within the P budget; do not advertise the D value as the end-to-end prompt limit. If a deployment requires equal P/D limits, change both to the chosen service limit and revalidate KV capacity and throughput before reusing these measurements.
+    A 1M-token context is a separate deployment. Raise `--max-model-len` to `1048576` on both roles, and keep the Prefill `--max-num-batched-tokens` at `8192`. The Prefill budget cannot grow at 1M: at `16384` the Prefill KV pool shrinks to 7.13 GiB and cannot hold the 131,072 tokens per card that one 1M sequence needs under `PCP8`; at `32768` the activation alone needs 24 GiB while only 13.42 GiB remains free.
 
-    Server configuration and client load must be recorded together. For the 16K/1K total-window latency trial, N8192/CC2048/rate0 was tested twice against a current-deployment N8192/CC2304/rate0 control. The last repeat reduced legacy TTFT mean/P90 from 21.30/50.32 seconds to 11.32/42.51 seconds while output throughput changed by -0.54%. TPOT was 93.6 ms, not a 20 ms SLO pass. This is a workload-specific result; lower concurrency does not guarantee lower latency elsewhere. Do not substitute total results for native stable results. The 1M cases require a separately validated long-context deployment, not a larger `--max-model-len` in these scripts.
+    A 1M PD request was validated on A2: 256 requests at `--max-model-len 1048576` completed with zero failures. The Decode KV pool was measured at 2,431,352 tokens within 21.05 GiB, so one 1M-token request needs roughly 9.7 GiB and fits.
 
     **Prefill: run this complete script on each P node.** Set `p_rank=0` on node A and `p_rank=1` on node B; keep `head_ip` pointing at P node A. Start both ranks before waiting for readiness.
 
@@ -1033,40 +981,45 @@ The following sections describe multi-node PD separation deployment on Atlas 800
     p_rank=0  # Set to 1 on Prefill node B.
     model_path="/path/to/DeepSeek-V4-Flash-0731-w8a8"
 
-    export ASCEND_GLOBAL_RESOURCE_CONFIG='{"comm_resource_config.protocol_desc":["roce:device","hccs:device"]}'
-    export ASCEND_LOCAL_COMM_RES='{"version":"1.3"}'
+    unset https_proxy
+    unset http_proxy
+    export LD_LIBRARY_PATH="${LD_LIBRARY_PATH:+$LD_LIBRARY_PATH:}/usr/local/lib/"
     export VLLM_USE_V2_MODEL_RUNNER=1
+    export ASCEND_GLOBAL_RESOURCE_CONFIG='{"comm_resource_config.protocol_desc":["roce:device","hccs:device"]}'
     export HCCL_INTRA_ROCE_ENABLE=1
-    export HCCL_CONNECT_TIMEOUT=6000
-    export HCCL_EXEC_TIMEOUT=204
+    export ASCEND_LOCAL_COMM_RES='{"version":"1.3"}'
+    export VLLM_RPC_TIMEOUT=3600000
+    export VLLM_EXECUTE_MODEL_TIMEOUT_SECONDS=30000
+    export HCCL_EXEC_TIMEOUT=3600
+    export HCCL_CONNECT_TIMEOUT=120
     export HCCL_BUFFSIZE=1200
+    export HCCL_OP_EXPANSION_MODE="AIV"
     export GLOO_SOCKET_IFNAME="$nic_name"
     export HCCL_SOCKET_IFNAME="$nic_name"
     export TP_SOCKET_IFNAME="$nic_name"
     export HCCL_IF_IP="$local_ip"
+    export OMP_PROC_BIND=false
+    export OMP_NUM_THREADS=10
     export PYTORCH_NPU_ALLOC_CONF=expandable_segments:True
-    export VLLM_EXECUTE_MODEL_TIMEOUT_SECONDS=30000
-    export VLLM_RPC_TIMEOUT=3600000
+    export TASK_QUEUE_ENABLE=1
     export ASCEND_RT_VISIBLE_DEVICES=0,1,2,3,4,5,6,7
+    export VLLM_SERVER_DEV_MODE=1
+
     kv_config='{
       "kv_connector": "MooncakeHybridConnector",
       "kv_role": "kv_producer",
       "kv_port": "30000",
       "kv_connector_extra_config": {
         "prefill": {
-          "dp_size": 2,
           "tp_size": 1,
-          "pp_size": 1,
-          "pcp_size": 8
+          "pcp_size": 8,
+          "dp_size": 2
         },
         "decode": {
           "dp_size": 16,
-          "tp_size": 1,
-          "pp_size": 1,
-          "pcp_size": 1
+          "tp_size": 1
         }
-      },
-      "kv_load_failure_policy": "fail"
+      }
     }'
 
     vllm serve "$model_path" \
@@ -1077,18 +1030,14 @@ The following sections describe multi-node PD separation deployment on Atlas 800
       --data-parallel-address "$head_ip" \
       --data-parallel-rpc-port 12321 \
       --tensor-parallel-size 1 \
-      --pipeline-parallel-size 1 \
       --prefill-context-parallel-size 8 \
-      --decode-context-parallel-size 1 \
       --served-model-name dsv4 \
       --enable-expert-parallel \
-      --max-model-len 150000 \
-      --max-num-batched-tokens 4096 \
+      --max-model-len 262144 \
+      --max-num-batched-tokens 8192 \
       --max-num-seqs 16 \
-      --api-server-count 4 \
       --block-size 32 \
-      --gpu-memory-utilization 0.96 \
-      --enable-chunked-prefill \
+      --gpu-memory-utilization 0.95 \
       --no-disable-hybrid-kv-cache-manager \
       --enable-prefix-caching \
       --enforce-eager \
@@ -1102,7 +1051,7 @@ The following sections describe multi-node PD separation deployment on Atlas 800
       --seed 1024 \
       --model-loader-extra-config '{"enable_multithread_load":true,"num_threads":128}' \
       --speculative-config '{"method":"dspark","num_speculative_tokens":5,"enforce_eager":true}' \
-      --additional-config '{"enable_cpu_binding":true,"enable_fused_mc2":1}' \
+      --additional-config '{"enable_cpu_binding":true}' \
       --kv-transfer-config "$kv_config"
     ```
 
@@ -1116,21 +1065,23 @@ The following sections describe multi-node PD separation deployment on Atlas 800
     model_path="/path/to/DeepSeek-V4-Flash-0731-w8a8"
     rank_offset=0  # Set to 8 on Decode node B.
 
-    export ASCEND_GLOBAL_RESOURCE_CONFIG='{"comm_resource_config.protocol_desc":["roce:device","hccs:device"]}'
+    unset https_proxy
+    unset http_proxy
+    export LD_LIBRARY_PATH="${LD_LIBRARY_PATH:+$LD_LIBRARY_PATH:}/usr/local/lib/"
     export VLLM_USE_V2_MODEL_RUNNER=1
-    export HCCL_INTRA_ROCE_ENABLE=1
+    export VLLM_RPC_TIMEOUT=3600000
+    export VLLM_EXECUTE_MODEL_TIMEOUT_SECONDS=30000
+    export HCCL_EXEC_TIMEOUT=3600
     export HCCL_CONNECT_TIMEOUT=120
-    export HCCL_EXEC_TIMEOUT=204
     export HCCL_BUFFSIZE=1800
     export GLOO_SOCKET_IFNAME="$nic_name"
     export HCCL_SOCKET_IFNAME="$nic_name"
     export TP_SOCKET_IFNAME="$nic_name"
     export HCCL_IF_IP="$local_ip"
     export PYTORCH_NPU_ALLOC_CONF=expandable_segments:True
-    export VLLM_EXECUTE_MODEL_TIMEOUT_SECONDS=30000
-    export VLLM_RPC_TIMEOUT=3600000
     export OMP_NUM_THREADS=10
     export OMP_PROC_BIND=false
+    export VLLM_SERVER_DEV_MODE=1
 
     for local_rank in 0 1 2 3 4 5 6 7; do
       global_rank=$((local_rank + rank_offset))
@@ -1143,14 +1094,11 @@ The following sections describe multi-node PD separation deployment on Atlas 800
           "prefill": {
             "dp_size": 2,
             "tp_size": 1,
-            "pp_size": 1,
             "pcp_size": 8
           },
           "decode": {
             "dp_size": 16,
-            "tp_size": 1,
-            "pp_size": 1,
-            "pcp_size": 1
+            "tp_size": 1
           }
         }
       }'
@@ -1164,9 +1112,9 @@ The following sections describe multi-node PD separation deployment on Atlas 800
         --tensor-parallel-size 1 \
         --enable-expert-parallel \
         --seed 1024 \
-        --max-model-len 508576 \
+        --max-model-len 262144 \
         --max-num-batched-tokens 720 \
-        --max-num-seqs 128 \
+        --max-num-seqs 42 \
         --async-scheduling \
         --block-size 32 \
         --served-model-name dsv4 \
@@ -1179,18 +1127,18 @@ The following sections describe multi-node PD separation deployment on Atlas 800
         --tool-call-parser deepseek_v4 \
         --enable-auto-tool-choice \
         --reasoning-parser deepseek_v4 \
-        --gpu-memory-utilization 0.97 \
+        --gpu-memory-utilization 0.95 \
         --quantization ascend \
-        --speculative-config '{"num_speculative_tokens":1,"method":"dspark"}' \
+        --speculative-config '{"num_speculative_tokens":5,"method":"dspark"}' \
         --compilation-config '{"cudagraph_mode":"FULL_DECODE_ONLY"}' \
         --kv-transfer-config "$kv_config" \
-        --additional-config '{"ascend_compilation_config":{"enable_npugraph_ex":true,"enable_static_kernel":false},"enable_cpu_binding":true,"multistream_overlap_shared_expert":true,"recompute_scheduler_enable":true}' &
+        --additional-config '{"ascend_compilation_config":{"enable_npugraph_ex":true,"enable_static_kernel":false},"enable_cpu_binding":true,"multistream_overlap_shared_expert":true,"scheduler_config": {"recompute_scheduler_enable": true}}' &
       sleep 3
     done
     wait
     ```
 
-    **Start the proxy after all endpoints are healthy.** From the repository root, run the following complete command block. Use four workers for the short/medium and pooling configurations, or one for the recorded long-input configuration:
+    **Start the proxy after all endpoints are healthy.** From the repository root, run the following complete command block. Use four workers for the standard configuration; the recorded long-input configuration used one. Revalidate proxy workers with the client load:
 
     ```shell
     set -euo pipefail
@@ -1224,7 +1172,7 @@ The following sections describe multi-node PD separation deployment on Atlas 800
 
 ### 5.3 KV Cache Pool Deployment {: #53-memcache-kv-cache-pool-deployment }
 
-This section provides PD separation deployment examples with a KV Cache Pool for cross-engine KV cache reuse. The 950DT and A3 examples use the MemCache backend, while the A2 examples cover both Mooncake and MemCache. Each hardware tab describes backend and storage configuration, Prefill and Decode startup steps, and KV cache reuse verification.
+This section provides PD separation deployment examples with a KV Cache Pool for cross-engine KV cache reuse. The 950DT and A3 examples use the Memcache backend, while the A2 examples cover both Mooncake and MemCache. Each hardware tab describes backend and storage configuration, Prefill and Decode startup steps, and KV cache reuse verification.
 
 === "950DT products"
 
@@ -1234,7 +1182,7 @@ This section provides PD separation deployment examples with a KV Cache Pool for
 
     Reuse the shared `launch_online_dp.py` from [the 950DT PD deployment example](#524-950dt-series-pd-separation-deployment). Save the pooled templates below as `run_prefill_memcache.sh` and `run_decode_memcache.sh`, and select them with `--script`. These templates use `MultiConnector` and the required Memcache environment variables.
 
-    For backend configuration and parameter descriptions, refer to [KV Cache Pool (Ascend Store)](../../user_guide/feature_guide/kv_cache_pool_ascend_store.md#scenario-2-memcache-backend).
+    For backend configuration and parameter descriptions, refer to [Memcache backend guide](../../user_guide/feature_guide/kv_cache_pool_ascend_store.md#scenario-2-memcache-backend).
 
     1. <a id="5321-prerequisites-and-memcache-configuration"></a>**Prerequisites and MemCache Configuration**
 
@@ -1296,7 +1244,7 @@ This section provides PD separation deployment examples with a KV Cache Pool for
 
         export VLLM_USE_V2_MODEL_RUNNER=1
         export VLLM_EXECUTE_MODEL_TIMEOUT_SECONDS=3000
-        export HCCL_EXEC_TIMEOUT=204
+        export HCCL_EXEC_TIMEOUT=3600
         export HCCL_CONNECT_TIMEOUT=120
         export PYTHONHASHSEED=0
         export OMP_PROC_BIND=false
@@ -1394,7 +1342,7 @@ This section provides PD separation deployment examples with a KV Cache Pool for
 
         export VLLM_USE_V2_MODEL_RUNNER=1
         export VLLM_EXECUTE_MODEL_TIMEOUT_SECONDS=3000
-        export HCCL_EXEC_TIMEOUT=204
+        export HCCL_EXEC_TIMEOUT=3600
         export HCCL_CONNECT_TIMEOUT=120
         export PYTHONHASHSEED=0
         export OMP_PROC_BIND=false
@@ -1470,7 +1418,7 @@ This section provides PD separation deployment examples with a KV Cache Pool for
             }' \
             --additional-config '{
                 "ascend_compilation_config": {"enable_npugraph_ex": true,"enable_static_kernel": false},
-                "enable_cpu_binding": true,"multistream_overlap_shared_expert": true,"recompute_scheduler_enable": true,"enable_shared_expert_dp": true,"combine_quant_mode": 4
+                "enable_cpu_binding": true,"multistream_overlap_shared_expert": true,"scheduler_config": {"recompute_scheduler_enable": true},"enable_shared_expert_dp": true,"combine_quant_mode": 4
             }' \
             2>&1 | tee "v4_flash_d_memcache_dp${4}.log"
         ```
@@ -1506,7 +1454,7 @@ This section provides PD separation deployment examples with a KV Cache Pool for
 
             Wait until the Prefill API endpoint and all four Decode API endpoints are healthy, then start the proxy using the configuration from [the 950DT PD deployment example](#524-950dt-series-pd-separation-deployment). Send a generation request to `<proxy_ip>:1999` as described in [Section 6](#6-functional-verification). Confirm that the response contains generated text.
 
-            To verify KV Cache Pool reuse, send an initial request to warm up the cache, then send another request with the same identical token prefix. Check the Prefill logs for KV Pool lookup/get/put operations and cache-hit information. An HTTP 200 response alone does not confirm KV Cache Pool reuse. For details,refer to [KV Cache Pool (Ascend Store)](../../user_guide/feature_guide/kv_cache_pool_ascend_store.md#scenario-2-memcache-backend).
+            To verify KV Cache Pool reuse, send an initial request to warm up the cache, then send another request with the same identical token prefix. Check the Prefill logs for KV Pool lookup/get/put operations and cache-hit information. An HTTP 200 response alone does not confirm KV Cache Pool reuse. For details,refer to [Memcache backend guide](../../user_guide/feature_guide/kv_cache_pool_ascend_store.md#scenario-2-memcache-backend).
 
     Key pooling parameters:
 
@@ -1523,13 +1471,13 @@ This section provides PD separation deployment examples with a KV Cache Pool for
 
     | Role | DP | TP | PCP | NPU dies | HTTP ports |
     | --- | --- | --- | --- | --- | --- |
-    | Prefill | 2 | 1 | 8 | 16 | 7100-7101 |
-    | Decode | 16 | 1 | 1 | 16 | 7100-7115 |
+    | Prefill | 2 | 1 | 8 | 16 | 7100–7101 |
+    | Decode | 16 | 1 | 1 | 16 | 7100–7115 |
 
     The deployment follows the same Memcache service setup as
-    [DeepSeek-V4.1-Flash](DeepSeek-V4.1-Flash.md#531-prepare-the-memcache-services),
+    [DeepSeek-V4.1-Flash](DeepSeek-V4.1-Flash.md#5321-prepare-the-memcache-services),
     while all non-pooling options and the parallel layout follow the
-    [A3 series](#a3-series-pd-separation-deployment-with-dspark) tab in Section 5.2. `MooncakeHybridConnector`
+    [the A3 PD deployment example](#a3-series-pd-separation-deployment-with-dspark) tab in Section 5.2. `MooncakeHybridConnector`
     continues to transfer KV
     cache from Prefill to Decode, while `AscendStoreConnector` stores reusable KV
     cache in Memcache. Both connectors are configured as children of
@@ -1657,7 +1605,7 @@ This section provides PD separation deployment examples with a KV Cache Pool for
         ubsio.standalone.force_new_disk = true
         ```
 
-        Use a dedicated, unmounted block device without a filesystem signature. `force_new_disk=true` reinitializes the SSD cache layout at startup and invalidates previous cache contents; do not point it at a device containing data to keep. The 20 GiB DRAM contribution and 50 GiB UBS IO allocation are separate per-process host-memory budgets. Size both for the actual prefix working set and available host memory. With one standalone process per host, use `device_count=1`; it is not the number of model ranks.
+        Use a dedicated, unmounted block device without a filesystem signature. `force_new_disk=true` reinitializes the SSD cache layout at startup and invalidates previous cache contents; do not point it at a device containing data to keep. The 20GB DRAM contribution and 50GB UBS IO allocation are separate per-process host-memory budgets. Size both for the actual prefix working set and available host memory. With one standalone process per host, use `device_count=1`; it is not the number of model ranks.
 
         After MetaService is ready, start one standalone process on each node with the selected SSD configuration, then all Decode ranks, both Prefill ranks and the proxy:
 
@@ -1666,7 +1614,7 @@ This section provides PD separation deployment examples with a KV Cache Pool for
         python3 memcache_standalone.py
         ```
 
-        Wait for `Successfully initialized Memcache` before starting vLLM. vLLM processes continue to use `mmc-local.conf`, not the standalone configuration. Follow [Enable Memcache SSD Cache](../../user_guide/feature_guide/kv_cache_pool_ascend_store.md#step-7-enable-memcache-ssd-cache) for SDK requirements, storage ownership and capacity constraints. Verify real cache restore and backend hit activity; enabling an SSD flag or seeing HTTP 200 alone does not prove three-level cache reuse.
+        Wait for `Successfully initialized Memcache` before starting vLLM. vLLM processes continue to use `mmc-local.conf`, not the standalone configuration. Follow [Memcache SSD instructions](../../user_guide/feature_guide/kv_cache_pool_ascend_store.md#step-7-enable-memcache-ssd-cache) for SDK requirements, storage ownership and capacity constraints. Verify real cache restore and backend hit activity; enabling an SSD flag or seeing HTTP 200 alone does not prove three-level cache reuse.
 
     2. <a id="532-start-the-prefill-node-with-pooling"></a>**Start the Prefill Node with Pooling**
 
@@ -1689,7 +1637,7 @@ This section provides PD separation deployment examples with a KV Cache Pool for
         export HCCL_SOCKET_IFNAME=$nic_name
         export VLLM_RPC_TIMEOUT=3600000
         export VLLM_EXECUTE_MODEL_TIMEOUT_SECONDS=30000
-        export HCCL_EXEC_TIMEOUT=204
+        export HCCL_EXEC_TIMEOUT=3600
         export HCCL_CONNECT_TIMEOUT=120
         export OMP_PROC_BIND=false
         export OMP_NUM_THREADS=10
@@ -1720,7 +1668,7 @@ This section provides PD separation deployment examples with a KV Cache Pool for
             --enable-expert-parallel \
             --seed 1024 \
             --served-model-name dsv4 \
-            --max-model-len 1048576 \
+            --max-model-len 512000 \
             --max-num-batched-tokens 16384 \
             --max-num-seqs 16 \
             --no-disable-hybrid-kv-cache-manager \
@@ -1793,7 +1741,7 @@ This section provides PD separation deployment examples with a KV Cache Pool for
         export TASK_QUEUE_ENABLE=1
         export VLLM_RPC_TIMEOUT=3600000
         export VLLM_EXECUTE_MODEL_TIMEOUT_SECONDS=30000
-        export HCCL_EXEC_TIMEOUT=204
+        export HCCL_EXEC_TIMEOUT=3600
         export HCCL_CONNECT_TIMEOUT=120
         export HCCL_IF_IP=$local_ip
         export GLOO_SOCKET_IFNAME=$nic_name
@@ -1825,7 +1773,7 @@ This section provides PD separation deployment examples with a KV Cache Pool for
             --enable-expert-parallel \
             --seed 1024 \
             --served-model-name dsv4 \
-            --max-model-len 1048576 \
+            --max-model-len 512000 \
             --max-num-batched-tokens 480 \
             --max-num-seqs 60 \
             --async-scheduling \
@@ -1884,7 +1832,7 @@ This section provides PD separation deployment examples with a KV Cache Pool for
                 },
                 "enable_cpu_binding":true,
                 "multistream_overlap_shared_expert":true,
-                "recompute_scheduler_enable":true
+                "scheduler_config": {"recompute_scheduler_enable": true}
             }'
         ```
 
@@ -1911,7 +1859,7 @@ This section provides PD separation deployment examples with a KV Cache Pool for
             --dp-address "<PREFILL_NODE_IP>" --dp-rpc-port 12321 --vllm-start-port 7100
         ```
 
-        Each Prefill DP rank uses eight consecutive NPU dies: 0-7 and 8-15.
+        Each Prefill DP rank uses eight consecutive NPU dies: 0–7 and 8–15.
         Each Decode DP rank uses one die. `--dp-address` is the master IP of its own
         role; Prefill and Decode use separate DP groups.
 
@@ -1935,7 +1883,7 @@ This section provides PD separation deployment examples with a KV Cache Pool for
             --decoder-ports {7100..7115}
         ```
 
-        Send requests to the proxy at ``http://<PREFILL_NODE_IP>:1999``, using the
+        Send requests to the proxy at `http://<PREFILL_NODE_IP>:1999`, using the
         `dsv4` served model name from Section 6. Verify both the response and the
         P-to-D transfer in engine logs. To check pool reuse, send the same long prompt
         (at least 4096 tokens for this example) twice, allowing the first request's
@@ -1950,9 +1898,10 @@ This section provides PD separation deployment examples with a KV Cache Pool for
         - `MultiConnector` combines live P-to-D transfer through
           `MooncakeHybridConnector` with reusable prefix storage through
           `AscendStoreConnector`. In this example, both children and the parent use
-          `kv_producer` on Prefill and `kv_consumer` on Decode. Decode does not put or
-          load pool entries unless `consumer_is_to_put` or `consumer_is_to_load` is
-          explicitly enabled.
+          `kv_producer` on Prefill and `kv_consumer` on Decode. Decode neither saves
+          to nor loads from the pool by default. `save_decode_cache` enables saving
+          complete Decode blocks and missing Prefill ancestors at the first Decode
+          save; `enable_lookup` separately enables loading from the pool.
         - `PYTHONHASHSEED=0` must match across all engines. Prefill enables prefix
           caching; Decode disables it.
         - Keep `--no-disable-hybrid-kv-cache-manager` on both roles and the top-level
@@ -1974,7 +1923,7 @@ This section provides PD separation deployment examples with a KV Cache Pool for
 
     #### A2 KV Pooling: Mooncake SSD Profile and Memcache Integration {: #526-a2-kv-pooling-mooncake-ssd-profile-and-memcache-integration }
 
-    Pooling adds `AscendStoreConnector` to the Hybrid P-to-D transport through `MultiConnector`. A PC90 or third-level-pooling scenario name does not select a backend or prove that SSD offload is active. Select and prepare one backend, then copy its complete P/D scripts below. They use P token budget8192, P/D prefix caching enabled and D draft4/mns51/GMU0.97.
+    Pooling adds `AscendStoreConnector` to the Hybrid P-to-D transport through `MultiConnector`. A PC90 or third-level-pooling scenario name does not select a backend or prove that SSD offload is active. Select and prepare one backend, then copy its complete P/D scripts below. They use a P token budget of 8192, P/D prefix caching enabled and D draft 5 / max-num-seqs 42 / GMU 0.95, the same as the Section 5.2 standard.
 
     | Backend | Preparation | Validation scope |
     |---|---|---|
@@ -2068,12 +2017,16 @@ This section provides PD separation deployment examples with a KV Cache Pool for
         p_rank=0  # Set to 1 on Prefill node B.
         model_path="/path/to/DeepSeek-V4-Flash-0731-w8a8"
 
+        unset https_proxy
+        unset http_proxy
+        export LD_LIBRARY_PATH="${LD_LIBRARY_PATH:+$LD_LIBRARY_PATH:}/usr/local/lib/"
+
         export ASCEND_GLOBAL_RESOURCE_CONFIG='{"comm_resource_config.protocol_desc":["roce:device","hccs:device"]}'
         export ASCEND_LOCAL_COMM_RES='{"version":"1.3"}'
         export VLLM_USE_V2_MODEL_RUNNER=1
         export HCCL_INTRA_ROCE_ENABLE=1
         export HCCL_CONNECT_TIMEOUT=6000
-        export HCCL_EXEC_TIMEOUT=204
+        export HCCL_EXEC_TIMEOUT=3600
         export HCCL_BUFFSIZE=1200
         export GLOO_SOCKET_IFNAME="$nic_name"
         export HCCL_SOCKET_IFNAME="$nic_name"
@@ -2144,13 +2097,11 @@ This section provides PD separation deployment examples with a KV Cache Pool for
           --decode-context-parallel-size 1 \
           --served-model-name dsv4 \
           --enable-expert-parallel \
-          --max-model-len 150000 \
+          --max-model-len 262144 \
           --max-num-batched-tokens 8192 \
           --max-num-seqs 16 \
-          --api-server-count 4 \
           --block-size 32 \
-          --gpu-memory-utilization 0.96 \
-          --enable-chunked-prefill \
+          --gpu-memory-utilization 0.95 \
           --no-disable-hybrid-kv-cache-manager \
           --enable-prefix-caching \
           --enforce-eager \
@@ -2164,7 +2115,7 @@ This section provides PD separation deployment examples with a KV Cache Pool for
           --seed 1024 \
           --model-loader-extra-config '{"enable_multithread_load":true,"num_threads":128}' \
           --speculative-config '{"method":"dspark","num_speculative_tokens":5,"enforce_eager":true}' \
-          --additional-config '{"enable_cpu_binding":true,"enable_fused_mc2":1}' \
+          --additional-config '{"enable_cpu_binding":true}' \
           --kv-transfer-config "$kv_config"
         ```
 
@@ -2180,12 +2131,16 @@ This section provides PD separation deployment examples with a KV Cache Pool for
         p_rank=0  # Set to 1 on Prefill node B.
         model_path="/path/to/DeepSeek-V4-Flash-0731-w8a8"
 
+        unset https_proxy
+        unset http_proxy
+        export LD_LIBRARY_PATH="${LD_LIBRARY_PATH:+$LD_LIBRARY_PATH:}/usr/local/lib/"
+
         export ASCEND_GLOBAL_RESOURCE_CONFIG='{"comm_resource_config.protocol_desc":["roce:device","hccs:device"]}'
         export ASCEND_LOCAL_COMM_RES='{"version":"1.3"}'
         export VLLM_USE_V2_MODEL_RUNNER=1
         export HCCL_INTRA_ROCE_ENABLE=1
         export HCCL_CONNECT_TIMEOUT=6000
-        export HCCL_EXEC_TIMEOUT=204
+        export HCCL_EXEC_TIMEOUT=3600
         export HCCL_BUFFSIZE=1200
         export GLOO_SOCKET_IFNAME="$nic_name"
         export HCCL_SOCKET_IFNAME="$nic_name"
@@ -2251,13 +2206,11 @@ This section provides PD separation deployment examples with a KV Cache Pool for
           --decode-context-parallel-size 1 \
           --served-model-name dsv4 \
           --enable-expert-parallel \
-          --max-model-len 150000 \
+          --max-model-len 262144 \
           --max-num-batched-tokens 8192 \
           --max-num-seqs 16 \
-          --api-server-count 4 \
           --block-size 32 \
-          --gpu-memory-utilization 0.96 \
-          --enable-chunked-prefill \
+          --gpu-memory-utilization 0.95 \
           --no-disable-hybrid-kv-cache-manager \
           --enable-prefix-caching \
           --enforce-eager \
@@ -2271,7 +2224,7 @@ This section provides PD separation deployment examples with a KV Cache Pool for
           --seed 1024 \
           --model-loader-extra-config '{"enable_multithread_load":true,"num_threads":128}' \
           --speculative-config '{"method":"dspark","num_speculative_tokens":5,"enforce_eager":true}' \
-          --additional-config '{"enable_cpu_binding":true,"enable_fused_mc2":1}' \
+          --additional-config '{"enable_cpu_binding":true}' \
           --kv-transfer-config "$kv_config"
         ```
 
@@ -2287,13 +2240,17 @@ This section provides PD separation deployment examples with a KV Cache Pool for
         local_ip="<THIS_DECODE_NODE_IP>"
         head_ip="<DECODE_NODE_A_IP>"
         model_path="/path/to/DeepSeek-V4-Flash-0731-w8a8"
+
+        unset https_proxy
+        unset http_proxy
+        export LD_LIBRARY_PATH="${LD_LIBRARY_PATH:+$LD_LIBRARY_PATH:}/usr/local/lib/"
         rank_offset=0  # Set to 8 on Decode node B.
 
         export ASCEND_GLOBAL_RESOURCE_CONFIG='{"comm_resource_config.protocol_desc":["roce:device","hccs:device"]}'
         export VLLM_USE_V2_MODEL_RUNNER=1
         export HCCL_INTRA_ROCE_ENABLE=1
         export HCCL_CONNECT_TIMEOUT=120
-        export HCCL_EXEC_TIMEOUT=204
+        export HCCL_EXEC_TIMEOUT=3600
         export HCCL_BUFFSIZE=1800
         export GLOO_SOCKET_IFNAME="$nic_name"
         export HCCL_SOCKET_IFNAME="$nic_name"
@@ -2349,7 +2306,7 @@ This section provides PD separation deployment examples with a KV Cache Pool for
                     "backend": "mooncake",
                     "lookup_rpc_port": "'"$((global_rank + 2))"'",
                     "use_layerwise": false,
-                    "consumer_is_to_load": true
+                    "enable_lookup": true
                   }
                 }
               ]
@@ -2365,9 +2322,9 @@ This section provides PD separation deployment examples with a KV Cache Pool for
             --tensor-parallel-size 1 \
             --enable-expert-parallel \
             --seed 1024 \
-            --max-model-len 508576 \
+            --max-model-len 262144 \
             --max-num-batched-tokens 720 \
-            --max-num-seqs 128 \
+            --max-num-seqs 42 \
             --async-scheduling \
             --block-size 32 \
             --served-model-name dsv4 \
@@ -2380,18 +2337,18 @@ This section provides PD separation deployment examples with a KV Cache Pool for
             --tool-call-parser deepseek_v4 \
             --enable-auto-tool-choice \
             --reasoning-parser deepseek_v4 \
-            --gpu-memory-utilization 0.97 \
+            --gpu-memory-utilization 0.95 \
             --quantization ascend \
-            --speculative-config '{"num_speculative_tokens":1,"method":"dspark"}' \
+            --speculative-config '{"num_speculative_tokens":5,"method":"dspark"}' \
             --compilation-config '{"cudagraph_mode":"FULL_DECODE_ONLY"}' \
             --kv-transfer-config "$kv_config" \
-            --additional-config '{"ascend_compilation_config":{"enable_npugraph_ex":true,"enable_static_kernel":false},"enable_cpu_binding":true,"multistream_overlap_shared_expert":true,"recompute_scheduler_enable":true}' &
+            --additional-config '{"ascend_compilation_config":{"enable_npugraph_ex":true,"enable_static_kernel":false},"enable_cpu_binding":true,"multistream_overlap_shared_expert":true,"scheduler_config": {"recompute_scheduler_enable": true}}' &
           sleep 3
         done
         wait
         ```
 
-        The two disk limits are 32 GiB per participating client/rank and the offload buffer is 1 GiB; budget their sum across the node. Clearing `ASCEND_GLOBAL_RESOURCE_CONFIG` belongs to this measured Mooncake Store path, not to pooling in general. The environment variables alone do not enable SSD: the JSON switch and master offload settings are also required. In this profile P **and D** use `--enable-prefix-caching`; the pooled scripts replace the ordinary D `--no-enable-prefix-caching` flag. D's Store child sets `consumer_is_to_load=true`.
+        The two disk limits are 32 GiB per participating client/rank and the offload buffer is 1 GiB; budget their sum across the node. Clearing `ASCEND_GLOBAL_RESOURCE_CONFIG` belongs to this measured Mooncake Store path, not to pooling in general. The environment variables alone do not enable SSD: the JSON switch and master offload settings are also required. In this profile P **and D** use `--enable-prefix-caching`; the pooled scripts replace the ordinary D `--no-enable-prefix-caching` flag. D's Store child sets `enable_lookup=true`.
 
         **Memcache backend**
 
@@ -2403,13 +2360,17 @@ This section provides PD separation deployment examples with a KV Cache Pool for
         local_ip="<THIS_DECODE_NODE_IP>"
         head_ip="<DECODE_NODE_A_IP>"
         model_path="/path/to/DeepSeek-V4-Flash-0731-w8a8"
+
+        unset https_proxy
+        unset http_proxy
+        export LD_LIBRARY_PATH="${LD_LIBRARY_PATH:+$LD_LIBRARY_PATH:}/usr/local/lib/"
         rank_offset=0  # Set to 8 on Decode node B.
 
         export ASCEND_GLOBAL_RESOURCE_CONFIG='{"comm_resource_config.protocol_desc":["roce:device","hccs:device"]}'
         export VLLM_USE_V2_MODEL_RUNNER=1
         export HCCL_INTRA_ROCE_ENABLE=1
         export HCCL_CONNECT_TIMEOUT=120
-        export HCCL_EXEC_TIMEOUT=204
+        export HCCL_EXEC_TIMEOUT=3600
         export HCCL_BUFFSIZE=1800
         export GLOO_SOCKET_IFNAME="$nic_name"
         export HCCL_SOCKET_IFNAME="$nic_name"
@@ -2460,7 +2421,7 @@ This section provides PD separation deployment examples with a KV Cache Pool for
                     "backend": "memcache",
                     "lookup_rpc_port": "'"$((global_rank + 2))"'",
                     "use_layerwise": false,
-                    "consumer_is_to_load": true
+                    "enable_lookup": true
                   }
                 }
               ]
@@ -2476,9 +2437,9 @@ This section provides PD separation deployment examples with a KV Cache Pool for
             --tensor-parallel-size 1 \
             --enable-expert-parallel \
             --seed 1024 \
-            --max-model-len 508576 \
+            --max-model-len 262144 \
             --max-num-batched-tokens 720 \
-            --max-num-seqs 128 \
+            --max-num-seqs 42 \
             --async-scheduling \
             --block-size 32 \
             --served-model-name dsv4 \
@@ -2491,12 +2452,12 @@ This section provides PD separation deployment examples with a KV Cache Pool for
             --tool-call-parser deepseek_v4 \
             --enable-auto-tool-choice \
             --reasoning-parser deepseek_v4 \
-            --gpu-memory-utilization 0.97 \
+            --gpu-memory-utilization 0.95 \
             --quantization ascend \
-            --speculative-config '{"num_speculative_tokens":1,"method":"dspark"}' \
+            --speculative-config '{"num_speculative_tokens":5,"method":"dspark"}' \
             --compilation-config '{"cudagraph_mode":"FULL_DECODE_ONLY"}' \
             --kv-transfer-config "$kv_config" \
-            --additional-config '{"ascend_compilation_config":{"enable_npugraph_ex":true,"enable_static_kernel":false},"enable_cpu_binding":true,"multistream_overlap_shared_expert":true,"recompute_scheduler_enable":true}' &
+            --additional-config '{"ascend_compilation_config":{"enable_npugraph_ex":true,"enable_static_kernel":false},"enable_cpu_binding":true,"multistream_overlap_shared_expert":true,"scheduler_config": {"recompute_scheduler_enable": true}}' &
           sleep 3
         done
         wait
@@ -2510,7 +2471,7 @@ This section provides PD separation deployment examples with a KV Cache Pool for
 
 ## 6 Functional Verification
 
-This section verifies basic inference functionality for all deployment modes. For Memcache pooled PD deployments, also verify external KV Cache Pool reuse using the [A3 startup and verification steps](#534-startup-and-verification) or the “Start the Proxy and Verify KV Cache Pool Reuse” step in the [950DT example](#54-950dt-single-node-pd-separation-deployment).
+This section verifies basic inference functionality for all deployment modes. For Memcache pooled PD deployments, also verify external KV Cache Pool reuse using the [A3 startup and verification steps](#534-startup-and-verification) or the "Start the Proxy and Verify KV Cache Pool Reuse" step in the [950DT example](#54-950dt-single-node-pd-separation-deployment).
 
 Once your server is started, you can query the model with input prompts:
 
@@ -2565,13 +2526,24 @@ Refer to [Using AISBench for performance evaluation](../../developer_guide/evalu
 
 ### 8.2 Using vLLM Benchmark
 
-Refer to [vllm benchmark](https://docs.vllm.ai/en/latest/benchmarking/) for more details.
+Refer to [vLLM benchmark](https://docs.vllm.ai/en/latest/benchmarking/) for more details.
 
 ## 9 Performance Tuning
 
 ### 9.1 Recommended Configurations
 
-> For complete startup commands and parameter descriptions, please refer to the deployment examples in [Chapter 5](#5-online-service-deployment).
+For complete startup commands and parameter descriptions, please refer to the deployment examples in [Chapter 5](#5-online-service-deployment).
+
+#### Table 1: Detailed Node Configuration
+
+| Scenario | Configuration | NPUs | TP | DP | Max Num Seqs | Max Num Batched Tokens | Max Model Len | PCP |
+| --- | --- | --- | --- | --- | --- | --- | --- | --- |
+| Short Sequence | Prefill Pool | 16 (1 A3 node) | 1 | 2 | 16 | 16384 | 512000 | PCP=8 |
+| Short Sequence | Decode Pool | 16 (1 A3 node) | 1 | 16 | 60 | 480 | 512000 | PCP=1 |
+| Long Context (~1M Input, Reference) | Prefill Pool | 16 (1 A3 node) | 8 | 2 | 16 | 4096 | 1048576 | PCP=1 |
+| Long Context (~1M Input, Reference) | Decode Pool | 16 (1 A3 node) | 1 | 16 | 60 | 480 | 1048576 | PCP=1 |
+
+> **Note**: **The configurations in the table and the following notes apply only to A3.** Except for the differences listed in the table, all settings remain identical between the short-sequence and long-context configurations. The long-context configuration is provided for reference.
 
 ### 9.2 Tuning Guidelines
 

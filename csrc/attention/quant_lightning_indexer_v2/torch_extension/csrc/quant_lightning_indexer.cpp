@@ -14,6 +14,7 @@
  */
 
 #include <torch/extension.h>
+#include "acl/acl_base_rt.h"
 #include "aclnn_common.h"
 
 namespace op_api {
@@ -90,7 +91,11 @@ at::Tensor QuantLightningIndexerMetadata(int64_t numHeadsQ, int64_t numHeadsK, i
                                          const c10::optional<at::Tensor> &sequsedK,
                                          const c10::optional<at::Tensor> &cmpResidualK, int64_t batchSize,
                                          int64_t maxSeqlenQ, int64_t maxSeqlenK, c10::string_view layoutQ,
-                                         c10::string_view layoutK, int64_t maskMode, int64_t cmpRatio)
+                                         c10::string_view layoutK, int64_t maskMode, int64_t cmpRatio,
+                                         const c10::optional<at::Tensor> &candidateBlockLength = c10::nullopt,
+                                         int64_t enableDcp = 0, int64_t cpWorld = 1, int64_t cpRank = 0,
+                                         int64_t cpInterleaveSize = 1,
+                                         const c10::optional<at::Tensor> &causalSeqlensKvGlobal = c10::nullopt)
 {
     at::Device outputDevice = at::Device(std::string("npu"));
     if (cuSeqlensQ.has_value()) {
@@ -103,6 +108,8 @@ at::Tensor QuantLightningIndexerMetadata(int64_t numHeadsQ, int64_t numHeadsK, i
         outputDevice = sequsedK.value().device();
     } else if (cmpResidualK.has_value()) {
         outputDevice = cmpResidualK.value().device();
+    } else if (causalSeqlensKvGlobal.has_value()) {
+        outputDevice = causalSeqlensKvGlobal.value().device();
     }
 
     at::Tensor output = torch::empty({QLI_V2_METADATA_SIZE}, torch::dtype(torch::kInt32).device(outputDevice));
@@ -111,6 +118,8 @@ at::Tensor QuantLightningIndexerMetadata(int64_t numHeadsQ, int64_t numHeadsK, i
     auto sequsedQVal = get_valid_tensor(sequsedQ, outputDevice);
     auto sequsedKVal = get_valid_tensor(sequsedK, outputDevice);
     auto cmpResidualKVal = get_valid_tensor(cmpResidualK, outputDevice);
+    auto candidateBlockLengthVal = get_valid_tensor(candidateBlockLength, outputDevice);
+    auto causalSeqlensKvGlobalVal = get_valid_tensor(causalSeqlensKvGlobal, outputDevice);
 
     std::string layoutQStr = std::string(layoutQ);
     std::string layoutKStr = std::string(layoutK);
@@ -118,8 +127,9 @@ at::Tensor QuantLightningIndexerMetadata(int64_t numHeadsQ, int64_t numHeadsK, i
     char *layoutKPtr = const_cast<char *>(layoutKStr.c_str());
 
     ACLNN_CMD(aclnnVllmAscendQuantLightningIndexerV2Metadata, cuSeqlensQVal, cuSeqlensKVal, sequsedQVal, sequsedKVal,
-              cmpResidualKVal, numHeadsQ, numHeadsK, headDim, topk, quantMode, batchSize, maxSeqlenQ, maxSeqlenK,
-              layoutQPtr, layoutKPtr, maskMode, cmpRatio, output);
+              cmpResidualKVal, candidateBlockLengthVal, causalSeqlensKvGlobalVal, numHeadsQ, numHeadsK, headDim,
+              topk, quantMode, batchSize, maxSeqlenQ, maxSeqlenK, layoutQPtr, layoutKPtr, maskMode, cmpRatio,
+              enableDcp, cpWorld, cpRank, cpInterleaveSize, output);
     return output;
 }
 
@@ -153,7 +163,10 @@ std::tuple<at::Tensor, at::Tensor> ConstructQuantLightningIndexerOutputTensor(
     at::Tensor sparseIndicesOut = at::empty(outputSize, query.options().dtype(at::kInt));
     at::Tensor sparseValuesOut;
     if (returnValue) {
-        sparseValuesOut = at::empty(outputSize, query.options().dtype(at::kBFloat16));
+        const char *socName = aclrtGetSocName();
+        const bool fp32Score =
+            returnValue == 2 && (socName == nullptr || std::string(socName).find("Ascend950") == std::string::npos);
+        sparseValuesOut = at::empty(outputSize, query.options().dtype(fp32Score ? at::kFloat : at::kBFloat16));
     } else {
         sparseValuesOut = at::empty({0}, query.options().dtype(at::kBFloat16));
     }
@@ -167,8 +180,9 @@ std::tuple<at::Tensor, at::Tensor> QuantLightningIndexer(
     const c10::optional<at::Tensor> &cuSeqlensK, const c10::optional<at::Tensor> &sequsedQ,
     const c10::optional<at::Tensor> &sequsedK, const c10::optional<at::Tensor> &cmpResidualK,
     const c10::optional<at::Tensor> &blockTable, const c10::optional<at::Tensor> &outputIdxOffset,
-    const c10::optional<at::Tensor> &metadata, int64_t maxSeqlenQ, c10::string_view layoutQ, c10::string_view layoutK,
-    int64_t maskMode, int64_t cmpRatio, int64_t returnValue)
+    const c10::optional<at::Tensor> &metadata, const c10::optional<at::Tensor> &causalSeqlensKvGlobal,
+    int64_t maxSeqlenQ, c10::string_view layoutQ, c10::string_view layoutK, int64_t maskMode, int64_t cmpRatio,
+    int64_t returnValue, bool enableDcp, int64_t cpWorld, int64_t cpRank, int64_t cpKvCacheInterleaveSize)
 {
     TORCH_CHECK(query.numel() > 0, "Tensor query is empty.")
     TORCH_CHECK(key.numel() > 0, "Tensor key is empty.")
@@ -193,18 +207,28 @@ std::tuple<at::Tensor, at::Tensor> QuantLightningIndexer(
 
     int64_t keyStride0Disabled = 0;   // A11: 旧入口不启用 stride 显式属性 (保持现网行为)
     int64_t keyScaleStride0Disabled = 0;
+    int64_t candidateModeDisabled = 3;
+    int64_t candidateTopkBlocksDisabled = 2048;
+    int64_t candidateBlockSizeDisabled = 8;
+    c10::optional<at::Tensor> candidateTopkIndexNone = c10::nullopt;
+    c10::optional<at::Tensor> candidateBlockLengthNone = c10::nullopt;
+    // 算子签名固定 4 个输出（candidate 两个可选）；旧入口不启用候选，传空 tensor 占位
+    at::Tensor candidateTopkIndexOutDisabled = at::empty({0}, query.options().dtype(at::kInt));
+    at::Tensor candidateBlockLengthOutDisabled = at::empty({0}, query.options().dtype(at::kInt));
     ACLNN_CMD(aclnnVllmAscendQuantLightningIndexerV2, queryWrapper, keyWrapper, weights, queryScaleWrapper, keyScaleWrapper,
-              cuSeqlensQ, cuSeqlensK, sequsedQ, sequsedK, cmpResidualK, blockTable, outputIdxOffset, metadata, topk,
-              quantMode, maxSeqlenQ, queryLayoutPtr, keyLayoutPtr, maskMode, cmpRatio, returnValue,
-              keyStride0Disabled, keyScaleStride0Disabled, sparseIndicesOut,
-              sparseValuesOut);
+              cuSeqlensQ, cuSeqlensK, sequsedQ, sequsedK, cmpResidualK, blockTable, outputIdxOffset, metadata,
+              candidateTopkIndexNone, candidateBlockLengthNone, causalSeqlensKvGlobal, topk, quantMode, maxSeqlenQ,
+              queryLayoutPtr, keyLayoutPtr, maskMode, cmpRatio, returnValue, candidateModeDisabled,
+              candidateTopkBlocksDisabled, candidateBlockSizeDisabled, keyStride0Disabled, keyScaleStride0Disabled,
+              enableDcp, cpWorld, cpRank, cpKvCacheInterleaveSize, sparseIndicesOut, sparseValuesOut,
+              candidateTopkIndexOutDisabled, candidateBlockLengthOutDisabled);
 
     return std::tuple<at::Tensor, at::Tensor>(sparseIndicesOut, sparseValuesOut);
 }
 
 // 两级TopK candidate 接口 (O1 方案b: 新增入口, 旧接口不变)
 // candidate_mode: 1=source 输出 candidate_topk_index; 2=consumer 输入候选块; 3=关闭
-std::tuple<at::Tensor, at::Tensor, at::Tensor> QuantLightningIndexerCandidate(
+std::tuple<at::Tensor, at::Tensor, at::Tensor, at::Tensor> QuantLightningIndexerCandidate(
     const at::Tensor &query, const at::Tensor &key, const at::Tensor &weights, const at::Tensor &queryDequantScale,
     const at::Tensor &keyDequantScale, int64_t topk, int64_t quantMode,
     const c10::optional<at::Tensor> &candidateTopkIndexIn, const c10::optional<at::Tensor> &cuSeqlensQ,
@@ -213,7 +237,8 @@ std::tuple<at::Tensor, at::Tensor, at::Tensor> QuantLightningIndexerCandidate(
     const c10::optional<at::Tensor> &blockTable, const c10::optional<at::Tensor> &outputIdxOffset,
     const c10::optional<at::Tensor> &metadata, int64_t maxSeqlenQ, c10::string_view layoutQ,
     c10::string_view layoutK, int64_t maskMode, int64_t cmpRatio, int64_t candidateMode,
-    int64_t candidateTopkBlocks, int64_t candidateBlockSize)
+    int64_t candidateTopkBlocks, int64_t candidateBlockSize,
+    const c10::optional<at::Tensor> &candidateBlockLength = c10::nullopt)
 {
     TORCH_CHECK(query.numel() > 0, "Tensor query is empty.")
     TORCH_CHECK(key.numel() > 0, "Tensor key is empty.")
@@ -228,16 +253,23 @@ std::tuple<at::Tensor, at::Tensor, at::Tensor> QuantLightningIndexerCandidate(
 
     int64_t keyHeadNum = (keyLayoutStr == "TND") ? key.size(DIM_1) : key.size(DIM_2);
     at::Tensor candidateTopkIndexOut;
+    at::Tensor candidateBlockLengthOut;
     if (candidateMode == 1) {
         at::SmallVector<int64_t, SIZE> candSize;
+        at::SmallVector<int64_t, SIZE> candLenSize;
         if (queryLayoutStr == "BSND") {
             candSize = {query.size(DIM_0), query.size(DIM_1), keyHeadNum, candidateTopkBlocks};
+            candLenSize = {query.size(DIM_0) * query.size(DIM_1), keyHeadNum};
         } else {
             candSize = {query.size(DIM_0), keyHeadNum, candidateTopkBlocks};
+            candLenSize = {query.size(DIM_0), keyHeadNum};
         }
         candidateTopkIndexOut = at::empty(candSize, query.options().dtype(at::kInt));
+        // 每行有效候选块数：zeros 保证 kernel 未覆盖的行（coreZeroEnable==0）为 0
+        candidateBlockLengthOut = at::zeros(candLenSize, query.options().dtype(at::kInt));
     } else {
         candidateTopkIndexOut = at::empty({0}, query.options().dtype(at::kInt));
+        candidateBlockLengthOut = at::empty({0}, query.options().dtype(at::kInt));
     }
 
     char *queryLayoutPtr = const_cast<char *>(queryLayoutStr.c_str());
@@ -254,21 +286,48 @@ std::tuple<at::Tensor, at::Tensor, at::Tensor> QuantLightningIndexerCandidate(
     // 从 key/k_scale 的 torch stride(0) 自动显式传入 (紧凑存储时等于紧凑值, 走 kernel 兜底语义)
     int64_t keyStride0 = key.stride(0);
     int64_t keyScaleStride0 = keyDequantScale.stride(0);
+    bool enableDcpDisabled = false;
+    int64_t cpWorldDisabled = 1;
+    int64_t cpRankDisabled = 0;
+    int64_t cpInterleaveDisabled = 1;
+    c10::optional<at::Tensor> causalSeqlensKvGlobalNone = c10::nullopt;
 
     ACLNN_CMD(aclnnVllmAscendQuantLightningIndexerV2, queryWrapper, keyWrapper, weights, queryScaleWrapper, keyScaleWrapper,
               cuSeqlensQ, cuSeqlensK, sequsedQ, sequsedK, cmpResidualK, blockTable, outputIdxOffset,
-              metadata, candidateTopkIndexIn, topk, quantMode, maxSeqlenQ, queryLayoutPtr, keyLayoutPtr, maskMode,
-              cmpRatio, returnValue, candidateMode, candidateTopkBlocks, candidateBlockSize, keyStride0,
-              keyScaleStride0, sparseIndicesOut, sparseValuesOut, candidateTopkIndexOut);
+              metadata, candidateTopkIndexIn, candidateBlockLength, causalSeqlensKvGlobalNone, topk, quantMode,
+              maxSeqlenQ, queryLayoutPtr, keyLayoutPtr, maskMode, cmpRatio, returnValue, candidateMode,
+              candidateTopkBlocks, candidateBlockSize, keyStride0, keyScaleStride0, enableDcpDisabled, cpWorldDisabled,
+              cpRankDisabled, cpInterleaveDisabled, sparseIndicesOut, sparseValuesOut, candidateTopkIndexOut,
+              candidateBlockLengthOut);
 
-    return std::tuple<at::Tensor, at::Tensor, at::Tensor>(sparseIndicesOut, sparseValuesOut, candidateTopkIndexOut);
+    return std::tuple<at::Tensor, at::Tensor, at::Tensor, at::Tensor>(
+        sparseIndicesOut, sparseValuesOut, candidateTopkIndexOut, candidateBlockLengthOut);
 }
 // Bind the C++ function to Python module
 PYBIND11_MODULE(TORCH_EXTENSION_NAME, m)
 {
-    m.def("quant_lightning_indexer_metadata", &QuantLightningIndexerMetadata, "quant_lightning_indexer_metadata");
+    // candidate_block_length 是后加的可选输入：必须显式给出 py::arg 默认值，否则 pybind 会把 18 个参数
+    // 全部当必填（原有调用方只传 17 个会直接 TypeError）
+    m.def("quant_lightning_indexer_metadata", &QuantLightningIndexerMetadata, "quant_lightning_indexer_metadata",
+          py::arg("num_heads_q"), py::arg("num_heads_k"), py::arg("head_dim"), py::arg("topk"), py::arg("quant_mode"),
+          py::arg("cu_seqlens_q") = py::none(), py::arg("cu_seqlens_k") = py::none(),
+          py::arg("seqused_q") = py::none(), py::arg("seqused_k") = py::none(),
+          py::arg("cmp_residual_k") = py::none(), py::arg("batch_size"), py::arg("max_seqlen_q"),
+          py::arg("max_seqlen_k"), py::arg("layout_q"), py::arg("layout_k"), py::arg("mask_mode"), py::arg("cmp_ratio"),
+          py::arg("candidate_block_length") = py::none(), py::arg("enable_dcp") = 0, py::arg("cp_world") = 1,
+          py::arg("cp_rank") = 0, py::arg("cp_kv_cache_interleave_size") = 1,
+          py::arg("causal_seqlens_kv_global") = py::none());
     m.def("quant_lightning_indexer", &QuantLightningIndexer, "quant_lightning_indexer");
+    // candidate_block_length 同为后加的可选输入：最后一个参数必须显式 py::arg 默认值，
+    // 否则 pybind 会把全部参数当必填（原有 24 参调用方会 TypeError）。
     m.def("quant_lightning_indexer_candidate", &QuantLightningIndexerCandidate,
-          "quant_lightning_indexer_candidate");
+          "quant_lightning_indexer_candidate", py::arg("query"), py::arg("key"), py::arg("weights"),
+          py::arg("query_dequant_scale"), py::arg("key_dequant_scale"), py::arg("topk"), py::arg("quant_mode"),
+          py::arg("candidate_topk_index"), py::arg("cu_seqlens_q"), py::arg("cu_seqlens_k"),
+          py::arg("seqused_q"), py::arg("seqused_k"), py::arg("cmp_residual_k"), py::arg("block_table"),
+          py::arg("output_idx_offset"), py::arg("metadata"), py::arg("max_seqlen_q"), py::arg("layout_q"),
+          py::arg("layout_k"), py::arg("mask_mode"), py::arg("cmp_ratio"), py::arg("candidate_mode"),
+          py::arg("candidate_topk_blocks"), py::arg("candidate_block_size"),
+          py::arg("candidate_block_length") = py::none());
 }
 } // namespace op_api

@@ -7,6 +7,7 @@ from types import SimpleNamespace
 
 import pytest
 import torch
+from vllm.config import AttentionConfig
 from vllm.v1.core.single_type_kv_cache_manager import (
     register_all_kvcache_specs,
 )
@@ -15,6 +16,7 @@ from vllm.v1.kv_cache_interface import (
     KVCacheTensor,
     MambaSpec,
     MLAAttentionSpec,
+    SlidingWindowSpec,
 )
 
 from vllm_ascend.core.kv_cache_interface import AscendIndexerKPoolTailSpec, AscendMLAAttentionSpec
@@ -22,7 +24,6 @@ from vllm_ascend.models.glm5next.cache_config import (
     _get_glm5_next_cache_layout,
     get_glm5_next_kv_cache_config,
     get_glm5_next_kv_cache_groups,
-    get_glm5_next_max_memory_usage,
     get_glm5_next_pool_bytes_per_block,
 )
 from vllm_ascend.models.glm5next.cache_views import view_compressed_indexer_cache, view_kpool_tail_cache
@@ -46,7 +47,7 @@ def test_platform_builder_accounts_for_both_glm_page_classes(pool, speculative_b
         for name, spec in make_specs(pool).items()
     }
     groups = get_glm5_next_kv_cache_groups(config, specs)
-    physical = get_glm5_next_kv_cache_config(config, groups, get_glm5_next_pool_bytes_per_block(groups))
+    physical = get_glm5_next_kv_cache_config(config, groups, num_blocks=1)
     assert len({tensor.size for tensor in physical.kv_cache_tensors}) == 2
     expected = sum(tensor.size for tensor in physical.kv_cache_tensors)
     builder = resolve_obj_by_qualname(NPUPlatform.get_kv_cache_config_builder_cls(config))()
@@ -68,9 +69,10 @@ def _ratio_kwargs(ratio: int) -> dict[str, int]:
     return {"tokens_per_state": ratio}
 
 
-def make_config():
+def make_config(*, retention_interval: int | None = 0):
     return SimpleNamespace(
-        model_config=SimpleNamespace(max_model_len=2048),
+        attention_config=AttentionConfig(),
+        model_config=SimpleNamespace(max_model_len=2048, hf_config=SimpleNamespace(model_type="glm_moe_dsa")),
         parallel_config=SimpleNamespace(
             decode_context_parallel_size=1,
             prefill_context_parallel_size=1,
@@ -81,8 +83,19 @@ def make_config():
             num_gpu_blocks_override=None,
             mamba_cache_mode="none",
             enable_prefix_caching=False,
+            prefix_cache_retention_interval=retention_interval,
         ),
     )
+
+
+@pytest.mark.parametrize("retention_interval", [None, 0, 4096])
+def test_kv_cache_config_preserves_retention_interval(retention_interval):
+    config = make_config(retention_interval=retention_interval)
+    groups = get_glm5_next_kv_cache_groups(config, make_specs())
+    layout = _get_glm5_next_cache_layout(groups)
+    assert layout is not None
+    plan = get_glm5_next_kv_cache_config(config, groups, num_blocks=10)
+    assert plan.prefix_cache_retention_interval == retention_interval
 
 
 def make_specs(pool: int = 16):
@@ -104,6 +117,7 @@ def make_specs(pool: int = 16):
         ),
         "model.layers.3.indexer.tail_cache": AscendIndexerKPoolTailSpec(
             block_size=pool,
+            ring_capacity=pool,
             sliding_window=pool,
             compress_ratio=pool,
             num_kv_heads=1,
@@ -130,7 +144,11 @@ def register_cache_specs():
 
 @pytest.mark.parametrize("pool", [4, 16])
 def test_groups_share_block_ids_and_pack_two_page_classes(pool):
+    planning = pytest.importorskip("vllm.v1.core.kv_cache_planning")
+    from vllm_ascend.core.kv_cache_config_builder import AscendKVCacheConfigBuilder
+
     config = make_config()
+    config.attention_config = SimpleNamespace(hisparse_config=None)
     specs = make_specs(pool)
     groups = get_glm5_next_kv_cache_groups(config, dict(reversed(list(specs.items()))))
     layout = _get_glm5_next_cache_layout(groups)
@@ -143,8 +161,8 @@ def test_groups_share_block_ids_and_pack_two_page_classes(pool):
     assert layout.main_slot_count == layout.small_slot_count == 1
 
     bytes_per_block = layout.main_page_size + layout.small_page_size
-    budget = 20 * bytes_per_block
-    plan = get_glm5_next_kv_cache_config(config, groups, budget)
+    config.cache_config.num_gpu_blocks_override = 99
+    plan = get_glm5_next_kv_cache_config(config, groups, num_blocks=20)
     assert plan.num_blocks == 20
     assert len(plan.kv_cache_tensors) == 2
     assert all(isinstance(tensor, KVCacheTensor) for tensor in plan.kv_cache_tensors)
@@ -182,7 +200,9 @@ def test_groups_share_block_ids_and_pack_two_page_classes(pool):
         for group in groups
     )
     assert get_glm5_next_pool_bytes_per_block(groups) == bytes_per_block
-    assert get_glm5_next_max_memory_usage(config, groups) == required_blocks * bytes_per_block
+    assert planning._max_memory_usage_bytes_from_groups(AscendKVCacheConfigBuilder(), config, groups) == (
+        required_blocks * bytes_per_block
+    )
 
 
 def test_standalone_mtp_layout_has_no_mamba_groups():
@@ -210,7 +230,7 @@ def test_fp8_shared_pages_preserve_tail_rows_and_kernel_scale_alignment():
         tokens_per_state=4,
     )
     groups = get_glm5_next_kv_cache_groups(make_config(), specs)
-    plan = get_glm5_next_kv_cache_config(make_config(), groups, 3 * get_glm5_next_pool_bytes_per_block(groups))
+    plan = get_glm5_next_kv_cache_config(make_config(), groups, num_blocks=3)
     descriptor = next(tensor for tensor in plan.kv_cache_tensors if indexer_name in get_kv_cache_tensor_layers(tensor))
     raw = torch.zeros(descriptor.size, dtype=torch.uint8)
     (tail,) = view_kpool_tail_cache(tail_name, specs[tail_name], raw, plan.num_blocks)
@@ -249,12 +269,14 @@ def test_fp8_cache_budget_accounts_for_scales_tail_and_padding(block_size, looka
             tokens_per_state=4,
         )
         specs["model.layers.3.indexer.tail_cache"] = replace(
-            specs["model.layers.3.indexer.tail_cache"], block_size=4 + lookahead
+            specs["model.layers.3.indexer.tail_cache"], ring_capacity=4 + lookahead
         )
         groups = get_glm5_next_kv_cache_groups(config, specs)
         layout = _get_glm5_next_cache_layout(groups)
         assert layout is not None and layout.small_page_size == expected_page_bytes
-        plan = get_glm5_next_kv_cache_config(config, groups, budget)
+        plan = get_glm5_next_kv_cache_config(
+            config, groups, num_blocks=budget // get_glm5_next_pool_bytes_per_block(groups)
+        )
         block_bytes = get_glm5_next_pool_bytes_per_block(groups)
         assert sum(tensor.size for tensor in plan.kv_cache_tensors) == plan.num_blocks * block_bytes <= budget
         bytes_per_block.append(block_bytes)
@@ -285,8 +307,7 @@ def test_pipeline_projection_supports_a_mamba_only_worker():
     assert layout.main_slot_count == 1
     assert layout.small_slot_count == 0
 
-    budget = 10 * layout.main_page_size
-    plan = get_glm5_next_kv_cache_config(config, projected_groups, available_memory=budget)
+    plan = get_glm5_next_kv_cache_config(config, projected_groups, num_blocks=10)
     assert plan.num_blocks == 10
     assert len(plan.kv_cache_tensors) == 1
     assert get_kv_cache_tensor_layers(plan.kv_cache_tensors[0]) == [local_mamba_name]
@@ -297,6 +318,38 @@ def test_missing_paired_cache_is_rejected():
     del specs["model.layers.3.indexer.tail_cache"]
     with pytest.raises(ValueError, match="requires"):
         get_glm5_next_kv_cache_groups(make_config(), specs)
+
+
+def test_sliding_window_draft_caches_use_independent_physical_tensors():
+    config = make_config()
+    specs = make_specs()
+    draft_names = []
+    for layer_idx in range(10, 14):
+        name = f"model.layers.{layer_idx}.self_attn.attn"
+        draft_names.append(name)
+        specs[name] = SlidingWindowSpec(
+            block_size=16,
+            num_kv_heads=1,
+            head_size=8,
+            dtype=torch.bfloat16,
+            sliding_window=16,
+        )
+
+    groups = get_glm5_next_kv_cache_groups(config, specs)
+    layout = _get_glm5_next_cache_layout(groups)
+    assert layout is not None
+    assert layout.draft_groups
+    assert {name for group in layout.draft_groups for name in group.layer_names} == set(draft_names)
+
+    budget = 1024 * 1024
+    plan = get_glm5_next_kv_cache_config(
+        config, groups, num_blocks=budget // get_glm5_next_pool_bytes_per_block(groups)
+    )
+    assert plan.num_blocks * get_glm5_next_pool_bytes_per_block(groups) == sum(
+        tensor.size for tensor in plan.kv_cache_tensors
+    )
+    tensor_layers = {tuple(get_kv_cache_tensor_layers(tensor)) for tensor in plan.kv_cache_tensors}
+    assert all((name,) in tensor_layers for name in draft_names)
 
 
 def test_misaligned_logical_block_is_rejected():
@@ -313,9 +366,12 @@ def test_misaligned_logical_block_is_rejected():
 @pytest.mark.parametrize("use_sparse", [False, True])
 @pytest.mark.parametrize("packed_main", [False, True])
 def test_worker_preserves_glm5_next_physical_pool_budget(monkeypatch, use_sparse, packed_main):
+    planning = pytest.importorskip("vllm.v1.core.kv_cache_planning")
+    from vllm_ascend.core.kv_cache_config_builder import AscendKVCacheConfigBuilder
     from vllm_ascend.worker.worker import NPUWorker
 
     config = make_config()
+    config.attention_config = SimpleNamespace(hisparse_config=None)
     config.model_config.max_model_len = 1048576
     config.model_config.hf_text_config = SimpleNamespace(model_type="glm5_next", index_topk=2048, index_kpool=16)
     config.cache_config.get_resolved_kv_cache_layout = lambda: SimpleNamespace(
@@ -335,7 +391,7 @@ def test_worker_preserves_glm5_next_physical_pool_budget(monkeypatch, use_sparse
     groups = get_glm5_next_kv_cache_groups(config, specs)
     # Supply exactly enough physical memory for the configured context. The
     # generic discount incorrectly makes this valid shared pool fail admission.
-    required = get_glm5_next_max_memory_usage(config, groups)
+    required = planning._max_memory_usage_bytes_from_groups(AscendKVCacheConfigBuilder(), config, groups)
     worker = NPUWorker.__new__(NPUWorker)
     worker.vllm_config = config
     worker.model_config = config.model_config
@@ -349,6 +405,8 @@ def test_worker_preserves_glm5_next_physical_pool_budget(monkeypatch, use_sparse
     budget = worker._scale_kv_cache_memory_for_multi_group(required)
 
     assert budget == required
-    plan = get_glm5_next_kv_cache_config(config, groups, budget)
+    plan = get_glm5_next_kv_cache_config(
+        config, groups, num_blocks=budget // get_glm5_next_pool_bytes_per_block(groups)
+    )
     assert plan.num_blocks * get_glm5_next_pool_bytes_per_block(groups) == required
     assert sum(tensor.size for tensor in plan.kv_cache_tensors) == required

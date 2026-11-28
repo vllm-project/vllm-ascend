@@ -260,7 +260,6 @@ def get_acceptance_rate_per_pos(args):
             "method": args.method,
             "model": eagle_dir,
             "num_speculative_tokens": args.num_spec_tokens,
-            "disable_padded_drafter_batch": args.disable_padded_drafter_batch,
             "parallel_drafting": args.parallel_drafting,
         }
     elif args.method == "ngram":
@@ -387,7 +386,6 @@ def main():
     parser.add_argument("--enforce-eager", action="store_true")
     parser.add_argument("--enable-chunked-prefill", action="store_true")
     parser.add_argument("--gpu-memory-utilization", type=float, default=0.9)
-    parser.add_argument("--disable-padded-drafter-batch", action="store_true")
     parser.add_argument("--result-dir", type=str, default="./log/dynamic_sd")
     parser.add_argument("--prompt-lookup-max", type=int, default=5)
     parser.add_argument("--prompt-lookup-min", type=int, default=2)

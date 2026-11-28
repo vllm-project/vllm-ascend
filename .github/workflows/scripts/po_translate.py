@@ -29,6 +29,11 @@ import zhconv
 from openai import AsyncOpenAI
 from polib import POEntry, pofile
 
+# Agent jobs share one DeepSeek-compatible channel: the same
+# AI_REVIEW_KEY / AI_REVIEW_API pair that drives the AI review job (#22319).
+DEFAULT_BASE_URL = "https://api.deepseek.com"
+DEFAULT_MODEL = "deepseek-v4.1-flash"
+
 SYSTEM_PROMPT = (
     "You are a professional technical documentation translator specializing in "
     "translating MkDocs markdown documentation from English to Simplified Chinese (简体中文). "
@@ -48,6 +53,7 @@ SYSTEM_PROMPT = (
     "- '950PR Products'        -> 'Ascend 950PR系列产品'"
     "- 'Atlas A2 Products'     -> 'Atlas A2系列产品'"
     "- 'Atlas A3 Products'     -> 'Atlas A3系列产品'"
+    "- 'Atlas 850E SuperPoD (Air-Cooled)'     -> 'Atlas 850E 风冷超节点'"
     "IMPORTANT: In all five cases there MUST be NO space between the model"
     "number (e.g. '950DT', 'A2', 'A3') and '系列产品'. The '&' in '950PR&950DT'"
     "has NO surrounding spaces. Do NOT output '950DT 系列产品' (with a space) or '950DT系列 产品' (split)."
@@ -93,71 +99,91 @@ CRITICAL RULES — violations will cause the translation to be rejected:
    - 'vLLM Ascend' → 'vLLM Ascend'
    - 'vllm-ascend' → 'vllm-ascend'
    - vLLM, CANN, Huawei, Atlas, etc..
+9. Preserve the EXACT leading spaces of every line after a "\n" in msgid.
+   These spaces encode Markdown nesting (tabs, ordered/unordered list items,
+   nested code fences). Never trim, never re-wrap, never normalize them.
+   Example: msgid "...\n       Keep the remaining flags ..." must produce
+   msgstr "....\n       保留其余标志 ..." with the same 7-space indent.
 
 --- CONTENT THAT SHOULD NOT BE TRANSLATED ---
-9. DO NOT translate contributor names, GitHub usernames, or dates.
+10. DO NOT translate contributor names, GitHub usernames, or dates.
    These should be copied verbatim from msgid to msgstr.
    Example: "Xiyuan Wang [@wangxiyuan] 2025-01-15" → keep as-is.
 
-10. DO NOT translate table headers or table separator rows that are purely
-    structural. Copy them verbatim.
-    Example: "| Name | GitHub ID | Date |" → keep as-is.
+11. Translate text in all table header rows. Preserve row order, indentation,
+    separators, URLs, code, and identifiers.
+    Keep || (merged columns), ^^ (merged rows), and | | (a blank cell) unchanged.
+    Example: "| Model | Graph Mode ||" → "| 模型 | 图模式 ||".
     Example: "|:-----------:|:-----:|:-----:|" → keep as-is.
 
-11. DO NOT translate code identifiers, variable names, CLI flags, or shell
+12. DO NOT translate code identifiers, variable names, CLI flags, or shell
     commands. Copy them verbatim.
     Example: "--data-parallel-size" → keep as-is.
     Example: "vllm serve /path/to/model" → keep as-is.
 
-12. DO NOT translate URLs, email addresses, or paths.
+13. DO NOT translate URLs, email addresses, or paths.
     Copy them verbatim from msgid to msgstr.
 
 --- TERMINOLOGY (MUST TRANSLATE) ---
 
-13. standalone 'Ascend' → '昇腾'
-14. '950PR&950DT Products' → 'Ascend 950PR&950DT系列产品'
-15. '950DT Products'       → 'Ascend 950DT系列产品'
-16. '950PR Products'       → 'Ascend 950PR系列产品'
-17. 'Atlas A2 Products'    → 'Atlas A2系列产品'
-18. 'Atlas A3 Products'    → 'Atlas A3系列产品'
+14. standalone 'Ascend' → '昇腾'
+15. '950PR&950DT Products' → 'Ascend 950PR&950DT系列产品'
+16. '950DT Products'       → 'Ascend 950DT系列产品'
+17. '950PR Products'       → 'Ascend 950PR系列产品'
+18. 'Atlas A2 Products'    → 'Atlas A2系列产品'
+19. 'Atlas A3 Products'    → 'Atlas A3系列产品'
+20. 'Atlas 850E SuperPoD (Air-Cooled)'    → 'Atlas 850E 风冷超节点'
 
 --- MkDocs MATERIAL EXTENSIONS ---
-19. ADMONITIONS (!!! type): Keep "!!!" and type keyword (note, warning, tip)
+21. ADMONITIONS (!!! type): Keep "!!!" and type keyword (note, warning, tip)
     in English. Only translate the title text after type.
     Example: msgid "!!! note" → msgstr "!!! note"
     Example: msgid "!!! note \"Important\"" → msgstr "!!! note \"重要\""
 
-20. COLLAPSIBLE BLOCKS (??? type / ???+ type): Keep the exact "???" or
+22. COLLAPSIBLE BLOCKS (??? type / ???+ type): Keep the exact "???" or
     "???+" marker, the type keyword, and quote syntax unchanged. The "+"
     means expanded by default and MUST NOT be added or removed. Translate only
     the title text inside quotes.
     Example: msgid "??? note \\"Click here...\\"" → msgstr "??? note \\"点击这里...\\""
     Example: msgid "???+ warning \\"Important\\"" → msgstr "???+ warning \\"重要\\""
 
-21. CONTENT TABS (===): Keep "===" and quote syntax. Translate only the label.
+23. CONTENT TABS (===): Keep "===" and quote syntax. Translate only the label.
     Example: msgid "=== \"Before using pip\"" → msgstr "=== \"使用pip之前\""
 
 
 
 --- TRANSLATION QUALITY ---
-22. Use natural, fluent Chinese technical documentation style. Avoid word-by-word
+24. Use natural, fluent Chinese technical documentation style. Avoid word-by-word
     literal translation.
-23. Use standard Chinese technical terminology consistently.
-24. For markdown links [text](url): translate the display text in [] but keep
+25. Use standard Chinese technical terminology consistently.
+26. For markdown links [text](url): translate the display text in [] but keep
     the URL in () exactly as-is.
     Example: [Quick Start](quick_start.md) → [快速开始](quick_start.md)
-25. For headings: translate the heading text but KEEP the "#" / "##" / "###"
+27. For headings: translate the heading text but KEEP the "#" / "##" / "###"
     prefix exactly as in the msgid.
     Example: msgid "# Quick Start" → msgstr "# 快速开始"
     Example: msgid "## Overview" → msgstr "## 概述"
-26. DO NOT add "#, fuzzy" markers.
-27. If a msgid is purely structural (symbols, code, file paths only), copy it
+28. DO NOT add "#, fuzzy" markers.
+29. If a msgid is purely structural (symbols, code, file paths only), copy it
     verbatim to msgstr.
-28. Never invent or guess content. If unsure about a term, leave it in English.
+30. Never invent or guess content. If unsure about a term, leave it in English.
 
 {content}"""
 
 _SIMPLIFIED_CONVERSION_PROTECTED_TERMS = ("昇腾",)
+
+
+def normalize_model(model: str) -> str:
+    """Return the model ID used by the OpenAI-compatible endpoint.
+
+    Workflows may pass either the CLI form used by ``opencode run``
+    (``deepseek/<model>``) or the raw HTTP model ID (``<model>``).
+    """
+    model = model.strip()
+    for prefix in ("deepseek/", "opencode/"):
+        if model.startswith(prefix):
+            return model.removeprefix(prefix)
+    return model
 
 
 def _normalize_msgid(text: str) -> str:
@@ -198,8 +224,15 @@ def _convert_po_to_simplified(po):
 
 
 class POTranslator:
-    def __init__(self, api_key: str, max_concurrent: int = 5):
-        self.client = AsyncOpenAI(api_key=api_key, base_url="https://api.deepseek.com")
+    def __init__(
+        self,
+        api_key: str,
+        base_url: str = DEFAULT_BASE_URL,
+        model: str = DEFAULT_MODEL,
+        max_concurrent: int = 5,
+    ):
+        self.client = AsyncOpenAI(api_key=api_key, base_url=base_url)
+        self.model = normalize_model(model)
         self.max_concurrent = max_concurrent
 
     async def _call_api(self, content: str, chunk_info: str = "") -> str | None:
@@ -208,7 +241,7 @@ class POTranslator:
         if chunk_info:
             system = f"{SYSTEM_PROMPT} ({chunk_info})"
         response = await self.client.chat.completions.create(
-            model="deepseek-chat",
+            model=self.model,
             messages=[
                 {"role": "system", "content": system},
                 {"role": "user", "content": prompt},
@@ -216,6 +249,8 @@ class POTranslator:
             max_tokens=8000,
             temperature=0.3,
         )
+        if response.choices[0].finish_reason == "length":
+            return None
         text = response.choices[0].message.content
         if not text:
             return None
@@ -561,10 +596,18 @@ def validate_coverage(files_arg: str, ignore_error: bool = False) -> int:
 
 
 async def async_main():
-    parser = argparse.ArgumentParser(description="PO File Translator (DeepSeek)")
+    parser = argparse.ArgumentParser(description="PO File Translator (DeepSeek-compatible)")
     parser.add_argument("--files", required=True, help="Comma-separated PO file paths")
     parser.add_argument("--output-json", default=os.getenv("OUTPUT_JSON", "/tmp/translation_results.json"))
-    parser.add_argument("--api-key", default=os.getenv("DEEPSEEK_API_KEY"))
+    parser.add_argument(
+        "--api-key",
+        default=os.getenv("TRANSLATE_API_KEY") or os.getenv("AI_REVIEW_KEY"),
+    )
+    parser.add_argument(
+        "--base-url",
+        default=os.getenv("TRANSLATE_BASE_URL") or os.getenv("AI_REVIEW_API") or DEFAULT_BASE_URL,
+    )
+    parser.add_argument("--model", default=os.getenv("TRANSLATE_MODEL", DEFAULT_MODEL))
     parser.add_argument("--max-concurrent", type=int, default=5)
     parser.add_argument(
         "--validate-only",
@@ -582,15 +625,26 @@ async def async_main():
     if args.validate_only:
         return validate_coverage(args.files, ignore_error=args.ignore_validation_error)
 
-    api_key = args.api_key or os.getenv("DEEPSEEK_API_KEY")
+    api_key = (
+        args.api_key or os.getenv("TRANSLATE_API_KEY") or os.getenv("AI_REVIEW_KEY") or os.getenv("DEEPSEEK_API_KEY")
+    )
     if not api_key:
-        print("Error: DEEPSEEK_API_KEY not set")
+        print("Error: TRANSLATE_API_KEY (or AI_REVIEW_KEY) not set")
         return 1
 
+    model = normalize_model(args.model)
     file_list = [f.strip() for f in args.files.split(",") if f.strip()]
-    print(f"Translating {len(file_list)} file(s), max_concurrent={args.max_concurrent}")
+    print(
+        f"Translating {len(file_list)} file(s) with model '{model}' @ {args.base_url}, "
+        f"max_concurrent={args.max_concurrent}"
+    )
 
-    translator = POTranslator(api_key=api_key, max_concurrent=args.max_concurrent)
+    translator = POTranslator(
+        api_key=api_key,
+        base_url=args.base_url,
+        model=model,
+        max_concurrent=args.max_concurrent,
+    )
     success_files = []
 
     for fp in file_list:

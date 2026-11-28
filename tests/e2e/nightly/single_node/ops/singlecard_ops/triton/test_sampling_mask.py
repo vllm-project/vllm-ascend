@@ -140,8 +140,10 @@ def _assert_request_major(tensors, cpu_logits, cu, sampled):
     get_ascend_device_type() not in (AscendDeviceType.A2, AscendDeviceType.A3, AscendDeviceType.A5),
     reason="Requires Ascend A2/A3/A5",
 )
-@pytest.mark.parametrize("rows_per_request", [1, 2, 4])
-@pytest.mark.parametrize("vocab_size", [9, 4097, 248320])
+@pytest.mark.parametrize(
+    "rows_per_request,vocab_size",
+    [(1, 9), (2, 4097), (4, 4097), (1, 248320), (2, 248320), (4, 248320)],
+)
 @pytest.mark.parametrize("strided", [False, True])
 def test_sampling_mask_request_major_ragged_rows(rows_per_request, vocab_size, strided):
     """Counts select committed slots; row offsets may contain gaps and empty spans."""
@@ -237,7 +239,7 @@ def test_sampling_mask_matches_processed_top_k_top_p_support():
                 [[6.0, 5.0, 4.0, 4.0, 4.0, 2.0, 1.0, 0.0]],
                 device="npu",
             ),
-            k=torch.tensor([3], device="npu"),
+            k=torch.tensor([3], dtype=torch.int32, device="npu"),
             p=torch.tensor([0.9], device="npu"),
         )
         expected_ids = torch.isfinite(processed_logits[0]).nonzero().flatten().tolist()

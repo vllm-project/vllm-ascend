@@ -27,7 +27,7 @@ from vllm.sequence import IntermediateTensors
 from vllm.utils.torch_utils import direct_register_custom_op
 
 from vllm_ascend.ops.triton.linearnorm.fused_eh_norm import fused_eh_norm
-from vllm_ascend.utils import is_rot_weight_used, vllm_version_is
+from vllm_ascend.utils import is_rot_weight_used
 
 from .model import (
     Glm5NextDecoderLayer,
@@ -328,6 +328,9 @@ class Glm5NextMTP(nn.Module, DeepseekV2MixtureOfExperts):
         self.has_own_lm_head = own_head_weight in loaded_weights
 
     def load_weights(self, weights: Iterable[tuple[str, torch.Tensor]]) -> set[str]:
+        if (quant_config := getattr(self, "quant_config", None)) is not None:
+            weights = quant_config.get_cache_scale_mapper().apply(weights)
+
         stacked_params_mapping = [
             ("gate_up_proj", "gate_proj", 0),
             ("gate_up_proj", "up_proj", 1),
@@ -346,13 +349,10 @@ class Glm5NextMTP(nn.Module, DeepseekV2MixtureOfExperts):
 
         params_dict = dict(self.named_parameters())
         loaded_params: set[str] = set()
-        if vllm_version_is("0.32.0"):
-            _pending_wk_fp8: dict = {}
-        else:
-            # Reordering loaders can split an FP8 indexer wk weight/scale pair
-            # across load_weights() calls; keep the pending buffer on the model.
-            _pending_wk_fp8 = getattr(self, "_pending_indexer_wk_fp8", {})
-            self._pending_indexer_wk_fp8 = _pending_wk_fp8
+        # Reordering loaders can split an FP8 indexer wk weight/scale pair
+        # across load_weights() calls; keep the pending buffer on the model.
+        _pending_wk_fp8 = getattr(self, "_pending_indexer_wk_fp8", {})
+        self._pending_indexer_wk_fp8 = _pending_wk_fp8
         for name, loaded_weight in weights:
             if "rotary_emb.inv_freq" in name:
                 continue

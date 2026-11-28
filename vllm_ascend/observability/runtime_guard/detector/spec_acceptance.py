@@ -116,6 +116,10 @@ class SpecAcceptanceDetector(ConfigBackedDetector):
         self._history.pop(req_id, None)
         self._short_log_ts.pop(req_id, None)
 
+    def on_disabled(self) -> None:
+        self._history.clear()
+        self._short_log_ts.clear()
+
     def check_all(
         self,
         sampled_tokens: torch.Tensor,

@@ -13,24 +13,9 @@ from vllm.model_executor.layers.fusion.mm_input_norm import FusedMMInputNorm
 from vllm.model_executor.model_loader.dummy_loader import DummyModelLoader
 from vllm.model_executor.model_loader.sharded_state_loader import ShardedStateLoader
 
-from vllm_ascend.patch.worker.patch_mm_input_norm import patch_mm_input_norm
 
-
-@pytest.fixture(params=[True, False], ids=["v032-persistent", "upstream-nonpersistent"])
-def norm(request, monkeypatch):
-    original_init = FusedMMInputNorm.__init__
-
-    def init(self, *args, **kwargs):
-        original_init(self, *args, **kwargs)
-        # Exercise both upstream contracts even when CI already has #62767.
-        for name in ("weight", "bias"):
-            self.register_buffer(name, getattr(self, name), persistent=request.param)
-
-    monkeypatch.setattr(FusedMMInputNorm, "__init__", init)
-    patch_mm_input_norm()
-    patched_init = FusedMMInputNorm.__init__
-    patch_mm_input_norm()
-    assert FusedMMInputNorm.__init__ is patched_init
+@pytest.fixture
+def norm():
     # Config construction must not initialize Ascend logging or device state.
     with patch("vllm_ascend.platform.NPUPlatform.check_and_update_config"):
         vllm_config = VllmConfig()
@@ -52,7 +37,7 @@ def test_legacy_shard_loads_and_missing_parameter_still_fails(norm, tmp_path, mo
         "_render_default_pattern",
         staticmethod(lambda *args, **kwargs: "model-rank-0-part-*.safetensors"),
     )
-    config = SimpleNamespace(model=str(tmp_path), model_weights=None)
+    config = SimpleNamespace(model=str(tmp_path), model_weights=None, revision=None)
     loader.load_weights(model, config)
     torch.testing.assert_close(model.visual.proj.weight, legacy_state["visual.proj.weight"])
     assert set(model.state_dict()) == set(legacy_state)

@@ -2,6 +2,7 @@
 # SPDX-FileCopyrightText: Copyright contributors to the vLLM project
 
 import importlib.util
+import weakref
 from dataclasses import replace
 from functools import partial
 from types import SimpleNamespace
@@ -25,6 +26,7 @@ from vllm_ascend.device.hardware import AscendDeviceType
 from vllm_ascend.device.hardware_profile import get_hardware_profile
 from vllm_ascend.models.glm5next.attention import Indexer
 from vllm_ascend.ops import cann_keypool
+from vllm_ascend.ops.mla import IndexerWrapper
 
 with patch.dict(
     "sys.modules",
@@ -38,8 +40,8 @@ with patch.dict(
 
 
 def test_glm_indexer_rejects_unsupported_cache_dtype_before_constructing_layers():
-    config = SimpleNamespace(attention_config=SimpleNamespace(indexer_kv_dtype="int8"))
-    with pytest.raises(ValueError, match="indexer_kv_dtype must be auto, bf16 or fp8"):
+    config = SimpleNamespace(attention_config=SimpleNamespace(indexer_kv_dtype="mxfp4"))
+    with pytest.raises(ValueError, match="indexer_kv_dtype must be auto, bf16, fp8 or int8"):
         Indexer(config, None, 8, 8, None, None, None)
 
 
@@ -207,7 +209,7 @@ def test_kpool_weight_postprocessing_keeps_nd_before_fp32_cast(monkeypatch, weig
         index_kpool=4,
         wq_b=nn.Linear(4, 8, bias=False, dtype=dtype),
         wk_weights_proj=nn.Linear(8, 6, bias=False, dtype=dtype),
-        k_norm=nn.LayerNorm(4, dtype=dtype),
+        k_norm=nn.LayerNorm(4, dtype=torch.float32),
         softmax_scale=0.5,
         index_kpool_compress_ape=nn.Parameter(torch.zeros(4, 4, dtype=dtype)),
         index_kpool_compress_gate=nn.Parameter(torch.randn(4, 8, dtype=dtype)),
@@ -237,27 +239,51 @@ def test_kpool_weight_postprocessing_keeps_nd_before_fp32_cast(monkeypatch, weig
     expected_nz_weights = [source.wq_b.weight.data_ptr()] if weight_nz_mode == 2 else []
     assert nz_weights == expected_nz_weights
 
-    # Repeated post-processing must not encounter an NZ source on the next cast.
-    for _ in range(2):
+    backend.process_weights_after_loading()
+    captured = backend._head_weight_f32
+    assert captured is not None
+    assert not captured.requires_grad
+    assert "_head_weight_f32" not in dict(backend.named_buffers(recurse=False))
+    assert "_head_weight_f32" not in dict(backend.named_parameters(recurse=False))
+    pointer = captured.data_ptr()
+    assert source.k_norm.weight.dtype == source.k_norm.bias.dtype == torch.float32
+
+    # Only the head projection needs a derived copy. Exercise both ordinary
+    # writes and storage replacement while retaining its graph-owned address.
+    for value in (1.0, 2.0):
+        with torch.no_grad():
+            parameters = (
+                source.wk_weights_proj.weight,
+                source.index_kpool_compress_gate,
+                source.k_norm.weight,
+                source.k_norm.bias,
+            )
+            updated = (
+                original_weight + value,
+                torch.full_like(parameters[1], value),
+                torch.full_like(parameters[2], value + 1),
+                torch.full_like(parameters[3], value + 2),
+            )
+            for parameter, weight in zip(parameters, updated):
+                if value == 1.0:
+                    parameter.copy_(weight)
+                else:
+                    parameter.data = weight
         backend.process_weights_after_loading()
-        # CANN key weights and FP32 head weights must stay in ND, including
-        # when post-processing is repeated.
         assert nz_weights == expected_nz_weights
-        assert backend._key_weight.dtype == dtype
         assert backend._head_weight_f32.dtype == torch.float32
-        assert backend._key_weight.is_contiguous()
         assert backend._head_weight_f32.is_contiguous()
-        torch.testing.assert_close(backend._key_weight, original_weight[: source.head_dim])
-        torch.testing.assert_close(backend._head_weight_f32, original_weight[source.head_dim :].float())
-        torch.testing.assert_close(backend._gate_weight, source.index_kpool_compress_gate.detach())
-        torch.testing.assert_close(backend._norm_weight_f32, source.k_norm.weight.detach().float())
-        torch.testing.assert_close(backend._norm_bias_f32, source.k_norm.bias.detach().float())
-    torch.testing.assert_close(source.wk_weights_proj.weight, original_weight)
+        torch.testing.assert_close(backend._head_weight_f32, source.wk_weights_proj.weight[source.head_dim :].float())
+        assert backend._head_weight_f32 is captured
+        assert captured.data_ptr() == pointer
+        assert not any(
+            hasattr(backend, name) for name in ("_key_weight", "_gate_weight", "_norm_weight_f32", "_norm_bias_f32")
+        )
 
 
 @pytest.mark.parametrize("device", [AscendDeviceType.A2, AscendDeviceType.A3, AscendDeviceType.A5])
 @pytest.mark.parametrize("quantized", [False, True])
-def test_fp8_hardware_support_is_checked_by_execution_backend(monkeypatch, device, quantized):
+def test_fp8_backend_initialization_does_not_gate_on_device_capability(monkeypatch, device, quantized):
     source = SimpleNamespace(
         vllm_config=SimpleNamespace(
             parallel_config=SimpleNamespace(prefill_context_parallel_size=1, decode_context_parallel_size=1)
@@ -284,17 +310,9 @@ def test_fp8_hardware_support_is_checked_by_execution_backend(monkeypatch, devic
     monkeypatch.setattr(backend_module, "get_current_hardware_profile", lambda: hardware)
     init = MagicMock()
     monkeypatch.setattr(Glm5NextKPoolIndexerBackend, "_init_cann_ops", init)
-    if quantized and device != AscendDeviceType.A5:
-        with pytest.raises(NotImplementedError, match="PoolKeyIndexer FP8 support"):
-            Glm5NextKPoolIndexerBackend(source, qk_rope_head_dim=0)
-        init.assert_not_called()
-    else:
-        Glm5NextKPoolIndexerBackend(source, qk_rope_head_dim=0)
-        init.assert_called_once_with()
-    if quantized:
-        hardware.supports.assert_called_once_with(backend_module.HardwareCapability.POOL_KEY_INDEXER_FP8)
-    else:
-        hardware.supports.assert_not_called()
+    Glm5NextKPoolIndexerBackend(source, qk_rope_head_dim=0)
+    init.assert_called_once_with()
+    hardware.supports.assert_not_called()
 
 
 def test_bound_cache_resolves_complete_tuple_for_virtual_engine(monkeypatch):
@@ -422,6 +440,7 @@ def test_backend_uses_normalized_q_c_and_separate_tail_metadata(
 ) -> None:
     backend = Glm5NextKPoolIndexerBackend.__new__(Glm5NextKPoolIndexerBackend)
     nn.Module.__init__(backend)
+    backend.kpool_int8 = False
     backend.n_head = 2
     backend.head_dim = 2
     backend.topk_tokens = 2
@@ -441,7 +460,7 @@ def test_backend_uses_normalized_q_c_and_separate_tail_metadata(
     )
     backend.topk_indices_buffer = torch.empty(64, 16, dtype=torch.int32)
     backend.softmax_scale = 0.5
-    backend._key_weight = None
+    backend._head_weight_f32 = None
     recorder = _RecordingKPool()
     backend._forward_cann = recorder.forward
     tail_metadata = _tail_metadata()
@@ -481,8 +500,9 @@ def test_backend_uses_normalized_q_c_and_separate_tail_metadata(
     assert result.shape[0] == expected_rows
     torch.testing.assert_close(recorder.args[1], normalized_q_c[:expected_rows].repeat(1, 2).view(expected_rows, 2, 2))
     torch.testing.assert_close(recorder.args[0], hidden[:expected_rows] + 3)
-    torch.testing.assert_close(backend._key_weight, backend.wk_weights_proj.weight[:2])
-    torch.testing.assert_close(backend._norm_weight_f32, backend.k_norm.weight.float())
+    assert backend._head_weight_f32 is not None
+    torch.testing.assert_close(backend._head_weight_f32, backend.wk_weights_proj.weight[2:].float())
+    assert backend._head_weight_f32.untyped_storage().data_ptr() != backend.wk_weights_proj.weight.data_ptr()
     expected_weights = torch.nn.functional.linear(hidden[:expected_rows], backend.wk_weights_proj.weight[2:]) * (
         0.5 * 2**-0.5
     )
@@ -532,10 +552,19 @@ def test_cann_indexer_writes_caches_before_optional_selection(
     op = Glm5NextKPoolIndexerBackend.__new__(Glm5NextKPoolIndexerBackend)
     nn.Module.__init__(op)
     op.topk_tokens, op.head_dim, op.index_kpool = 4, 2, 4
-    op._key_weight = torch.empty(2, 3, dtype=torch.bfloat16)
-    op._gate_weight = torch.empty(2, 3, dtype=torch.bfloat16)
-    op._norm_weight_f32 = op._norm_bias_f32 = None
-    op.k_norm = SimpleNamespace(eps=1e-6)
+    op.wk_weights_proj = nn.Linear(3, 4, bias=False, dtype=torch.bfloat16)
+    op.index_kpool_compress_gate = nn.Parameter(torch.empty(2, 3, dtype=torch.bfloat16))
+    op.k_norm = nn.LayerNorm(2, eps=1e-6, dtype=torch.float32)
+    parameters = (
+        op.wk_weights_proj.weight,
+        op.index_kpool_compress_gate,
+        op.k_norm.weight,
+        op.k_norm.bias,
+    )
+    # Keep old storages alive so address checks detect a stale cached view.
+    old_parameters = [parameter.detach() for parameter in parameters]
+    for value, parameter in enumerate(parameters, start=1):
+        parameter.data = torch.full_like(parameter, value)
     op.index_kpool_compress_ape = torch.empty(4, 2)
     op._cann_pool_key_indexer = MagicMock()
     storage = torch.full((20, 22), 77, dtype=torch.int32)
@@ -590,7 +619,16 @@ def test_cann_indexer_writes_caches_before_optional_selection(
         )
     names = [call[0] for call in calls.mock_calls]
     assert names[:3] == ["prepare_keypool_state", "key_pool", "write_keypool_caches"]
-    assert op._key_pool.call_args.args[1:3] == (op._key_weight, op._gate_weight)
+    key_weight, gate_weight = op._key_pool.call_args.args[1:3]
+    torch.testing.assert_close(key_weight, op.wk_weights_proj.weight[: op.head_dim])
+    assert key_weight.is_contiguous()
+    assert key_weight.data_ptr() == op.wk_weights_proj.weight.data_ptr()
+    assert gate_weight is op.index_kpool_compress_gate
+    assert op._key_pool.call_args.kwargs["norm_weight"] is op.k_norm.weight
+    assert op._key_pool.call_args.kwargs["norm_bias"] is op.k_norm.bias
+    for parameter, old_parameter in zip(parameters, old_parameters):
+        assert parameter.data_ptr() != old_parameter.data_ptr()
+
     assert op._key_pool.call_args.kwargs["cu_seqlens"] is cache_metadata.query_start_loc
     assert op._key_pool.call_args.args[5] is cache_metadata.keypool_state_table
     assert op._prepare_keypool_state.call_args.args[1] is cache_metadata.start_pos
@@ -636,14 +674,17 @@ def test_cann_indexer_writes_caches_before_optional_selection(
         op._pack_keypool_indices.assert_not_called()
 
 
-@pytest.mark.parametrize("pcp_local_token_count", [2, 4])
-@pytest.mark.parametrize("actual_tokens", [0, 2])
+@pytest.mark.parametrize(
+    ("pcp_local_token_count", "query_tokens", "actual_tokens"), [(2, 0, 0), (2, 2, 2), (4, 2, 2), (4, 4, 0)]
+)
+@pytest.mark.parametrize("prefetch", [False, True])
 @pytest.mark.parametrize("compute_topk", [False, True])
 def test_backend_restores_pcp_keys_before_kpool_cache_write(
-    monkeypatch, pcp_local_token_count, actual_tokens, compute_topk
+    monkeypatch, pcp_local_token_count, query_tokens, actual_tokens, prefetch, compute_topk
 ) -> None:
     backend = Glm5NextKPoolIndexerBackend.__new__(Glm5NextKPoolIndexerBackend)
     nn.Module.__init__(backend)
+    backend.kpool_int8 = False
     backend.n_head = 2
     backend.head_dim = 2
     backend.topk_tokens = 2
@@ -663,7 +704,7 @@ def test_backend_restores_pcp_keys_before_kpool_cache_write(
     )
     backend.topk_indices_buffer = None
     backend.softmax_scale = 0.5
-    backend._key_weight = None
+    backend._head_weight_f32 = None
     recorder = _RecordingKPool()
     backend._forward_cann = recorder.forward
     tail_metadata = _tail_metadata()
@@ -682,6 +723,24 @@ def test_backend_restores_pcp_keys_before_kpool_cache_write(
     pcp_group = MagicMock()
     pcp_group.all_gather.side_effect = lambda tensor, dim: torch.cat((tensor, tensor + 10), dim=dim)
     monkeypatch.setattr(backend_module, "get_pcp_group", lambda: pcp_group)
+    events = []
+    handle = MagicMock()
+
+    def gather_async(tensor, group):
+        assert group is pcp_group
+        events.append("launch")
+        result = torch.full((tensor.shape[0] * 2, tensor.shape[1]), float("nan"))
+
+        def wait():
+            events.append("wait")
+            result.copy_(torch.cat((tensor, tensor + 10)))
+
+        handle.wait.side_effect = wait
+        return result, handle
+
+    gather = MagicMock(side_effect=gather_async)
+    monkeypatch.setattr(backend_module, "all_gather_async", gather)
+    backend.wq_b.register_forward_hook(lambda *args: events.append("query"))
     monkeypatch.setattr(
         backend_module,
         "get_forward_context",
@@ -692,33 +751,87 @@ def test_backend_restores_pcp_keys_before_kpool_cache_write(
         ),
     )
 
-    result = backend.forward(
-        torch.ones(pcp_local_token_count, 3),
-        torch.ones(pcp_local_token_count, 2),
-        torch.full((pcp_local_token_count, 3), 2.0),
+    k_hidden = torch.full((query_tokens, 3), 2.0)
+    runner = backend
+    if prefetch:
+        # Exercise the actual model-facing wrapper, not only the backend.
+        runner = IndexerWrapper.__new__(IndexerWrapper)
+        nn.Module.__init__(runner)
+        runner.impl = backend
+        k_hidden = runner.prepare_pcp_hidden(k_hidden, metadata)
+        handle.wait.assert_not_called()
+    result = runner.forward(
+        torch.ones(query_tokens, 3),
+        torch.ones(query_tokens, 2),
+        k_hidden,
         metadata,
         compute_topk=compute_topk,
     )
 
-    pcp_group.all_gather.assert_called_once()
+    gather.assert_called_once()
+    pcp_group.all_gather.assert_not_called()
+    handle.wait.assert_called_once()
+    assert events == (["launch", "query", "wait"] if compute_topk else ["launch", "wait"])
     recorded_args = recorder.args
     recorded_kwargs = recorder.kwargs
     assert recorded_args is not None
     assert recorded_kwargs is not None
-    padded_hidden = torch.full((pcp_local_token_count, 3), 2.0)
+    expected_tokens = query_tokens
+    local_hidden = torch.full((expected_tokens, 3), 2.0)
+    padding = pcp_local_token_count - expected_tokens
+    padded_hidden = torch.nn.functional.pad(local_hidden, (0, 0, 0, padding))
     restore = metadata.pcp_hidden_restore_indices
     assert restore is not None
-    assert pcp_group.all_gather.call_args_list[0].args[0].shape[0] == pcp_local_token_count
+    gather_call = gather.call_args
+    assert gather_call.args[0].shape[0] == pcp_local_token_count
     torch.testing.assert_close(
         recorded_args[0],
         torch.cat((padded_hidden, padded_hidden + 10), dim=0)[restore],
     )
     assert recorded_args[-2] is metadata
     if compute_topk:
-        assert result.shape[0] == recorded_args[1].shape[0] == pcp_local_token_count
+        assert result.shape[0] == recorded_args[1].shape[0] == expected_tokens
     else:
         assert result is None
-        assert recorded_args[1:3] == (None, None)
+
+
+def test_pending_gather_retains_contiguous_send_until_wait(monkeypatch):
+    value = torch.arange(12).view(3, 4).T
+    assert not value.is_contiguous()
+    group = SimpleNamespace(world_size=2)
+    monkeypatch.setattr(backend_module, "get_pcp_group", lambda: group)
+
+    def launch(send, actual_group):
+        assert actual_group is group and send.is_contiguous()
+        send_ref = weakref.ref(send)
+        result = torch.empty(8, 3, dtype=send.dtype)
+
+        def wait():
+            retained = send_ref()
+            assert retained is not None, "Communication still needs the contiguous send buffer."
+            result.copy_(torch.cat((retained, retained)))
+
+        return result, SimpleNamespace(wait=wait)
+
+    monkeypatch.setattr(backend_module, "all_gather_async", launch)
+    backend = Glm5NextKPoolIndexerBackend.__new__(Glm5NextKPoolIndexerBackend)
+    metadata = SimpleNamespace(pcp_hidden_restore_indices=torch.arange(8), pcp_local_token_count=4)
+    finish = backend.prepare_pcp_hidden(value, metadata)
+    assert callable(finish)
+    torch.testing.assert_close(finish(), torch.cat((value, value)))
+
+
+def test_pcp_hidden_prefetch_leaves_non_pcp_layout_unchanged(monkeypatch):
+    monkeypatch.setattr(
+        backend_module, "get_forward_context", lambda: SimpleNamespace(cudagraph_runtime_mode=CUDAGraphMode.NONE)
+    )
+    backend = Glm5NextKPoolIndexerBackend.__new__(Glm5NextKPoolIndexerBackend)
+    hidden = torch.ones(2, 3)
+    metadata = _indexer_metadata(2)
+    gather = MagicMock()
+    monkeypatch.setattr(backend_module, "all_gather_async", gather)
+    assert backend.prepare_pcp_hidden(hidden, metadata) is hidden
+    gather.assert_not_called()
 
 
 @pytest.mark.parametrize("quantized", [False, True])

@@ -131,6 +131,20 @@ class TestAscendEPLBController(unittest.TestCase):
                     controller.maybe_start_async_loop(added)
                     controller.state.start_async_loop.assert_called_once()
 
+    def test_placement_export_enables_state_and_pp_setup(self):
+        controller = self._make_controller()
+        controller.expert_placement_path = "/tmp/placement.json"
+        with patch("vllm_ascend.worker.v2.eplb.AscendEplbState") as state_cls:
+            state = MagicMock()
+            state.is_async = True
+            state_cls.return_value = state
+            controller.prepare_load()
+            state.enable_placement_export.assert_called_once_with("/tmp/placement.json")
+
+            controller.maybe_start_async_loop(eplb_models_added=False, load_dummy_weights=False)
+            state.setup_pp_placement_export.assert_called_once_with()
+            state.start_async_loop.assert_not_called()
+
     def test_step_early_return_conditions(self):
         for condition in (
             "disabled",

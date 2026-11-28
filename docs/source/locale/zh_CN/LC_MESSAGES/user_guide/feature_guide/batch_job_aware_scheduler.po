@@ -154,13 +154,6 @@ msgstr "没有作业名称标签的请求将被归入默认作业，并且仍然
 msgid "## Configuration Parameters"
 msgstr "## 配置参数"
 
-msgid ""
-"All parameters are nested under `batch_job_sched_config` in the "
-"`additional_config: {\"scheduler_config\":: {}}`."
-msgstr ""
-"所有参数都嵌套在 `additional_config: {\"scheduler_config\":: {}}` 中的 "
-"`batch_job_sched_config` 下。"
-
 msgid "| Parameter | Type | Default | Description |"
 msgstr "| 参数 | 类型 | 默认值 | 描述 |"
 
@@ -221,3 +214,10 @@ msgid ""
 msgstr ""
 "2. **调整 "
 "`low_available_tokens_threshold`**：如果您的负载以长解码为主，请考虑降低此阈值以保持长作业优先。对于混合负载，请保持默认值。"
+
+msgid ""
+"All parameters are nested under `batch_job_sched_config` in the "
+"`additional_config: {\"scheduler_config\": {}}`."
+msgstr ""
+"所有参数均嵌套在 `additional_config: {\"scheduler_config\": {}}` 中的 "
+"`batch_job_sched_config` 下。"

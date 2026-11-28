@@ -38,6 +38,7 @@ from vllm.v1.outputs import KVConnectorOutput
 from vllm.v1.request import Request
 from vllm.v1.structured_output import StructuredOutputManager
 
+from tests.ut.distributed.ascend_store.cache_config_helpers import make_resolved_cache_config
 from tests.ut.kv_offload.utils import create_model_runner_output, create_vllm_config
 from vllm_ascend.distributed.kv_transfer.kv_pool.ascend_store import pool_worker
 from vllm_ascend.distributed.kv_transfer.kv_pool.ascend_store.attention_fence import (
@@ -197,7 +198,9 @@ def test_raw_tokens_hybrid_roundtrip(memory_store, recurrent_type, wrapped):
         KVCacheGroupSpec(["model.layers.0.attn", "model.layers.2.attn"], full),
         KVCacheGroupSpec(["model.layers.1.attn", "model.layers.3.attn"], recurrent),
     ]
-    plan = KVCacheConfig(num_blocks=128, kv_cache_tensors=[], kv_cache_groups=groups)
+    plan = KVCacheConfig(
+        num_blocks=128, kv_cache_tensors=[], kv_cache_groups=groups, prefix_cache_retention_interval=None
+    )
     # Scheduler merged specs and worker per-layer specs must describe the same layout.
     worker_plan = KVCacheConfig(
         num_blocks=plan.num_blocks,
@@ -214,6 +217,7 @@ def test_raw_tokens_hybrid_roundtrip(memory_store, recurrent_type, wrapped):
             )
             for group in groups
         ],
+        prefix_cache_retention_interval=None,
     )
     config = create_vllm_config(max_num_batched_tokens=32, block_size=16)
     config.model_config.hf_text_config.num_hidden_layers = 4
@@ -222,6 +226,8 @@ def test_raw_tokens_hybrid_roundtrip(memory_store, recurrent_type, wrapped):
     config.scheduler_config.max_model_len = 512
     config.scheduler_config.disable_hybrid_kv_cache_manager = False
     config.cache_config.mamba_cache_mode = "align"
+    # Retain every prefix boundary for the round-trip assertions below.
+    config.cache_config.prefix_cache_retention_interval = None
     config.cache_config.num_gpu_blocks = plan.num_blocks
     config.kv_transfer_config = KVTransferConfig(
         kv_connector="AscendStoreConnector",
@@ -230,6 +236,8 @@ def test_raw_tokens_hybrid_roundtrip(memory_store, recurrent_type, wrapped):
         kv_connector_extra_config={"backend": "mooncake", "use_layerwise": True},
     )
     block_size, hash_size = resolve_kv_cache_block_sizes(plan, config)
+    plan = make_resolved_cache_config(config, plan)
+    worker_plan = make_resolved_cache_config(config, worker_plan)
     worker = KVConnectorFactory.create_connector(config, KVConnectorRole.WORKER, worker_plan)
     specs = get_layerwise_kv_cache_specs(worker_plan)
     caches = {
@@ -255,6 +263,8 @@ def test_raw_tokens_hybrid_roundtrip(memory_store, recurrent_type, wrapped):
     assert pool.grouped_block_size == [16, 32]
     assert pool.hash_block_size == hash_size == 16
     assert pool.cache_transfer_granularity == 32
+    assert not pool.enable_partial_hash_hits
+    assert not scheduler.connector.connector_scheduler.enable_partial_hash_hits
     assert pool.kv_recv_thread.group_builders[1].group_id == 1
     assert pool.kv_send_thread.token_database is pool.token_database
 

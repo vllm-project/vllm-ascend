@@ -15,7 +15,6 @@ from vllm.v1.structured_output import StructuredOutputManager
 _BACKEND_ATTR = "_vllm_ascend_structured_output_backend"
 _ORIGINAL_GRAMMAR_INIT_ATTR = "_vllm_ascend_original_grammar_init"
 _ORIGINAL_VALIDATE_ATTR = "_vllm_ascend_original_validate_structured_outputs"
-_ORIGINAL_OUTLINES_ACCEPT_ATTR = "_vllm_ascend_original_outlines_accept_tokens"
 _ORIGINAL_XGRAMMAR_COMPILE_JSON_ATTR = "_vllm_ascend_original_xgrammar_compile_json_schema"
 
 
@@ -133,38 +132,11 @@ def _patch_structured_output_manager() -> None:
     StructuredOutputManager.grammar_init = grammar_init
 
 
-def _patch_outlines_accept_tokens() -> None:
-    # Importing this module is safe without outlines installed: it loads
-    # outlines_core lazily.
-    from vllm.v1.structured_output.backend_outlines import OutlinesGrammar
-
-    original_accept = getattr(OutlinesGrammar, _ORIGINAL_OUTLINES_ACCEPT_ATTR, None)
-    if original_accept is not None:
-        return
-    original_accept = OutlinesGrammar.accept_tokens
-    setattr(OutlinesGrammar, _ORIGINAL_OUTLINES_ACCEPT_ATTR, original_accept)
-
-    def accept_tokens(self: Any, request_id: str, tokens: list[int]) -> bool:
-        # Mirror xgrammar's terminal short-circuit
-        # (backend_xgrammar.py: `if self._is_terminated: return True`).
-        # Once the outlines FSM finishes, the scheduler still emits one more
-        # mask that allows EOS/stop tokens so the request can terminate
-        # normally. Those tokens are not part of the FSM alphabet built from
-        # the JSON regex, so `guide.accepts_tokens()` rejects them and the
-        # scheduler terminates the request with FINISHED_ERROR even though
-        # the grammar text is already complete.
-        if self.guide.is_finished():
-            return True
-        return original_accept(self, request_id, tokens)
-
-    OutlinesGrammar.accept_tokens = accept_tokens
-
-
 def _patch_xgrammar_disable_any_whitespace() -> None:
     """Ignore xgrammar's ``separators`` argument on both supported vLLM lanes.
 
-    vLLM #58067 (present in v0.32.0 and verified main) passes
-    ``separators=(",", ":")`` to ``GrammarCompiler.compile_json_schema`` when
+    vLLM #58067 passes ``separators=(",", ":")`` to
+    ``GrammarCompiler.compile_json_schema`` when
     ``disable_any_whitespace`` is set. The xgrammar releases shipped with
     Ascend (0.2.7/0.2.8) mishandle it: the resulting grammar lets small models
     loop on ``","`` until ``max_tokens`` and emit truncated, invalid JSON
@@ -197,6 +169,5 @@ def _patch_xgrammar_disable_any_whitespace() -> None:
 
 _patch_sampling_params_validation()
 _patch_structured_output_manager()
-_patch_outlines_accept_tokens()
-# vLLM #58067 is present in both v0.32.0 and verified main.
+# vLLM #58067 is present in all supported vLLM versions.
 _patch_xgrammar_disable_any_whitespace()

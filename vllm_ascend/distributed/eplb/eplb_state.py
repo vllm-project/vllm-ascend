@@ -7,7 +7,7 @@ import inspect
 import threading
 import time
 from collections.abc import Callable, Iterator
-from contextlib import contextmanager
+from contextlib import contextmanager, suppress
 from contextvars import ContextVar
 from dataclasses import fields
 from datetime import timedelta
@@ -15,21 +15,27 @@ from typing import Any
 
 import numpy as np
 import torch
-from torch.distributed import all_reduce
+from torch.distributed import ReduceOp, all_gather_object, all_reduce
+from vllm.config.utils import hash_config_cached
 from vllm.distributed import get_ep_group, get_eplb_group
+from vllm.distributed import parallel_state as _parallel_state
 from vllm.distributed.eplb import eplb_state as _eplb_state
 from vllm.distributed.eplb.policy import AbstractEplbPolicy
 from vllm.distributed.parallel_state import (
+    get_pp_group,
     get_tensor_model_parallel_rank,
     get_tensor_model_parallel_world_size,
     in_the_same_node_as,
 )
 from vllm.forward_context import get_forward_context
 from vllm.logger import logger
+from vllm.utils.gpu_sync_debug import gpu_sync_allowed
+from vllm.utils.network_utils import get_ip
 from vllm.v1.worker.ubatching import dbo_current_ubatch_id
 
 from vllm_ascend.device.hardware_profile import MoECommPolicy, get_current_hardware_profile
 from vllm_ascend.distributed.eplb.eplb_communicator import AscendHixlEplbCommunicator, _HixlSession
+from vllm_ascend.distributed.eplb.placement import PlacementExporter
 from vllm_ascend.distributed.eplb.policy import PreparedLoadStats
 from vllm_ascend.distributed.eplb.tensor_ops import (
     build_expert_replica_routing_table,
@@ -41,6 +47,10 @@ ASYNC_EPLB_CYCLE_COMMITTED_LOG = "Ascend async EPLB cycle committed"
 _EPLB_CLOSE_TIMEOUT_SECONDS = 300
 _EPLB_EVENT_POLL_SECONDS = 0.1
 EXPERT_MAPPING_EP_SIZE: ContextVar[int] = ContextVar("vllm_ascend_expert_mapping_ep_size", default=1)
+# ForwardContext.additional_kwargs key holding one gathered AllGather source
+# mask per micro-batch. Read directly rather than through _EXTRA_CTX: the
+# proxy cannot create the list atomically, which DBO needs.
+_ALLGATHER_SOURCE_MASK_SLOTS = "eplb_allgather_source_mask_slots"
 
 
 @contextmanager
@@ -60,6 +70,16 @@ def _configured_upstream_policy(name: str, policy: AbstractEplbPolicy | None) ->
 def _upstream_from_mapping_accepts_valid_expert_count() -> bool:
     """Return whether the selected vLLM uses the release mapping contract."""
     return "num_valid_physical_experts" in inspect.signature(_eplb_state.EplbState.from_mapping).parameters
+
+
+def _get_pp_topology() -> tuple[int, int, Any | None]:
+    if getattr(_parallel_state, "_PP", None) is None and get_pp_group is _parallel_state.get_pp_group:
+        return 0, 1, None
+    try:
+        pp_group = get_pp_group()
+    except AssertionError:
+        return 0, 1, None
+    return pp_group.rank_in_group, pp_group.world_size, getattr(pp_group, "cpu_group", None)
 
 
 class AscendEplbLayerState(_eplb_state.EplbLayerState):
@@ -125,18 +145,36 @@ class AscendEplbLayerState(_eplb_state.EplbLayerState):
         if all_gather_mask is not None:
             assert self.num_unpadded_tokens_tensors is not None and self.should_record_tensor is not None
             num_unpadded_tokens = self.num_unpadded_tokens_tensors[dbo_current_ubatch_id()]
-            is_padding = self.allgather_source_is_padding
-            if is_padding is None:
-                is_padding = getattr(get_forward_context(), "is_padding", None)
-            token_mask = make_allgather_mask(
-                num_source_tokens,
-                num_unpadded_tokens,
-                self.should_record_tensor,
-                is_padding=is_padding,
-                tp_size=get_tensor_model_parallel_world_size() if is_sequence_parallel else 1,
-                tp_rank=get_tensor_model_parallel_rank() if is_sequence_parallel else 0,
+            # Every MoE layer of this model derives the same mask from the same
+            # per-forward inputs, so gathering it in each one repeats a
+            # collective as many times as the model has MoE layers. Hold it on
+            # the forward context, which lives exactly as long as the mask is
+            # valid: warmup, graph capture and draft forwards each enter their
+            # own, and none of them passes through the EPLB controller.
+            # ``setdefault`` because DBO runs its micro-batches on two threads
+            # that share one context, and a lost list would leave the ranks
+            # gathering a different number of times.
+            ubatch = dbo_current_ubatch_id()
+            forward_context = get_forward_context()
+            slots = forward_context.additional_kwargs.setdefault(
+                _ALLGATHER_SOURCE_MASK_SLOTS,
+                [None] * len(self.num_unpadded_tokens_tensors),
             )
-            token_mask = all_gather_mask(token_mask)
+            token_mask = slots[ubatch]
+            if token_mask is None:
+                is_padding = self.allgather_source_is_padding
+                if is_padding is None:
+                    is_padding = getattr(forward_context, "is_padding", None)
+                token_mask = make_allgather_mask(
+                    num_source_tokens,
+                    num_unpadded_tokens,
+                    self.should_record_tensor,
+                    is_padding=is_padding,
+                    tp_size=get_tensor_model_parallel_world_size() if is_sequence_parallel else 1,
+                    tp_rank=get_tensor_model_parallel_rank() if is_sequence_parallel else 0,
+                )
+                token_mask = all_gather_mask(token_mask)
+                slots[ubatch] = token_mask
             local_load = count_allgather_tokens(topk_ids, token_mask, self.local_expert_start, self.local_expert_count)
             assert self.allgather_record_tensor is not None
             torch.maximum(
@@ -262,6 +300,9 @@ class AscendEplbState(_eplb_state.EplbState):
         self._suspended = False
         self._close_error: Exception | None = None
         self._hixl_session: _HixlSession | None = None
+        self._exporter: PlacementExporter | None = None
+        self._placement_model_roles: dict[str, str] = {}
+        self._last_included_load_steps: torch.Tensor | None = None
         # vLLM main renamed ``EplbState.cuda_device_index`` to ``device_index``
         # (and passes it to EplbModelState on add_model), so keep both lanes
         # pointing at the attribute upstream actually reads.
@@ -272,6 +313,10 @@ class AscendEplbState(_eplb_state.EplbState):
     def uses_custom_load_stats(self) -> bool:
         """Whether the selected policy transforms temporal load samples."""
         return callable(getattr(getattr(self, "policy", None), "prepare_local_load_stats", None))
+
+    @property
+    def _tracks_load_sample_axis(self) -> bool:
+        return self.uses_custom_load_stats or getattr(self, "_exporter", None) is not None
 
     def add_model(self, model, model_config, model_name: str | None = None) -> None:
         """Build the EP-aware layout and initialize custom load statistics."""
@@ -286,11 +331,158 @@ class AscendEplbState(_eplb_state.EplbState):
                 super().add_model(model, model_config, model_name=model_name)
         finally:
             EXPERT_MAPPING_EP_SIZE.reset(token)
-        if get_current_hardware_profile().moe_comm_policy is MoECommPolicy.CAPACITY_AND_WORLD_SIZE:
-            model_state = self.model_states[model_config.compute_hash()]
-            model_state._allgather_physical_map = model_state.physical_to_logical_map.clone()
-        if self.uses_custom_load_stats:
-            self._initialize_load_stats_state(self.model_states[model_config.compute_hash()])
+        # Snapshot the placement for every profile, not just AllGather. The load
+        # history is keyed by physical slot, so a committed rearrangement that
+        # moves a different logical expert into a slot invalidates it, and
+        # refresh_model_routing_tables needs the previous placement to notice.
+        # Seeding here rather than on first use also covers the first commit,
+        # which already carries the new mapping by the time the tables refresh.
+        key = hash_config_cached(model_config)
+        model_state = self.model_states[key]
+        model_state._allgather_physical_map = model_state.physical_to_logical_map.clone()
+        if self._tracks_load_sample_axis:
+            self._initialize_load_stats_state(model_state)
+        role = "draft" if model_name is not None else "target"
+        roles = getattr(self, "_placement_model_roles", None)
+        if roles is None:
+            roles = {}
+            self._placement_model_roles = roles
+        roles[key] = role
+        exporter = getattr(self, "_exporter", None)
+        if exporter is not None and exporter.is_stage_leader:
+            with gpu_sync_allowed():
+                model_state._placement_export_map = model_state.physical_to_logical_map.to("cpu", copy=True)
+            model_state._on_placement_layer_committed = lambda r=role: exporter.mark_committed(r)
+
+    def enable_placement_export(self, path: str) -> None:
+        if getattr(self, "model_states", None):
+            raise RuntimeError("EPLB placement export must be configured before registering models.")
+        if not torch.distributed.is_initialized():
+            raise RuntimeError("EPLB placement export requires initialized distributed worker groups.")
+        ep_group = get_ep_group()
+        pp_rank, pp_size, _ = _get_pp_topology()
+        if ep_group.world_size * pp_size != torch.distributed.get_world_size():
+            raise ValueError("EPLB placement export requires one EP group per PP stage covering all worker ranks.")
+        self._placement_model_roles = {}
+        self._exporter = PlacementExporter(
+            ep_size=ep_group.world_size,
+            pp_rank=pp_rank,
+            pp_size=pp_size,
+            is_stage_leader=ep_group.rank_in_group == 0,
+            path=path,
+        )
+
+    def _get_role_model_state(self, role: str) -> Any | None:
+        roles = getattr(self, "_placement_model_roles", {})
+        return next((ms for key, ms in self.model_states.items() if roles.get(key) == role), None)
+
+    def _build_local_role_entry(self, role: str) -> dict[str, Any] | None:
+        ms = self._get_role_model_state(role)
+        export_map = None if ms is None else getattr(ms, "_placement_export_map", None)
+        if ms is None or export_map is None:
+            return None
+        num_logical = int(ms.model.num_logical_experts)
+        return {
+            "num_logical_experts": num_logical,
+            "num_redundant_experts": int(ms.model.num_physical_experts) - num_logical,
+            "physical_to_logical_map": export_map.tolist(),
+        }
+
+    def setup_pp_placement_export(self) -> None:
+        exporter = getattr(self, "_exporter", None)
+        if exporter is None or not exporter.is_stage_leader:
+            return
+        pp_rank, pp_size, pp_cpu_group = _get_pp_topology()
+        if pp_size <= 1 or exporter._listener is not None or exporter._endpoint is not None:
+            return
+        if pp_cpu_group is None:
+            raise RuntimeError("PP CPU group is required for multi-stage EPLB placement export.")
+        endpoint = exporter.start_pp_listener(get_ip()) if pp_rank == 0 else None
+        local_stage = {
+            "pp_rank": pp_rank,
+            "target": self._build_local_role_entry("target"),
+            "draft": self._build_local_role_entry("draft"),
+            "endpoint": endpoint,
+        }
+        gathered: list[Any] = [None] * pp_size
+        all_gather_object(gathered, local_stage, group=pp_cpu_group)
+        same_node = False
+        with suppress(Exception):
+            same_node_flags = in_the_same_node_as(pp_cpu_group, 0)
+            same_node = pp_rank != 0 and bool(same_node_flags[pp_rank])
+        exporter.configure_pp_stages(gathered, same_node)
+
+    def _compute_model_window_ratio_stats(
+        self,
+        model_state: Any | None,
+        included_steps: torch.Tensor | None = None,
+    ) -> tuple[float, int] | None:
+        window = None if model_state is None else getattr(model_state, "expert_load_window", None)
+        if window is None:
+            return None
+        ep_group = get_ep_group()
+        ep_size = ep_group.world_size
+        if ep_size < 1 or window.shape[-1] % ep_size != 0:
+            return None
+        slots = window.shape[-1] // ep_size
+        local_slice = slice(ep_group.rank_in_group * slots, (ep_group.rank_in_group + 1) * slots)
+        if included_steps is not None:
+            if included_steps.numel() == 0:
+                return None
+            phys_slots = self._physical_load_sample_slots[included_steps]
+            local_load = torch.zeros(
+                (included_steps.numel(), window.shape[1]), dtype=torch.float32, device=window.device
+            )
+            mask = phys_slots >= 0
+            if mask.any():
+                selected = window.index_select(0, phys_slots[mask].to(window.device))[:, :, local_slice]
+                local_load[mask.to(window.device)] = selected.sum(dim=-1, dtype=torch.float32)
+        else:
+            local_load = window[:, :, local_slice].sum(dim=-1, dtype=torch.float32)
+        if ep_size == 1:
+            with gpu_sync_allowed():
+                count = int((local_load > 0).sum().item())
+            return (float(count), count) if count > 0 else None
+        eplb_group = get_eplb_group()
+        group = (
+            eplb_group.cpu_group
+            if local_load.is_cpu and getattr(eplb_group, "cpu_group", None) is not None
+            else eplb_group.device_group
+        )
+        max_load, sum_load = local_load.clone(), local_load.clone()
+        all_reduce(max_load, op=ReduceOp.MAX, group=group)
+        all_reduce(sum_load, op=ReduceOp.SUM, group=group)
+        mean_load = sum_load / float(ep_size)
+        valid = mean_load > 0
+        ratios = torch.where(valid, max_load.double() / mean_load.double().clamp_min(1e-12), 0.0)
+        with gpu_sync_allowed():
+            ratio_sum, valid_count = torch.stack((ratios.sum(), valid.sum().double())).tolist()
+        count = int(valid_count)
+        return (float(ratio_sum), count) if count > 0 else None
+
+    def _maybe_evaluate_and_export_placement(self, included_steps: torch.Tensor | None = None) -> None:
+        exporter = getattr(self, "_exporter", None)
+        if exporter is None:
+            return
+        target_stats = self._compute_model_window_ratio_stats(self._get_role_model_state("target"), included_steps)
+        draft_stats = self._compute_model_window_ratio_stats(self._get_role_model_state("draft"), included_steps)
+        if target_stats is None and draft_stats is None:
+            return
+        if not exporter.is_stage_leader:
+            if exporter.pp_size == 1 and target_stats is not None:
+                ratio = target_stats[0] / target_stats[1]
+                if exporter.min_peak_to_mean_ratio is None or ratio < exporter.min_peak_to_mean_ratio:
+                    exporter.min_peak_to_mean_ratio = ratio
+            return
+        try:
+            exporter.publish_evaluation(
+                target_stats=target_stats,
+                target_entry=self._build_local_role_entry("target"),
+                draft_stats=draft_stats,
+                draft_entry=self._build_local_role_entry("draft"),
+            )
+        except (OSError, EOFError, ValueError):
+            logger.exception("Could not export committed EPLB placement")
 
     def _propagate_shared_tensors(self, model, num_unpadded_tokens_tensors) -> None:
         super()._propagate_shared_tensors(model, num_unpadded_tokens_tensors)
@@ -328,6 +520,9 @@ class AscendEplbState(_eplb_state.EplbState):
                 if worker.is_alive():
                     raise TimeoutError("EPLB background worker could not be stopped; worker must terminate")
                 self.async_worker = None
+            exporter = getattr(self, "_exporter", None)
+            if exporter is not None:
+                exporter.close()
             if self._hixl_session is not None:
                 self._hixl_session.close()
         except Exception as error:
@@ -476,7 +671,7 @@ class AscendEplbState(_eplb_state.EplbState):
         is_sampling = is_sampling and not is_dummy
         self._is_load_sampling_step = False
         self._should_collect_local_load = False
-        if self.uses_custom_load_stats:
+        if self._tracks_load_sample_axis:
             self._discard_samples_from_old_mapping()
             if not is_profile:
                 index = self._load_stats_window_write_index
@@ -496,6 +691,35 @@ class AscendEplbState(_eplb_state.EplbState):
             log_stats=log_stats,
         )
 
+    def _sync_load_pass(self, *args: Any, **kwargs: Any) -> list[torch.Tensor]:
+        """Observability hook point; upstream owns the behaviour.
+
+        Upstream ``EplbState.step`` calls this only on balancedness logging
+        steps and uses the returned, already reduced load pass. The metric
+        provider can only hook ``vllm_ascend`` symbols, so this pass-through
+        override exists solely to expose that call point to it.
+        """
+        return super()._sync_load_pass(*args, **kwargs)
+
+    def _resolve_included_load_steps(self) -> torch.Tensor | None:
+        if not hasattr(self, "_local_load_collection_mask"):
+            return None
+        self._discard_samples_from_old_mapping()
+        if self._num_recorded_load_steps == 0:
+            return torch.empty(0, dtype=torch.long)
+        group = get_eplb_group()
+        step_indices = self._ordered_load_step_indices()
+        rank_counts = self._local_load_collection_mask[step_indices].clone()
+        cpu_group = getattr(group, "cpu_group", None)
+        if cpu_group is not None:
+            all_reduce(rank_counts, group=cpu_group)
+        else:
+            dev_counts = rank_counts.to(self.device)
+            all_reduce(dev_counts, group=group.device_group)
+            with gpu_sync_allowed():
+                rank_counts = dev_counts.cpu()
+        return step_indices[rank_counts > 0]
+
     def collect_global_load_stats(
         self,
     ) -> dict[str, PreparedLoadStats] | None:
@@ -503,17 +727,12 @@ class AscendEplbState(_eplb_state.EplbState):
         prepare_load_stats = getattr(self.policy, "prepare_local_load_stats", None)
         if prepare_load_stats is None:
             raise TypeError("The selected EPLB policy does not prepare load statistics")
-        self._discard_samples_from_old_mapping()
-        if self._num_recorded_load_steps == 0:
+        self._last_included_load_steps = None
+        included_steps = self._resolve_included_load_steps()
+        if included_steps is None or included_steps.numel() == 0:
             return None
-
+        self._last_included_load_steps = included_steps
         group = get_eplb_group()
-        step_indices = self._ordered_load_step_indices()
-        rank_counts = self._local_load_collection_mask[step_indices].clone()
-        all_reduce(rank_counts, group=group.cpu_group)
-        included_steps = step_indices[rank_counts > 0]
-        if included_steps.numel() == 0:
-            return None
 
         local_stats: dict[str, PreparedLoadStats] = {}
         for model_key, model_state in self.model_states.items():
@@ -612,11 +831,16 @@ class AscendEplbState(_eplb_state.EplbState):
             return None
 
         if use_custom_async_stats:
+            self._last_included_load_steps = None
             global_load_stats = self.collect_global_load_stats()
             if global_load_stats is not None:
+                if getattr(self, "_exporter", None) is not None:
+                    self._maybe_evaluate_and_export_placement(included_steps=self._last_included_load_steps)
                 self.publish_async_load_stats(global_load_stats)
             result = None
         else:
+            if getattr(self, "_exporter", None) is not None and not is_profile and rank_mapping is None:
+                self._maybe_evaluate_and_export_placement(included_steps=self._resolve_included_load_steps())
             result = super().rearrange(
                 is_profile=is_profile,
                 rank_mapping=rank_mapping,
@@ -699,7 +923,8 @@ class AscendEplbState(_eplb_state.EplbState):
         super().update_mapping(model_config, expanded_physical_to_logical)
         # Verified main updates a live state during elastic EP. Refresh the
         # Ascend replica table in place so captured graphs use the new mapping.
-        refresh_model_routing_tables(self.model_states[model_config.compute_hash()])
+        key = hash_config_cached(model_config)
+        refresh_model_routing_tables(self.model_states[key])
 
     @classmethod
     def from_mapping(
@@ -733,6 +958,7 @@ class AscendEplbState(_eplb_state.EplbState):
                 state._initialize_load_stats_state(model_state)
         for model_state in state.model_states.values():
             refresh_model_routing_tables(model_state)
-            if get_current_hardware_profile().moe_comm_policy is MoECommPolicy.CAPACITY_AND_WORLD_SIZE:
-                model_state._allgather_physical_map = model_state.physical_to_logical_map.clone()
+            # Elastic EP builds the state here instead of through add_model, so
+            # seed the placement snapshot on the same terms.
+            model_state._allgather_physical_map = model_state.physical_to_logical_map.clone()
         return state

@@ -1,12 +1,11 @@
 > [!NOTE]
 > **Filling Instructions**
 >
-> - Place new V2 runner implementations under `vllm_ascend/ops/triton/`, using
+> - Place new runner implementations under `vllm_ascend/ops/triton/`, using
 >   functional subdirectories such as `sample/` and `spec_decode/`. Do not create
 >   an `ops/triton/v2/` namespace for new code or documents.
-> - Place V1-only implementations under `vllm_ascend/ops/triton/v1/` and their
->   documents under `vllm_ascend/ops/triton/v1/docs/`. Place V2, shared, and
->   runner-independent operator documents under `vllm_ascend/ops/triton/docs/`.
+> - Place shared and runner-independent operator documents under
+>   `vllm_ascend/ops/triton/docs/`.
 > - Determine runner ownership from the actual callers. Shared, model-layer,
 >   and utility implementations keep their functional directories. Follow the
 >   [operator layout and inventory](../README.md#adding-or-moving-an-operator)

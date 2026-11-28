@@ -196,7 +196,7 @@ def fused_recurrent_kda(
         "HAS_BIAS": lambda args: args["b"] is not None,
     }
 )
-@triton.jit(do_not_specialize=["T", "eps", "G_ROW_STRIDE", "G_COL_STRIDE"])
+@triton.jit(do_not_specialize=["T", "Y_ROWS", "eps", "G_ROW_STRIDE", "G_COL_STRIDE"])
 def layer_norm_gated_fwd_kernel(
     x,  # pointer to the input
     g,  # pointer to the gate
@@ -209,10 +209,12 @@ def layer_norm_gated_fwd_kernel(
     rstd,  # pointer to the 1/std
     eps,  # epsilon to avoid division by zero
     T,  # number of rows in x
+    Y_ROWS,  # output capacity, including zero padding
     G_ROW_STRIDE,
     G_COL_STRIDE,
     D: tl.constexpr,  # number of columns in x
     H: tl.constexpr,  # number of heads per token
+    PAD_OUTPUT: tl.constexpr,
     PACKED_GATE: tl.constexpr,
     STRIDED_GATE: tl.constexpr,
     STORE_RSTD: tl.constexpr,
@@ -281,8 +283,14 @@ def layer_norm_gated_fwd_kernel(
     elif ACTIVATION == "sigmoid":
         b_y = b_y * tl.sigmoid(b_g)
 
-    # Write output
-    tl.store(y + offsets, b_y.to(y.dtype.element_ty), mask)
+    if PAD_OUTPUT:
+        # Input/gate loads stop at T; padded output rows must still be written.
+        # Select zero explicitly so NaN weights/bias cannot contaminate padding.
+        b_y = tl.where(rows[:, None] < T, b_y, 0.0)
+        output_mask = (rows[:, None] < Y_ROWS) & m_d[None, :]
+        tl.store(y + offsets, b_y.to(y.dtype.element_ty), output_mask)
+    else:
+        tl.store(y + offsets, b_y.to(y.dtype.element_ty), mask)
 
 
 @triton.heuristics(
@@ -423,10 +431,12 @@ def layer_norm_gated_fwd(
             rstd=rstd,
             eps=eps,
             T=T,
+            Y_ROWS=T,
             G_ROW_STRIDE=g.stride(0),
             G_COL_STRIDE=g.stride(1),
             D=D,
             H=1,
+            PAD_OUTPUT=False,
             PACKED_GATE=False,
             STRIDED_GATE=strided_gate,
             STORE_RSTD=return_stats,
@@ -479,7 +489,29 @@ def rms_norm_gated(
     eps: float = 1e-6,
     out: torch.Tensor | None = None,
 ):
+    """Apply gated RMSNorm, optionally zero-padding a caller-owned output.
+
+    For [T,H,D] or [1,T,H,D] inputs, out may have a larger token dimension.
+    Only input tokens read x/g; all extra output tokens are explicitly zero.
+    Residual and prenorm modes retain the original equal-shape contract.
+    """
     x_shape_og = x.shape
+    padded_output = out is not None and out.shape != x.shape
+    if padded_output:
+        if (
+            residual is not None
+            or prenorm
+            or x.ndim not in (3, 4)
+            or (x.ndim == 4 and x.shape[0] != 1)
+            or out.ndim != x.ndim
+            or out.shape[:-3] != x.shape[:-3]
+            or out.shape[-2:] != x.shape[-2:]
+            or out.shape[-3] < x.shape[-3]
+            or not out.is_contiguous()
+        ):
+            raise ValueError(
+                "Padded norm output requires a contiguous token-extended output without residual or prenorm."
+            )
     # K3 gates are views into the packed BFG projection. Flattening their
     # token/head dimensions would materialize the projection gaps each layer.
     if (
@@ -502,8 +534,8 @@ def rms_norm_gated(
     ):
         if g.shape[-3:] != x.shape[-3:]:
             raise ValueError("The norm input and gate must have matching rows and features.")
-        if out is not None and (out.shape != x.shape or out.dtype != x.dtype or out.device != x.device):
-            raise ValueError("The norm output must match the input shape, dtype and device.")
+        if out is not None and (out.dtype != x.dtype or out.device != x.device):
+            raise ValueError("The norm output must match the input dtype and device.")
         if out is not None and not out.is_contiguous():
             raise ValueError("Direct norm output must be contiguous.")
         if weight is not None and weight.shape != (x.shape[-1],):
@@ -512,7 +544,8 @@ def rms_norm_gated(
             raise ValueError("The norm bias must match the feature dimension.")
         y = torch.empty_like(x) if out is None else out
         rows = x.numel() // x.shape[-1]
-        if rows:
+        output_rows = y.numel() // x.shape[-1]
+        if output_rows:
             packed_gate = not g.is_contiguous()
             # Spread small decode batches over the vector cores, while keeping
             # the original per-program row count for chunked prefill.
@@ -524,7 +557,7 @@ def rms_norm_gated(
                 block_rows = _NORM_MULTIROW_DEFAULT_TILE_ROWS
             if x.shape[-1] > _KIMI_NORM_WIDE_FEATURE_THRESHOLD:
                 block_rows = min(block_rows, _KIMI_NORM_WIDE_FEATURE_TILE_ROWS)
-            layer_norm_gated_fwd_kernel[(cdiv(rows, block_rows),)](
+            layer_norm_gated_fwd_kernel[(cdiv(output_rows, block_rows),)](
                 x=x,
                 g=g,
                 y=y,
@@ -536,10 +569,12 @@ def rms_norm_gated(
                 rstd=None,
                 eps=eps,
                 T=rows,
+                Y_ROWS=output_rows,
                 G_ROW_STRIDE=x.shape[-1],
                 G_COL_STRIDE=1,
                 D=x.shape[-1],
                 H=x.shape[-2],
+                PAD_OUTPUT=padded_output,
                 PACKED_GATE=packed_gate,
                 STRIDED_GATE=False,
                 STORE_RSTD=False,
@@ -553,8 +588,8 @@ def rms_norm_gated(
     if out is not None:
         if residual is not None or prenorm:
             raise ValueError("Direct norm output does not support residual or prenorm.")
-        if out.shape != x.shape or out.dtype != x.dtype or out.device != x.device:
-            raise ValueError("The norm output must match the input shape, dtype and device.")
+        if out.dtype != x.dtype or out.device != x.device:
+            raise ValueError("The norm output must match the input dtype and device.")
     # reshape input data into 2D tensor
     x = x.contiguous().reshape(-1, x.shape[-1])
     # Unsupported layouts may still need materialization during reshape.
@@ -578,7 +613,11 @@ def rms_norm_gated(
     )
     y = y.reshape(x_shape_og)
     if out is not None:
-        out.copy_(y)
+        if padded_output:
+            out.narrow(-3, 0, x_shape_og[-3]).copy_(y)
+            out.narrow(-3, x_shape_og[-3], out.shape[-3] - x_shape_og[-3]).zero_()
+        else:
+            out.copy_(y)
         return out
     return y if not prenorm else (y, residual_out.reshape(x_shape_og))
 

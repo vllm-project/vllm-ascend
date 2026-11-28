@@ -13,7 +13,6 @@ from vllm_ascend.core.kv_cache_interface import (
     AscendIndexerKPoolTailSpec,
     AscendMLAAttentionSpec,
     get_kv_cache_compression_ratio,
-    get_storage_block_size,
 )
 
 
@@ -44,7 +43,7 @@ def view_kpool_tail_cache(
     return [
         torch.as_strided(
             typed_slot,
-            size=(num_blocks, kv_cache_spec.block_size, 2 * kv_cache_spec.head_size),
+            size=(num_blocks, kv_cache_spec.ring_capacity, 2 * kv_cache_spec.head_size),
             stride=(page_el, 2 * kv_cache_spec.head_size, 1),
         )
     ]
@@ -66,7 +65,7 @@ def view_compressed_indexer_cache(
     compression_ratio = get_kv_cache_compression_ratio(kv_cache_spec)
     indexer_kernel_block_size = kernel_block_size // compression_ratio
     num_blocks = raw_single.numel() // kv_cache_spec.page_size_bytes
-    num_blocks_per_kv_block = get_storage_block_size(kv_cache_spec) // indexer_kernel_block_size
+    num_blocks_per_kv_block = kv_cache_spec.num_states // indexer_kernel_block_size
     shape = tuple(
         attn_backend.get_kv_cache_shape(
             num_blocks * num_blocks_per_kv_block,
@@ -119,7 +118,7 @@ def _view_nope_main_mla_cache(
     kernel_block_size: int,
 ) -> list[torch.Tensor]:
     num_blocks = raw_cache.numel() // kv_cache_spec.page_size_bytes
-    num_blocks_per_kv_block = get_storage_block_size(kv_cache_spec) // kernel_block_size
+    num_blocks_per_kv_block = kv_cache_spec.num_states // kernel_block_size
     shape = tuple(
         attn_backend.get_kv_cache_shape(
             num_blocks * num_blocks_per_kv_block,

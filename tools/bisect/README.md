@@ -59,6 +59,14 @@ trigger (case FAIL)
   every candidate is adapted before pytest: vLLM is checked
   out from the configured vLLM source directory (default
   `/vllm-workspace/vllm`) and torch-npu is reinstalled with pip.
+  vLLM installs use the PyTorch CPU extra index, as in the Dockerfile.
+  torch-npu installs use the Huawei Cloud PyPI mirror because the Dockerfile's
+  standalone torch-npu install is disabled. Existing `PIP_INDEX_URL` and
+  `PIP_EXTRA_INDEX_URL` settings take precedence.
+  The hardware-specific dependency inputs and build order are recorded in
+  [`BUILD_RECIPE.md`](./BUILD_RECIPE.md). The adapter replays package and nightly
+  requirements changes, switches AISBench tags, and checks the vLLM source
+  checkout. Changed CANN images or unsupported Docker build steps become SKIP.
 
 ## Status tables (good source, read-only)
 

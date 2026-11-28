@@ -1,0 +1,20 @@
+# Release note fragment template.
+#
+# Copy this file to release_notes/fragments/<PR number>.yaml and fill it in.
+# Add a fragment in the same PR that introduces a user-facing change.
+# See release_notes/README.md for when a fragment is needed and the field rules.
+pr: 22787
+entries:
+  # category: feature | hardware | performance | dependency | breaking | config | documentation | bugfix | other
+  - category: bugfix
+    # One to three short English sentences for users of the released artifact, not reviewers.
+    # What changed for them and what they must do. Perf: scenario + effect (no invented
+    # numbers). Breaking/config: old -> new, exact switch, migration step. Bugfix: the
+    # user-visible symptom, not the root cause. Full rules: release_notes/README.md.
+    # Do not append the PR link; the release tooling adds it automatically.
+    text: >-
+      Fixed the PD disaggregation load balance proxy dropping decoder responses whose
+      SSE frame did not align with a network read. A frame split across two reads, or a
+      frame coalesced with the `[DONE]` sentinel into a single read, is now reassembled
+      before parsing, so the proxy no longer misses the recompute signal and no longer
+      returns an empty body for a complete response.

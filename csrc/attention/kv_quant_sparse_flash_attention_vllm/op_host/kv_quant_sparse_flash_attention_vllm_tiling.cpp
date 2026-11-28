@@ -1277,19 +1277,10 @@ ge::graphStatus QSFATilingCheck::CheckFeatureMlaAntiquantShapeSizes() const
             "q_head_num must be divisible by kv_head_num."),
         return ge::GRAPH_FAILED);
 
-    if (isA5_) {
-        std::vector<uint32_t> gSizeSupportList = {1, 2, 4, 8, 16, 32, 48, 64, 128};
-        OP_CHECK_IF(std::find(gSizeSupportList.begin(), gSizeSupportList.end(), gSize_) == gSizeSupportList.end(),
-            OP_LOGE_FOR_INVALID_VALUE_WITH_REASON(opName_, "group num", std::to_string(gSize_).c_str(),
-                "group num should be in 1, 2, 4, 8, 16, 32, 48, 64, 128."),
-            return ge::GRAPH_FAILED);
-    } else {
-        std::vector<uint32_t> gSizeSupportList = {1, 2, 4, 8, 16, 32, 64, 128};
-        OP_CHECK_IF(std::find(gSizeSupportList.begin(), gSizeSupportList.end(), gSize_) == gSizeSupportList.end(),
-            OP_LOGE_FOR_INVALID_VALUE_WITH_REASON(opName_, "group num", std::to_string(gSize_).c_str(),
-                "group num should be in 1, 2, 4, 8, 16, 32, 64, 128."),
-            return ge::GRAPH_FAILED);
-    }
+    OP_CHECK_IF(gSize_ < 1U || gSize_ > 128U,
+        OP_LOGE_FOR_INVALID_VALUE_WITH_REASON(opName_, "group num", std::to_string(gSize_).c_str(),
+            "group num should be in [1, 128]."),
+        return ge::GRAPH_FAILED);
 
     return ge::GRAPH_SUCCESS;
 }

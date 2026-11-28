@@ -8,7 +8,7 @@ import pytest
 import torch
 import torch_npu  # noqa: F401
 
-from vllm_ascend.attention.indexer import AscendSFAIndexerBackend
+from vllm_ascend.attention.indexer import AscendSFAIndexerBackend, AscendSFAIndexerMetadataBuilder
 from vllm_ascend.device.device_config import check_ascend_device_type
 from vllm_ascend.device.device_op import DeviceOperator
 from vllm_ascend.device.hardware_profile import DeviceAdaptorFamily, HardwareCapability, get_current_hardware_profile
@@ -25,6 +25,50 @@ seed = 45
 random.seed(seed)
 np.random.seed(seed)
 torch.manual_seed(seed)
+
+
+@pytest.mark.parametrize("dtype", [torch.int8, torch.float16, torch.float8_e4m3fn, torch.float32])
+@torch.inference_mode()
+def test_indexer_page_scatter_replay_refreshes_metadata(dtype):
+    if dtype == torch.float8_e4m3fn and not get_current_hardware_profile().supports(
+        HardwareCapability.SCATTER_ND_FP8_CACHE_STORE
+    ):
+        pytest.skip("FP8 indexer cache requires arch35")
+    # Kimi packs K and scales per page; rows inside each plane are contiguous.
+    backing = torch.full((4, 128, 1, 256), 7.0, device="npu").to(dtype)
+    cache = backing.view(4, -1)[:, : 128 * 128].view(4, 128, 1, 128)
+    updates = torch.ones((4, 128), device="npu").to(dtype)
+    slots = torch.tensor([0, 127, 128, -1], device="npu", dtype=torch.int64)
+    builder = AscendSFAIndexerMetadataBuilder.__new__(AscendSFAIndexerMetadataBuilder)
+    builder.use_pcp = False
+    builder.kernel_block_size = 128
+    builder._slot_capacity = 4
+    builder._cache_scatter_indices_buffers = {}
+    key = ("slot_mapping", slots.data_ptr())
+    indices = builder._build_cache_scatter_indices(slots, 4, 3, 3, False, key)
+
+    def write():
+        AscendSFAIndexerBackend._write_cache_tensor(cache, updates, slots, indices)
+
+    write()
+    torch.npu.synchronize()
+    graph = torch.npu.NPUGraph()
+    with torch.npu.graph(graph, capture_error_mode="global"):
+        write()
+    # Runtime metadata preparation updates the exact allocation captured by
+    # scatter. Replay must use new pages/offsets, not the capture-time slots.
+    next_slots = torch.tensor([255, 256, -1, 511], device="npu", dtype=torch.int64)
+    slots.copy_(next_slots)
+    refreshed = builder._build_cache_scatter_indices(slots, 4, 3, 3, False, key)
+    assert refreshed.data_ptr() == indices.data_ptr()
+    backing.copy_(torch.full((4, 128, 1, 256), 7.0, device="npu").to(dtype))
+    graph.replay()
+    torch.npu.synchronize()
+    expected = torch.full((4, 128, 1, 256), 7.0).to(dtype)
+    expected_cache = torch.as_strided(expected, cache.shape, cache.stride(), cache.storage_offset())
+    for row, (block, offset) in ((0, (1, 127)), (1, (2, 0)), (3, (3, 127))):
+        expected_cache.view(torch.uint8)[block, offset, 0] = updates.view(torch.uint8)[row].cpu()
+    torch.testing.assert_close(backing.view(torch.uint8).cpu(), expected.view(torch.uint8), rtol=0, atol=0)
 
 
 def scatter_nd_update_golden(var, indices, update):
@@ -224,10 +268,10 @@ def test_cache_adaptor_dispatch_preserves_backing_storage(dtype, index_dtype, to
 @pytest.mark.parametrize(
     "key_dtype,scale_dtype", [(torch.bfloat16, None), (torch.int8, torch.float16), (torch.float8_e4m3fn, torch.float32)]
 )
-@pytest.mark.parametrize("row_gap", [False, True])
+@pytest.mark.parametrize("page_gap", [False, True])
 @pytest.mark.parametrize("tokens", [3, 2049])
 @torch.inference_mode()
-def test_indexer_cache_dispatch_for_keys_and_scales(key_dtype, scale_dtype, row_gap, tokens):
+def test_indexer_cache_dispatch_for_keys_and_scales(key_dtype, scale_dtype, page_gap, tokens):
     if key_dtype == torch.float8_e4m3fn and not get_current_hardware_profile().supports(
         HardwareCapability.SCATTER_ND_FP8_CACHE_STORE
     ):
@@ -241,10 +285,11 @@ def test_indexer_cache_dispatch_for_keys_and_scales(key_dtype, scale_dtype, row_
     keys, caches, backings, expected = [], [], [], []
     for dtype, width in [(key_dtype, 128)] + ([(scale_dtype, 1)] if scale_dtype else []):
         storage_dtype = torch.uint8 if dtype == torch.float8_e4m3fn else dtype
-        backing = torch.full((32, 128, 1, width * (2 if row_gap else 1)), 7, dtype=storage_dtype, device="npu").view(
+        backing = torch.full((32, 128, 1, width * (2 if page_gap else 1)), 7, dtype=storage_dtype, device="npu").view(
             dtype
         )
-        cache = backing[..., :width]
+        # Match the worker's per-page K/scale planes, not gaps between tokens.
+        cache = backing.view(32, -1)[:, : 128 * width].view(32, 128, 1, width)
         key = (
             torch.arange(padded * width, device="npu")
             .reshape(padded, width)
@@ -254,7 +299,9 @@ def test_indexer_cache_dispatch_for_keys_and_scales(key_dtype, scale_dtype, row_
         )
         before = backing.view(torch.uint8).cpu()
         reference = torch.as_strided(before.view(dtype), cache.shape, cache.stride(), cache.storage_offset())
-        reference.view(-1, width).view(torch.uint8)[cpu_slots[valid]] = key.view(torch.uint8).cpu()[valid]
+        reference.view(torch.uint8)[cpu_slots[valid] // 128, cpu_slots[valid] % 128, 0] = key.view(torch.uint8).cpu()[
+            valid
+        ]
         keys.append(key)
         caches.append(cache)
         backings.append(backing)
@@ -263,6 +310,7 @@ def test_indexer_cache_dispatch_for_keys_and_scales(key_dtype, scale_dtype, row_
         enable_sparse_li_c8=scale_dtype is not None,
         enable_sparse_li_quant=scale_dtype is not None,
         k_cache=SimpleNamespace(kv_cache=tuple(caches)),
+        _write_cache_tensor=AscendSFAIndexerBackend._write_cache_tensor,
     )
     with (
         patch.object(
@@ -278,11 +326,12 @@ def test_indexer_cache_dispatch_for_keys_and_scales(key_dtype, scale_dtype, row_
             keys[0] if scale_dtype else keys[0].unsqueeze(1),
             keys[1] if scale_dtype else None,
             slots,
+            torch.stack((slots // caches[0].shape[1], slots % caches[0].shape[1]), dim=-1),
         )
         torch.npu.synchronize()
         a5 = get_current_hardware_profile().device_adaptor_family == DeviceAdaptorFamily.FP8_OPTIMIZED
-        expected_sk = not a5
-        expected_pa = a5 and not row_gap
+        expected_sk = not a5 and not page_gap
+        expected_pa = a5 and not page_gap
         assert sk.call_count == (len(caches) if expected_sk else 0)
         assert generic.call_count == (0 if expected_sk or expected_pa else len(caches))
         assert pa.call_count == (len(caches) if expected_pa else 0)

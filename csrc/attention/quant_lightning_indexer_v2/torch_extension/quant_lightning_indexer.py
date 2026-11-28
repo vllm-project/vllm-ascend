@@ -8,12 +8,25 @@
 # See LICENSE in the root of the software repository for the full text of the License.
 # -----------------------------------------------------------------------------------------------------------
 
+import os
+
 import torch
 from cann_ops_transformer.op_builder import OpBuilder, get_as_library
 from torch.library import impl
 
 QLI_METADATA_SIZE = 1024
 QLI_METADATA_OP_NAME = "quant_lightning_indexer_metadata"
+
+
+def _arch22_score_is_fp32():
+    """Use FP32 for A3 local candidates (return_value=2); A5 keeps BF16."""
+    try:
+        import torch_npu  # noqa: F401
+
+        name = torch.npu.get_device_name(0)
+    except Exception:
+        return True
+    return "Ascend950" not in str(name)
 
 
 class QuantLightningIndexerOpBuilder(OpBuilder):
@@ -29,15 +42,18 @@ class QuantLightningIndexerOpBuilder(OpBuilder):
         return [
             "quant_lightning_indexer_metadata(int num_heads_q, int num_heads_k, int head_dim, int topk, "
             "int quant_mode, *, Tensor? cu_seqlens_q=None, Tensor? cu_seqlens_k=None, Tensor? seqused_q=None,"
-            "Tensor? seqused_k=None, Tensor? cmp_residual_k=None, int? batch_size=None, int? max_seqlen_q=None,"
-            "int? max_seqlen_k=None, str? layout_q=None, str? layout_k=None, int? mask_mode=None, "
-            "int? cmp_ratio=None) -> Tensor",
+            "Tensor? seqused_k=None, Tensor? cmp_residual_k=None, Tensor? causal_seqlens_kv_global=None, "
+            "int? batch_size=None, int? max_seqlen_q=None, int? max_seqlen_k=None, str? layout_q=None, "
+            "str? layout_k=None, int? mask_mode=None, int? cmp_ratio=None, bool? enable_dcp=None, "
+            "int? cp_world=None, int? cp_rank=None, int? cp_kv_cache_interleave_size=None) -> Tensor",
             "quant_lightning_indexer(Tensor query, Tensor key, Tensor weights, Tensor query_dequant_scale, "
             "Tensor key_dequant_scale, int topk, int quant_mode, *, Tensor? cu_seqlens_q=None, "
             "Tensor? cu_seqlens_k=None, Tensor? seqused_q=None, Tensor? seqused_k=None, Tensor? "
             "cmp_residual_k = None, Tensor? block_table=None, Tensor? output_idx_offset=None, Tensor? metadata=None, "
+            "Tensor? causal_seqlens_kv_global=None, "
             'int max_seqlen_q=-1, str layout_q="BSND", str layout_k="BSND", int mask_mode=0, '
-            "int cmp_ratio=1, int return_value=0) -> (Tensor, Tensor)",
+            "int cmp_ratio=1, int return_value=0, bool enable_dcp=False, int cp_world=1, int cp_rank=0, "
+            "int cp_kv_cache_interleave_size=1) -> (Tensor, Tensor)",
             # O1 方案b: candidate 两级TopK 新入口 (三元组), 旧 schema 保持不变
             "quant_lightning_indexer_candidate(Tensor query, Tensor key, Tensor weights, "
             "Tensor query_dequant_scale, Tensor key_dequant_scale, int topk, int quant_mode, *, "
@@ -46,7 +62,7 @@ class QuantLightningIndexerOpBuilder(OpBuilder):
             "Tensor? block_table=None, Tensor? output_idx_offset=None, Tensor? metadata=None, "
             'int max_seqlen_q=-1, str layout_q="BSND", str layout_k="BSND", int mask_mode=0, '
             "int cmp_ratio=1, int candidate_mode=3, int candidate_topk_blocks=2048, "
-            "int candidate_block_size=8) -> (Tensor, Tensor, Tensor)",
+            "int candidate_block_size=8, Tensor? candidate_block_length=None) -> (Tensor, Tensor, Tensor, Tensor)",
         ]
 
     def register_meta(self):
@@ -67,6 +83,7 @@ class QuantLightningIndexerOpBuilder(OpBuilder):
             seqused_q: torch.Tensor | None = None,
             seqused_k: torch.Tensor | None = None,
             cmp_residual_k: torch.Tensor | None = None,
+            causal_seqlens_kv_global: torch.Tensor | None = None,
             batch_size: int | None = None,
             max_seqlen_q: int | None = None,
             max_seqlen_k: int | None = None,
@@ -74,6 +91,11 @@ class QuantLightningIndexerOpBuilder(OpBuilder):
             layout_k: str | None = None,
             mask_mode: int | None = None,
             cmp_ratio: int | None = None,
+            enable_dcp: bool | None = None,
+            cp_world: int | None = None,
+            cp_rank: int | None = None,
+            cp_kv_cache_interleave_size: int | None = None,
+            candidate_block_length: torch.Tensor | None = None,
         ):
             return torch.empty((QLI_METADATA_SIZE), dtype=torch.int32, device="npu")
 
@@ -95,12 +117,17 @@ class QuantLightningIndexerOpBuilder(OpBuilder):
             block_table=None,
             output_idx_offset=None,
             metadata=None,
+            causal_seqlens_kv_global=None,
             max_seqlen_q=-1,
             layout_q="BSND",
             layout_k="BSND",
             mask_mode=0,
             cmp_ratio=1,
             return_value=0,
+            enable_dcp=False,
+            cp_world=1,
+            cp_rank=0,
+            cp_kv_cache_interleave_size=1,
         ):
             key_head_num = key.shape[1] if layout_k == "TND" else key.shape[2]
 
@@ -117,16 +144,17 @@ class QuantLightningIndexerOpBuilder(OpBuilder):
                     device="meta",
                 )
             if return_value:
+                score_dtype = torch.float32 if return_value == 2 and _arch22_score_is_fp32() else torch.bfloat16
                 if layout_q == "BSND":
                     sparse_values_out = torch.empty(
                         [query.shape[0], query.shape[1], key_head_num, topk],
-                        dtype=torch.bfloat16,
+                        dtype=score_dtype,
                         device="meta",
                     )
                 else:
                     sparse_values_out = torch.empty(
                         [query.shape[0], key_head_num, topk],
-                        dtype=torch.bfloat16,
+                        dtype=score_dtype,
                         device="meta",
                     )
             else:
@@ -160,6 +188,7 @@ class QuantLightningIndexerOpBuilder(OpBuilder):
             candidate_mode=3,
             candidate_topk_blocks=2048,
             candidate_block_size=8,
+            candidate_block_length=None,
         ):
             key_head_num = key.shape[1] if layout_k == "TND" else key.shape[2]
             if layout_q == "BSND":
@@ -182,15 +211,22 @@ class QuantLightningIndexerOpBuilder(OpBuilder):
                         dtype=torch.int32,
                         device="meta",
                     )
+                    cand_len_out = torch.empty(
+                        [query.shape[0] * query.shape[1], key_head_num],
+                        dtype=torch.int32,
+                        device="meta",
+                    )
                 else:
                     cand_out = torch.empty(
                         [query.shape[0], key_head_num, candidate_topk_blocks],
                         dtype=torch.int32,
                         device="meta",
                     )
+                    cand_len_out = torch.empty([query.shape[0], key_head_num], dtype=torch.int32, device="meta")
             else:
                 cand_out = torch.empty([0], dtype=torch.int32, device="meta")
-            return (sparse_indices_out, sparse_values_out, cand_out)
+                cand_len_out = torch.empty([0], dtype=torch.int32, device="meta")
+            return (sparse_indices_out, sparse_values_out, cand_out, cand_len_out)
 
 
 # Instantiate the builder
@@ -210,6 +246,7 @@ def quant_lightning_indexer_metadata(
     seqused_q: torch.Tensor | None = None,
     seqused_k: torch.Tensor | None = None,
     cmp_residual_k: torch.Tensor | None = None,
+    causal_seqlens_kv_global: torch.Tensor | None = None,
     batch_size: int | None = None,
     max_seqlen_q: int | None = None,
     max_seqlen_k: int | None = None,
@@ -217,6 +254,11 @@ def quant_lightning_indexer_metadata(
     layout_k: str | None = None,
     mask_mode: int | None = None,
     cmp_ratio: int | None = None,
+    enable_dcp: bool | None = None,
+    cp_world: int | None = None,
+    cp_rank: int | None = None,
+    cp_kv_cache_interleave_size: int | None = None,
+    candidate_block_length: torch.Tensor | None = None,
 ):
     """
     dispatcher implementation for NPU.zhe
@@ -229,6 +271,10 @@ def quant_lightning_indexer_metadata(
     layout_k = "BSND" if layout_k is None else layout_k
     mask_mode = 0 if mask_mode is None else mask_mode
     cmp_ratio = 1 if cmp_ratio is None else cmp_ratio
+    enable_dcp = False if enable_dcp is None else enable_dcp
+    cp_world = 1 if cp_world is None else cp_world
+    cp_rank = 0 if cp_rank is None else cp_rank
+    cp_kv_cache_interleave_size = 1 if cp_kv_cache_interleave_size is None else cp_kv_cache_interleave_size
 
     op_module = quant_lightning_indexer_op_builder.load()
     return op_module.quant_lightning_indexer_metadata(
@@ -242,6 +288,7 @@ def quant_lightning_indexer_metadata(
         seqused_q,
         seqused_k,
         cmp_residual_k,
+        causal_seqlens_kv_global,
         batch_size,
         max_seqlen_q,
         max_seqlen_k,
@@ -249,6 +296,11 @@ def quant_lightning_indexer_metadata(
         layout_k,
         mask_mode,
         cmp_ratio,
+        enable_dcp,
+        cp_world,
+        cp_rank,
+        cp_kv_cache_interleave_size,
+        candidate_block_length,
     )
 
 
@@ -264,6 +316,7 @@ def quant_lightning_indexer_metadata_fallback(
     seqused_q: torch.Tensor | None = None,
     seqused_k: torch.Tensor | None = None,
     cmp_residual_k: torch.Tensor | None = None,
+    causal_seqlens_kv_global: torch.Tensor | None = None,
     batch_size: int | None = None,
     max_seqlen_q: int | None = None,
     max_seqlen_k: int | None = None,
@@ -271,6 +324,11 @@ def quant_lightning_indexer_metadata_fallback(
     layout_k: str | None = None,
     mask_mode: int | None = None,
     cmp_ratio: int | None = None,
+    enable_dcp: bool | None = None,
+    cp_world: int | None = None,
+    cp_rank: int | None = None,
+    cp_kv_cache_interleave_size: int | None = None,
+    candidate_block_length: torch.Tensor | None = None,
 ):
     # 处理所有 tensor 都为 None 的情况
     # 调用 NPU 实现
@@ -285,6 +343,7 @@ def quant_lightning_indexer_metadata_fallback(
         seqused_q,
         seqused_k,
         cmp_residual_k,
+        causal_seqlens_kv_global,
         batch_size,
         max_seqlen_q,
         max_seqlen_k,
@@ -292,6 +351,11 @@ def quant_lightning_indexer_metadata_fallback(
         layout_k,
         mask_mode,
         cmp_ratio,
+        enable_dcp,
+        cp_world,
+        cp_rank,
+        cp_kv_cache_interleave_size,
+        candidate_block_length,
     )
 
 
@@ -325,6 +389,7 @@ def quant_lightning_indexer_candidate(
     candidate_mode=3,
     candidate_topk_blocks=2048,
     candidate_block_size=8,
+    candidate_block_length=None,
 ):
     """两级TopK candidate 入口: mode=1(source)/2(consumer)/3(关闭)"""
     op_module = quant_lightning_indexer_op_builder.load()
@@ -353,6 +418,7 @@ def quant_lightning_indexer_candidate(
         candidate_mode,
         candidate_topk_blocks,
         candidate_block_size,
+        candidate_block_length,
     )
 
 
@@ -377,12 +443,17 @@ def quant_lightning_indexer(
     block_table=None,
     output_idx_offset=None,
     metadata=None,
+    causal_seqlens_kv_global=None,
     max_seqlen_q=-1,
     layout_q="BSND",
     layout_k="BSND",
     mask_mode=0,
     cmp_ratio=1,
     return_value=0,
+    enable_dcp=False,
+    cp_world=1,
+    cp_rank=0,
+    cp_kv_cache_interleave_size=1,
 ):
     """
     dispatcher implementation for NPU.zhe
@@ -405,12 +476,17 @@ def quant_lightning_indexer(
         block_table,
         output_idx_offset,
         metadata,
+        causal_seqlens_kv_global,
         max_seqlen_q,
         layout_q,
         layout_k,
         mask_mode,
         cmp_ratio,
         return_value,
+        enable_dcp,
+        cp_world,
+        cp_rank,
+        cp_kv_cache_interleave_size,
     )
 
 
@@ -476,33 +552,116 @@ def _qli_newapi_build_metadata(
     )
 
 
-def _qli_newapi_block_length(q, k, cu_seqlens_q, seqused_k, cmp_residual_k, cmp_ratio, mask_mode):
-    # source 第 4 输出 (T1, N2): 每行实际参与搜索的 key 长度 (mask 规则与 key 长度取小)。
-    # mask_mode=3 (causal): vl(i) = clamp((act_k - S1 + i + 1) // cmp_ratio, 0, K),
-    #   act_k = K * cmp_ratio + residual 为未压缩原始 key 长度, i 为 batch 内行号 (与 golden 同公式);
-    # mask_mode=0 (无 mask): 恒为 K。全程张量化, 不引入主机同步。
-    device = q.device
-    t1 = int(q.shape[0])
-    n2 = int(k.shape[2])
-    s2_t = seqused_k.to(torch.int64)  # (B,) 每 batch key 有效长度
-    res_t = cmp_residual_k.to(torch.int64) if cmp_residual_k is not None else torch.zeros_like(s2_t)
-    act_k_t = s2_t * int(cmp_ratio) + res_t
-    if cu_seqlens_q is not None:  # TND 变长拼接
-        cu_q = cu_seqlens_q.to(torch.int64)
-        row_b = torch.repeat_interleave(torch.arange(s2_t.numel(), device=device), cu_q[1:] - cu_q[:-1])
-        i_in_b = torch.arange(t1, device=device) - cu_q[row_b]  # batch 内行号
-        s1_row = (cu_q[1:] - cu_q[:-1])[row_b]  # 所在 batch 的 query 行数
-    else:  # B=1 BSND
-        row_b = torch.zeros(t1, dtype=torch.int64, device=device)
-        i_in_b = torch.arange(t1, device=device)
-        s1_row = torch.full((t1,), t1, dtype=torch.int64, device=device)
-    if int(mask_mode) == 3:
-        vl = (act_k_t[row_b] - s1_row + i_in_b + 1) // int(cmp_ratio)
-        vl = torch.clamp(vl, min=0)  # 全无效行 (vl < 0) 记 0
-        vl = torch.minimum(vl, s2_t[row_b])  # 与 key 长度取小
+_QSLI_META_SRC = os.path.normpath(
+    os.path.join(
+        os.path.dirname(os.path.abspath(__file__)),
+        "..",
+        "..",
+        "quant_sparse_lightning_indexer_metadata",
+        "torch_extension",
+        "csrc",
+        "quant_sparse_lightning_indexer_metadata.cpp",
+    )
+)
+_qsli_meta_module = None
+
+
+def _load_qsli_meta_module():
+    """懒加载 QSLI metadata 绑定（quant_sparse_lightning_indexer_metadata）。
+    vendor 经 ASCEND_CUSTOM_OPP_PATH 决定链接目标；CANN 根目录取
+    ASCEND_TOOLKIT_HOME（set_env.sh 注入），兜底本机常用路径。"""
+    global _qsli_meta_module
+    if _qsli_meta_module is None:
+        import os as _os
+
+        vendor = _os.environ.get("ASCEND_CUSTOM_OPP_PATH")
+        if not vendor:
+            raise RuntimeError(
+                "ASCEND_CUSTOM_OPP_PATH 未设置，无法加载 QSLI metadata 绑定"
+                "（quant_sparse_lightning_indexer_metadata 在 vendor 包内）"
+            )
+        cann = (
+            _os.environ.get("ASCEND_TOOLKIT_HOME") or _os.environ.get("ASCEND_HOME_PATH") or "/home/tjj/0824/cann-9.2.0"
+        )
+        import torch_npu
+        from torch.utils.cpp_extension import load
+
+        tn = _os.path.dirname(torch_npu.__file__)
+        _qsli_meta_module = load(
+            name="qsli_meta",
+            sources=[_QSLI_META_SRC],
+            extra_include_paths=[
+                f"{vendor}/op_api/include",
+                f"{cann}/include",
+                f"{cann}/include/aclnnop",
+                f"{tn}/include",
+                f"{tn}/include/third_party/hccl/inc",
+                f"{tn}/include/third_party/acl/inc",
+                f"{tn}/include/third_party/op-plugin",
+                f"{cann}/python/site-packages/cann_ops_transformer/common",
+            ],
+            extra_cflags=["-O2", "-std=c++17"],
+            extra_ldflags=[
+                f"-L{vendor}/op_api/lib",
+                "-lcust_opapi",
+                f"-L{cann}/lib64",
+                "-lascendcl",
+                f"-L{tn}/lib",
+                "-ltorch_npu",
+                f"-Wl,-rpath,{vendor}/op_api/lib",
+            ],
+            verbose=False,
+        )
+    return _qsli_meta_module
+
+
+def _qli_newapi_build_qsli_metadata(
+    q,
+    k,
+    layout_q,
+    layout_k,
+    cu_seqlens_q,
+    seqused_k,
+    cmp_residual_k,
+    topk,
+    quant_mode,
+    mask_mode,
+    cmp_ratio,
+    candidate_block_length,
+):
+    """带 candidate_block_length 的 QSLI metadata —— mode=2 + 长度必须用它：
+    旧 metadata 算子的 s2 区间是全量扫块数口径，与候选 tile 口径不兼容
+    （错配是错不是慢；见 2026-11-09/10 的 L=321 与 B5 定位记录）。"""
+    num_heads_q = int(q.shape[1])
+    num_heads_k = int(k.shape[2])
+    head_dim = int(q.shape[2])
+    if layout_q == "TND":
+        batch_size = int(cu_seqlens_q.numel()) - 1
+        max_seqlen_q = int((cu_seqlens_q[1:] - cu_seqlens_q[:-1]).max().item())
     else:
-        vl = s2_t[row_b]
-    return vl.to(torch.int32).unsqueeze(-1).expand(t1, n2).contiguous()
+        batch_size = 1
+        max_seqlen_q = int(q.shape[0])
+    max_seqlen_k = int(seqused_k.max().item())
+    return _load_qsli_meta_module().quant_sparse_lightning_indexer_metadata(
+        num_heads_q,
+        num_heads_k,
+        head_dim,
+        topk,
+        quant_mode,
+        cu_seqlens_q,
+        None,
+        None,
+        seqused_k,
+        cmp_residual_k,
+        candidate_block_length,
+        batch_size,
+        max_seqlen_q,
+        max_seqlen_k,
+        layout_q,
+        layout_k,
+        mask_mode,
+        cmp_ratio,
+    )
 
 
 def quant_lightning_indexer_candidate_source(
@@ -561,7 +720,7 @@ def quant_lightning_indexer_candidate_source(
         metadata = _qli_newapi_build_metadata(
             q, k, layout_q, "PA_BBND", cu_seqlens_q, seqused_q, cmp_residual_k, topk, quant_mode, mask_mode, cmp_ratio
         )
-    idx, vals, cand = quant_lightning_indexer_candidate(
+    idx, vals, cand, block_length = quant_lightning_indexer_candidate(
         q_in,
         k,
         w_in,
@@ -589,7 +748,8 @@ def quant_lightning_indexer_candidate_source(
     )
     if not is_tnd:
         idx, cand = idx.squeeze(0), cand.squeeze(0)  # (1,T1,N2,*) -> (T1,N2,*)
-    block_length = _qli_newapi_block_length(q, k, cu_seqlens_q, seqused_q, cmp_residual_k, cmp_ratio, mask_mode)
+    # block_length 由主算子 mode=1 直接输出（DSL candidate_length 语义：块数 = min(ceil(可见key/8), 2048)），
+    # 不再在 host 侧按 token 数计算
     return idx, vals, cand, block_length
 
 
@@ -619,7 +779,10 @@ def quant_lightning_indexer_candidate_consumer(
     """新规范接口2 (consumer, 内部 candidate_mode=2): 在候选块内选 topk。
 
     candidate_block_indices: (T1, N2, cb) source 侧输出的候选块索引 (块级, 相对块号);
-    candidate_block_length: 本后端忽略 (算子内部已按 mask 规则与 key 长度取小截断, 该输入语义冗余);
+    candidate_block_length: source 侧产出 (T1, 1) int32（mode=1 第 4 个输出），**必传**——
+        kernel 侧唯一闸门 hasCandidateBlockLength_；不传会静默回退 legacy 全量扫候选
+        （结果对但无 tile 驱动收益、无 FD 分片）。必须与 candidate_block_indices
+        同一次 source 调用产出（provenance）。
     candidate_topk_blocks 由 candidate_block_indices.shape[-1] 推导 (新规范无此属性)。
     返回 (sparse_indices, sparse_values); 布局与内部一致: B=1 BSND (B,S1,N2,topk) / TND (T1,N2,topk)。
     """
@@ -647,11 +810,38 @@ def quant_lightning_indexer_candidate_consumer(
         _qli_newapi_check(q.dim() == 3, "q must be 3-D (T1, N1, D).")
         q_in, w_in, q_descale_in = q.unsqueeze(0), w.unsqueeze(0), q_descale.unsqueeze(0)
         cand_in = candidate_block_indices.unsqueeze(0)  # (1, T1, N2, cb)
+    _qli_newapi_check(
+        candidate_block_length is not None,
+        "candidate_block_length is required for the candidate × block_length path "
+        "(mode=2 硬闸门；不传会静默回退 legacy 全量扫，无 tile 驱动收益)。",
+    )
+    _qli_newapi_check(
+        candidate_block_length.dim() == 2 and candidate_block_length.dtype == torch.int32,
+        "candidate_block_length must be int32 (T1, 1)，与候选表同一次 source 调用产出。",
+    )
     if metadata is None:
-        metadata = _qli_newapi_build_metadata(
-            q, k, layout_q, "PA_BBND", cu_seqlens_q, seqused_q, cmp_residual_k, topk, quant_mode, mask_mode, cmp_ratio
+        metadata = _qli_newapi_build_qsli_metadata(
+            q,
+            k,
+            layout_q,
+            "PA_BBND",
+            cu_seqlens_q,
+            seqused_q,
+            cmp_residual_k,
+            topk,
+            quant_mode,
+            mask_mode,
+            cmp_ratio,
+            candidate_block_length,
         )
-    idx, vals, _ = quant_lightning_indexer_candidate(
+    if os.environ.get("QLI_CHECK_QSLI_META", "0") == "1":
+        m = metadata.cpu().flatten().tolist()
+        max_l = int(candidate_block_length.max().item())
+        max_tiles = (max_l + 63) // 64 if max_l > 0 else 0
+        assert all(m[i * 8 + 6] <= max_tiles for i in range(36) if m[i * 8]), (
+            "metadata s2End 超出候选 tile 口径 —— 错配了旧 metadata 算子（应为 QSLI 算子）"
+        )
+    idx, vals, _, _ = quant_lightning_indexer_candidate(
         q_in,
         k,
         w_in,
@@ -676,5 +866,6 @@ def quant_lightning_indexer_candidate_consumer(
         candidate_mode=2,
         candidate_topk_blocks=topk_blocks,
         candidate_block_size=int(candidate_block_size),
+        candidate_block_length=candidate_block_length,
     )
     return idx, vals

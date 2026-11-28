@@ -78,6 +78,11 @@ def register_connector():
         "MultiConnector", "vllm_ascend.distributed.kv_transfer.ascend_multi_connector", "AscendMultiConnector"
     )
 
+    if "HiSparseConnector" in KVConnectorFactory._registry:
+        _register_with_class_name_alias(
+            "HiSparseConnector", "vllm_ascend.hisparse.connector", "HiSparseConnector", override=True
+        )
+
     KVConnectorFactory.register_connector(
         "MooncakeConnectorV1", "vllm_ascend.distributed.kv_transfer.kv_p2p.mooncake_connector", "MooncakeConnector"
     )
@@ -91,13 +96,19 @@ def register_connector():
     KVConnectorFactory.register_connector(
         "MooncakeConnectorV2",
         "vllm_ascend.distributed.kv_transfer.kv_p2p.mooncake.connector",
-        "MooncakeConnector",
+        "MooncakeConnectorV2",
     )
 
     KVConnectorFactory.register_connector(
         "MooncakePullConnector",
         "vllm_ascend.distributed.kv_transfer.kv_p2p.mooncake.connector",
         "MooncakePullConnector",
+    )
+
+    KVConnectorFactory.register_connector(
+        "MooncakePushConnector",
+        "vllm_ascend.distributed.kv_transfer.kv_p2p.mooncake.connector",
+        "MooncakePushConnector",
     )
 
     KVConnectorFactory.register_connector(
@@ -140,26 +151,6 @@ def register_connector():
         "AscendOffloadingConnector",
         override=True,
     )
-
-    # Override the upstream SimpleCPUOffloadConnector with the NPU
-    # adaptation that uses aclrtMemcpyBatchAsync + torch.npu streams.
-    # Only override if the upstream module exists in this vLLM version.
-    # Class-name alias is required from upstream v0.31.0 on: there the
-    # upstream SimpleCPUOffloadConnector overrides
-    # ``get_kv_connector_stats`` and so emits stats whose key (the class
-    # name) must resolve at the factory. On v0.30.0 the alias is a
-    # harmless no-op because that connector emits no stats.
-    try:
-        import vllm.v1.simple_kv_offload  # noqa: F401
-    except ImportError:
-        pass
-    else:
-        _register_with_class_name_alias(
-            "SimpleCPUOffloadConnector",
-            "vllm_ascend.distributed.kv_transfer.kv_pool.kv_offload.simple.simple_cpu_offload_connector",
-            "AscendSimpleCPUOffloadConnector",
-            override=True,
-        )
 
     # No class-name alias here: this connector does not override
     # get_kv_connector_stats, so it never emits stats to reconstruct.

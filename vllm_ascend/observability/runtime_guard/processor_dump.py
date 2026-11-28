@@ -13,7 +13,7 @@
 # See the License for the specific language governing permissions and
 # limitations under the License.
 
-"""KV dump queue / claim / D2H orchestration mixin for RuntimeGuardProcessor."""
+"""KV dump queue / local stash / D2H orchestration mixin for RuntimeGuardProcessor."""
 
 from __future__ import annotations
 
@@ -21,16 +21,13 @@ from collections import defaultdict
 from pathlib import Path
 from typing import Any
 
-from vllm.distributed.parallel_state import get_tp_group
-
 from vllm_ascend.logger import init_logger_ascend
-from vllm_ascend.observability.runtime_config.dist import sync_task_bus
 from vllm_ascend.observability.runtime_guard.dump import (
     REQUEST_FINISHED_AT_DUMP_KEY,
     KvCacheReader,
-    block_ids_for_request,
     kv_dump_wave_dirname,
     parse_dump_arm_wave,
+    request_manager_blocks,
     write_kv_dump_skipped,
 )
 from vllm_ascend.observability.runtime_guard.rank_gate import (
@@ -39,7 +36,7 @@ from vllm_ascend.observability.runtime_guard.rank_gate import (
     should_dump_kv_on_rank,
     should_run_wave_sync_on_rank,
 )
-from vllm_ascend.observability.runtime_guard.state import RequestGuardStore
+from vllm_ascend.observability.runtime_guard.state import MANUAL_TRIGGER_TYPE, RequestGuardStore
 
 logger = init_logger_ascend(__name__)
 
@@ -51,6 +48,7 @@ class RuntimeGuardDumpMixin:
     runner: Any
     runtime_config: Any
     quota: Any
+    wave_tracker: Any
     action_executor: Any
     _deferred_kv_dump_jobs: list[dict[str, Any]]
     _kv_dump_jobs: list[dict[str, Any]]
@@ -130,14 +128,16 @@ class RuntimeGuardDumpMixin:
         self._kv_dump_jobs.clear()
         self._refund_dropped_dump_arms(jobs)
 
-    def end_of_wave_sync(self, *, allow_manual_dump: bool = True) -> None:
-        """End-of-wave: drain async merged bus, then deferred D2H + manual dump.
+    def end_of_wave(self, *, has_scheduled_tokens: bool = True) -> None:
+        """End-of-wave: drain async merged bus (if needed), then deferred D2H.
 
-        Async last-PP TP path: wave-head only submitted the due broadcast;
-        collectives finish here (ideally already done during forward). Sync /
-        file paths have nothing inflight — drain is a no-op. Non-last PP
-        returns immediately (same gate as ``sync_for_step``).
-        ``allow_manual_dump``: False on dummy / no-sample (do not burn manual_dump).
+        Async last-PP TP path: wave-head submitted the due broadcast to overlap
+        forward. Sampled waves usually already drained in
+        :meth:`RuntimeGuardProcessor.run_sample_phase` (before connector
+        ``post_forward`` / SFA TP Gloo). This call is then a no-op for the bus
+        and only runs deferred D2H + manual dump. No-sample / early-return
+        waves still drain here. Non-last PP returns immediately.
+        ``has_scheduled_tokens``: False on dummy / no-sample (do not burn manual_dump).
         """
         if not should_run_wave_sync_on_rank():
             return
@@ -155,57 +155,23 @@ class RuntimeGuardDumpMixin:
         self._deferred_kv_dump_jobs.clear()
         if deferred and should_dump_kv_on_rank():
             self._run_kv_dumps(deferred)
-        self._maybe_fire_manual_local(allow_manual_dump=allow_manual_dump)
+        self._maybe_fire_manual_local(has_scheduled_tokens=has_scheduled_tokens)
 
-    def _claim_dump_jobs_to_deferred_via_tp(self) -> None:
-        """File/PP>1: move pending auto jobs through TP bus into deferred D2H.
+    def _stash_local_dump_jobs_to_deferred(self) -> None:
+        """Move local ``_kv_dump_jobs`` into deferred D2H (no TP collective).
 
-        When dump is inactive, all dump ranks observe the same
-        ``dump_enabled()`` gate and skip the TP due-vector all_reduce (stray
-        local jobs are dropped — refunding their arms: quota was consumed at
-        arm time). While dump is active, an empty local queue on non-TP0 must
-        still join the bus — only TP0 enqueues — so an empty due-AR remains
-        required for lockstep.
+        last-PP × TP>1 delivers jobs on the merged due bus dump lane. This
+        path is only for ``tp_size<=1`` / missing TP group wave-heads: take
+        the local queue and stash it for ``end_of_wave``. When dump is
+        inactive, stray local jobs are dropped with a per-arm refund.
         """
-        if not should_dump_kv_on_rank():
-            self._drop_pending_dump_jobs()
-            return
-        # Shared config gate (identical on every rank after sync): skip TP bus.
-        if not self.runtime_config.dump_enabled():
+        if not should_dump_kv_on_rank() or not self.runtime_config.dump_enabled():
             self._drop_pending_dump_jobs()
             return
         payload = list(self._kv_dump_jobs)
         self._kv_dump_jobs.clear()
-        try:
-            tp_group = get_tp_group()
-        except Exception:
-            if payload:
-                self._deferred_kv_dump_jobs.extend(payload)
-            return
-        tp_size = int(getattr(tp_group, "world_size", 1) or 1)
-        if tp_size <= 1:
-            if payload:
-                self._deferred_kv_dump_jobs.extend(payload)
-            return
-        try:
-            rank = int(tp_group.rank_in_group)
-        except Exception:
-            rank = 0
-
-        try:
-            jobs = sync_task_bus(
-                tp_group,
-                due_local=bool(rank == 0 and payload),
-                payload=payload if rank == 0 else None,
-                src=0,
-            )
-        except Exception:
-            # Bus failure: payload dropped with no D2H — refund before the
-            # caller's soft-fail swallows the exception.
-            self._refund_dropped_dump_arms(payload)
-            raise
-        if jobs:
-            self._deferred_kv_dump_jobs.extend(list(jobs))
+        if payload:
+            self._deferred_kv_dump_jobs.extend(payload)
 
     def _run_kv_dumps(self, jobs: list[dict[str, Any]]) -> None:
         reader = self.action_executor._kv_reader
@@ -263,12 +229,11 @@ class RuntimeGuardDumpMixin:
                 # Armed jobs always attempt D2H (①). Prefer frozen arm-time
                 # block_ids; fall back to live tables. Stamp finished caveat.
                 finished_at = bool(job.get(REQUEST_FINISHED_AT_DUMP_KEY)) or store.is_request_finished(req_id)
-                armed_bids = job.get("block_ids")
-                if isinstance(armed_bids, list) and armed_bids:
-                    block_ids = [int(x) for x in armed_bids]
-                else:
-                    block_ids = list(block_ids_for_request(self.runner, req_id, None))
-                if not block_ids:
+                rows = job.get("manager_block_ids_by_group")
+                # Manual prefill can arm before pages exist. Older jobs only carry group 0.
+                if rows is None or (incident_type == MANUAL_TRIGGER_TYPE and not any(rows)):
+                    rows = request_manager_blocks(self.runner, req_id, group0_pages=job.get("block_ids"))
+                if not any(rows):
                     logger.warning(
                         "[runtime_guard dump_kv] skip empty local block_ids req_id=%s rank=%s",
                         req_id,
@@ -281,12 +246,13 @@ class RuntimeGuardDumpMixin:
                 try:
                     for snap in reader.iter_request_snapshots(
                         req_id=req_id,
-                        block_ids=block_ids,
+                        manager_block_ids_by_group=rows,
                         out_dir=out_dir,
                     ):
                         produced += 1
                         # Stamp incident meta for async save failure markers.
                         snap.payload.setdefault("incident_type", incident_type)
+                        snap.payload["dump_copy_wave"] = self.wave_tracker.current_wave()
                         if wave_i is not None:
                             snap.payload.setdefault("dump_arm_wave", wave_i)
                         snap.payload.setdefault("dump_root", str(dump_root))

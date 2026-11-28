@@ -12,7 +12,8 @@ import torch_npu  # noqa: F401
 from vllm.config.compilation import CUDAGraphMode
 
 from tests.ut.ops.test_gdn_attn_builder import BatchSpec, _make_builder, create_common_attn_metadata
-from vllm_ascend.ops.gdn_attn_builder import AscendGDNHostMetadataBuilder
+from vllm_ascend.attention import gdn_attn_builder as builder_module
+from vllm_ascend.attention.gdn_attn_builder import AscendGDNHostMetadataBuilder
 from vllm_ascend.ops.triton.mamba.gdn_prepare import _prepare_gdn_kernel
 
 
@@ -27,17 +28,49 @@ def _assert_metadata_equal(actual, expected):
         assert actual == expected
 
 
+@pytest.mark.parametrize("mixed", [False, True])
+@pytest.mark.parametrize("graph_mode", [CUDAGraphMode.NONE, CUDAGraphMode.FULL_DECODE_ONLY])
+def test_adaptive_device_boundaries_match_generic_metadata(mixed, graph_mode):
+    device = torch.device("npu:0")
+    builder = _make_builder(
+        device=device,
+        num_heads=32,
+        num_speculative_tokens=3,
+        enable_adaptive_verification=True,
+        builder_cls=AscendGDNHostMetadataBuilder,
+        mamba_cache_mode="align",
+        num_speculative_blocks=3,
+        cudagraph_mode=graph_mode,
+    )
+    builder.compilation_config.static_forward_context = {"layer0": SimpleNamespace(use_contiguous_conv_indices=True)}
+    host_queries = [2, 2, 9] if mixed else [2, 2]
+    common = create_common_attn_metadata(BatchSpec([64, 64, 9] if mixed else [64, 64], host_queries), 16, device)
+    common.is_prefilling = torch.tensor([False, False, True] if mixed else [False, False])
+    common.query_start_loc = torch.tensor([0, 1, 4, 13] if mixed else [0, 1, 4], dtype=torch.int32, device=device)
+    common.block_table_tensor = torch.arange(len(host_queries) * 16, dtype=torch.int32, device=device).view(-1, 16) + 1
+    accepted = torch.tensor([4, 3, 1] if mixed else [4, 3], dtype=torch.int32, device=device)
+    drafts = torch.tensor([3, 3, -1] if mixed else [3, 3], dtype=torch.int32)
+    with patch.object(builder, "_build_fused_metadata", return_value=None):
+        expected = deepcopy(builder.build(0, common, accepted, drafts, num_actual_reqs=len(host_queries)))
+    with patch.object(builder_module, "prepare_gdn", wraps=builder_module.prepare_gdn) as prepare:
+        actual = builder.build(0, common, accepted, drafts, num_actual_reqs=len(host_queries))
+    _assert_metadata_equal(actual, expected)
+    if mixed:
+        prepare.assert_not_called()
+    else:
+        prepare.assert_called_once()
+    assert actual.spec_query_start_loc[:3].cpu().tolist() == [0, 1, 4]
+    assert actual.num_accepted_tokens[:2].cpu().tolist() == [4, 3]
+    assert actual.spec_decode_metadata.actual_seq_lengths is None
+
+
 @pytest.mark.parametrize(
     "query_len,num_spec,projection_size",
     [
-        (1, 0, 0),
-        (1, 0, 11),
-        (1, 3, 11),
-        (2, 1, 11),
-        (4, 3, 11),
-        (5, 4, 11),
-        ([1, 2, 4, 3], 3, 11),  # Different draft lengths, including zero drafts.
-        ([1, 1, 17, 257], 0, 11),  # Ordinary decode + fresh/chunked prefill.
+        (1, 0, 0),  # Ordinary decode without speculation or a shared convolution output.
+        (1, 3, 11),  # Ordinary decode with speculation configured but no draft tokens.
+        (5, 4, 11),  # Pure speculative decode at the longest original query.
+        ([1, 1, 17, 257], 0, 11),  # Ordinary decode + fresh/chunked prefill without speculation.
         ([4, 257, 2, 1], 3, 11),  # Speculative decode + prefill + ordinary decode.
     ],
 )

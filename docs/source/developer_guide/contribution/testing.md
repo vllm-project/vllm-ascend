@@ -6,6 +6,8 @@ This document explains how to write unit tests, E2E tests, and nightly tests to 
 
 The fastest way to set up a test environment is to use the main branch's container image:
 
+The container needs [Ascend Docker Runtime](../../getting_started/installation.md#installation-ascend-docker-runtime) 26.3.0 or later on the host; it selects the NPUs with `ASCEND_VISIBLE_DEVICES`. If the installed release is older, mount the two paths named in that section, or upgrade.
+
 === "Local (CPU)"
 
     You can run the unit tests on CPUs with the following steps:
@@ -33,7 +35,7 @@ The fastest way to set up a test environment is to use the main branch's contain
     pip config set global.index-url https://mirrors.huaweicloud.com/repository/pypi/simple/
 
     # For TorchNPU dev version or x86 machine
-    export PIP_EXTRA_INDEX_URL="https://download.pytorch.org/whl/cpu/ https://mirrors.huaweicloud.com/ascend/repos/pypi"
+    export PIP_EXTRA_INDEX_URL="https://download.pytorch.org/whl/cpu/ https://repo.huaweicloud.com/ascend/repos/pypi"
 
     # src path
     export SRC_WORKSPACE=/vllm-workspace
@@ -65,22 +67,14 @@ The fastest way to set up a test environment is to use the main branch's contain
 
     ```bash
 
-    # Update DEVICE according to your device (/dev/davinci[0-7])
-    export DEVICE=/dev/davinci0
+    # Update ASCEND_VISIBLE_DEVICES according to the NPU you want (/dev/davinci[0-7])
+    export ASCEND_VISIBLE_DEVICES=0
     # A2 Ubuntu image; use nightly-main-a3 for A3 and add -openeuler for openEuler.
     export IMAGE=quay.io/ascend/vllm-ascend:nightly-main
     docker run --rm \
         --name vllm-ascend \
         --shm-size=1g \
-        --device $DEVICE \
-        --device /dev/davinci_manager \
-        --device /dev/devmm_svm \
-        --device /dev/hisi_hdc \
-        -v /usr/local/dcmi:/usr/local/dcmi \
-        -v /usr/local/bin/npu-smi:/usr/local/bin/npu-smi \
-        -v /usr/local/Ascend/driver/lib64/:/usr/local/Ascend/driver/lib64/ \
-        -v /usr/local/Ascend/driver/version.info:/usr/local/Ascend/driver/version.info \
-        -v /etc/ascend_install.info:/etc/ascend_install.info \
+        -e ASCEND_VISIBLE_DEVICES \
         -v /root/.cache:/root/.cache \
         -p 8000:8000 \
         -it $IMAGE bash
@@ -99,7 +93,7 @@ The fastest way to set up a test environment is to use the main branch's contain
     pip install -r requirements-dev.txt
     ```
 
-=== "Multi-cards"
+=== "Multi-card"
 
     ```bash
     # A2 Ubuntu image; use nightly-main-a3 for A3 and add -openeuler for openEuler.
@@ -107,18 +101,7 @@ The fastest way to set up a test environment is to use the main branch's contain
     docker run --rm \
         --name vllm-ascend \
         --shm-size=1g \
-        --device /dev/davinci0 \
-        --device /dev/davinci1 \
-        --device /dev/davinci2 \
-        --device /dev/davinci3 \
-        --device /dev/davinci_manager \
-        --device /dev/devmm_svm \
-        --device /dev/hisi_hdc \
-        -v /usr/local/dcmi:/usr/local/dcmi \
-        -v /usr/local/bin/npu-smi:/usr/local/bin/npu-smi \
-        -v /usr/local/Ascend/driver/lib64/:/usr/local/Ascend/driver/lib64/ \
-        -v /usr/local/Ascend/driver/version.info:/usr/local/Ascend/driver/version.info \
-        -v /etc/ascend_install.info:/etc/ascend_install.info \
+        -e ASCEND_VISIBLE_DEVICES=0-3 \
         -v /root/.cache:/root/.cache \
         -p 8000:8000 \
         -it $IMAGE bash
@@ -216,7 +199,7 @@ You can run tests with `pytest` as well. Typical examples:
     VLLM_USE_MODELSCOPE=true pytest -sv tests/e2e/pull_request/two_card/test_qwen3_moe_eplb.py
 
     # Run a certain case in test script
-    VLLM_USE_MODELSCOPE=true pytest -sv tests/e2e/pull_request/two_card/test_qwen3_moe_eplb.py::test_qwen3_moe_w8a8_distributed_tp2_ep_dynamic_eplb
+    VLLM_USE_MODELSCOPE=true pytest -sv tests/e2e/pull_request/two_card/test_qwen3_moe_eplb.py::test_qwen3_moe_w8a8_distributed_tp2_ep_eplb
     ```
 
 This will reproduce the E2E test behavior.
@@ -248,7 +231,7 @@ You can run tests with `pytest` as well. Typical examples:
 For running nightly single-node model test cases locally, refer to the following example.
 
 ```bash
-export CONFIG_BASE_PATH=tests/e2e/cases/models/configs/Qwen
+export CONFIG_BASE_PATH=tests/SIT/cases/models/configs/Qwen
 export CONFIG_YAML_PATH=Qwen3-32B.yaml
 VLLM_USE_MODELSCOPE=true pytest -sv tests/e2e/common/single_node/test_single_node.py
 ```
@@ -279,14 +262,14 @@ for the identity and failure contracts.
 
 ### PR selective testing (CI)
 
-The PR CI workflow ([pr_test.yaml](https://github.com/vllm-project/vllm-ascend/blob/main/.github/workflows/pr_test.yaml)) does not run the full suite on every PR. It selects tests with a coverage/AST based precision-testing pipeline and routes them to NPU runners. Tests run when the PR has the `ready-precise` label (recommended subset), the `ready-all` label (full suite), or the `main2main` label (full suite executed against both the verified vLLM main commit and the matched vLLM release tag).
+The PR CI workflow ([pr_test.yaml](https://github.com/vllm-project/vllm-ascend/blob/main/.github/workflows/pr_test.yaml)) does not run the full suite on every PR. It selects tests with a coverage/AST based precision-testing pipeline and routes them to NPU runners. Tests run when the PR has the `ready-precise` label (recommended subset) or the `main2main` label (full suite executed against both the verified vLLM main commit and the matched vLLM release tag). PRs targeting a release branch (`releases/v*`) are tested against the matched vLLM release tag only.
 
 How tests are selected:
 
 1. `test_selector.py` builds a mapping of test cases to the source lines they cover from historical CI coverage data, then recommends the tests affected by the PR's changed lines (line → function → file granularity fallback).
 2. `select_tests.py` routes each recommended test path to a runner by directory convention (`tests/ut/<module>/` → CPU, `tests/ut/<module>/a2/` → A2, `tests/e2e/pull_request/{one,two,four,eight}_card/` → A3, `_310p` → 310P), balances the load via estimated times, and emits the CI matrix.
 
-Adding a new test requires no configuration change: place the UT file under the
+Adding a new test requires no configuration change: place the unit test file under the
 matching `tests/ut/<module>[/<npu>]` directory or the E2E file under the matching
 `tests/e2e/pull_request/<card>` directory, and CI picks it up automatically from
 the test tree. Routing metadata (runner mapping, partitions) lives in
@@ -300,7 +283,7 @@ You can preview locally which runners a set of tests would be routed to:
 python3 .github/workflows/scripts/select_tests.py \
   --explicit-e2e-tests tests/e2e/pull_request/one_card/model_runner_v2/test_qwen3_0_6B_basic.py
 
-# Full suite routing (mirrors the ready-all mode)
+# Full suite routing (mirrors the main2main full-suite mode)
 python3 .github/workflows/scripts/select_tests.py --all-tests
 ```
 
@@ -313,7 +296,7 @@ The CI resource is limited, and you might need to reduce the number of layers of
 
 1. Fork the original model repo in modelscope. All the files in the repo except for weights are required.
 2. Set `num_hidden_layers` to the expected number of layers, e.g., `{"num_hidden_layers": 2,}`
-3. Copy the following python script as `generate_random_weight.py`. Set the relevant parameters `MODEL_LOCAL_PATH`, `DIST_DTYPE` and `DIST_MODEL_PATH` as needed:
+3. Copy the following Python script as `generate_random_weight.py`. Set the relevant parameters `MODEL_LOCAL_PATH`, `DIST_DTYPE` and `DIST_MODEL_PATH` as needed:
 
     ```python
     import torch
@@ -331,7 +314,7 @@ The CI resource is limited, and you might need to reduce the number of layers of
     model.save_pretrained(DIST_MODEL_PATH)
     ```
 
-### CI workflow triggers and the `schedule_` prefix
+### CI workflow triggers and the schedule_ prefix
 
 Workflow files under `.github/workflows/` whose names start with `schedule_`
 belong to the recurring CI family (nightly, weekly, doc, coverage, and similar
@@ -375,7 +358,7 @@ Workflows without a cron trigger, dispatched externally via `workflow_dispatch`:
 
 ### Run doctest
 
-Doctests validate fixed, marked Quick Start and Installation code blocks, not every code block in the documentation. Quick Start covers A2 and 310P (Atlas 300I DUO), running offline and online examples sequentially. Installation covers `pip`, `uv`, and `source` on A2, followed by offline inference verification. Both support Ubuntu and openEuler.
+Doctests validate fixed, marked Quick Start and Installation code blocks, not every code block in the documentation. Quick Start covers A2 and 310P (Atlas 300I Duo), running offline and online examples sequentially. Installation covers `pip`, `uv`, and `source` on A2, followed by offline inference verification. Both support Ubuntu and openEuler.
 
 Run one of these commands from the repository root in a prepared NPU environment:
 
@@ -424,8 +407,69 @@ and uploaded as CI artifacts. Use `--report-dir` to change the local output dire
 
 Use this section when preparing or reviewing a pull request to decide which
 test coverage and validation evidence the change needs. See the preceding
-sections for environment setup and commands, and [E2E CI tests](e2e_ci_test.md)
+sections for environment setup and commands, and [E2E CI Test](./e2e_ci_test.md)
 for PR CI.
+
+### CODEOWNERS approval gate
+
+Alongside `DCO` and the CI gate, every changed file must be approved by at
+least one of its [CODEOWNERS](https://github.com/vllm-project/vllm-ascend/blob/main/.github/CODEOWNERS)
+owners before the PR can merge. Key points:
+
+- Any owner listed in `.github/CODEOWNERS` counts as an approver, regardless of
+  their repository role — owners without org membership are intentional.
+- A pending "changes requested" review from any owner of a changed file blocks
+  the merge even if another owner has approved. Address the feedback, then ask
+  the owner to re-review (they can approve, or withdraw their objection by
+  requesting changes again — dismissing does not revoke a previous approval).
+- Approvals survive pushes: the repository auto-dismisses reviews on every
+  push, but the gate ignores dismissals, so owners do not need to re-approve
+  after each commit. An owner's latest approve / request-changes review is
+  what counts.
+- Files whose only owner is the PR author do not need an additional approval
+  (a sole owner cannot self-approve). The failure comment lists such files so
+  the module can gain a co-owner over time.
+- Owners are cumulative down the directory tree: when parent and child
+  directories have separate owners (for example `/vllm_ascend/model_loader`
+  and `/vllm_ascend/model_loader/rfork/`), an rfork change needs one approval
+  from either owner, and a "changes requested" from either owner blocks it.
+  A more specific rule adds owners for the subtree; it does not transfer
+  ownership away from the parent owner.
+- The PR author does not count as an approver even when listed as an owner.
+- Submitting or dismissing a review re-evaluates the gate without re-running
+  the heavy CI jobs; previously green CI results on the same commit are kept.
+- The failure comment is posted by `.github/workflows/bot_ci_gate_comment.yaml`
+  (a `workflow_run` bot running in the base repository context), so it works
+  for fork PRs too - the gate job itself only has a read-only token on fork
+  PRs and never posts comments directly.
+- The gate also runs a CODEOWNERS health check. Entries pointing at a
+  deleted/renamed path fail the gate for everyone - if your change removes or
+  renames files, update `.github/CODEOWNERS` in the same PR. Files without an
+  owner yet are reported as non-blocking warnings (unclaimed modules are
+  handled by maintainers at their own pace).
+- Paths marked `SKIP(owner)` in the file (for example, `tests/ut/`) are
+  deliberately unowned and do not require an owner approval.
+- A maintainer with **write** permission or above can waive files from the
+  approval gate with a `/ignore-owner [path ...]` PR comment. The argument
+  names the *files* to waive by path, directory, or glob (CODEOWNERS pattern
+  semantics) — not an owner's `@handle`. A bare `/ignore-owner` waives the
+  whole PR, and `/ignore-owner-clear` revokes. The newest valid command
+  replaces earlier ones (a command from a user without write+ is ignored, not
+  counted), and the waiver persists for the lifetime of the PR across pushes.
+  The gate re-validates the commenter's permission on every run, and each
+  waived file is reported as a warning in the job log and in the gate comment,
+  so waivers stay visible. The CODEOWNERS health check is not waivable. This
+  is an escape hatch for cases like small docs fixes a maintainer can judge
+  directly — use it sparingly; a waived file gets no owner review at all.
+- If an owner is unresponsive, contact the module's other owners or a
+  maintainer; maintainers can merge with an admin override in exceptional
+  cases.
+
+The check logic lives in
+`.github/workflows/scripts/codeowner_gate.py` (colocated unit tests in
+`.github/workflows/scripts/test_codeowner_gate.py`; run them manually with
+`pytest .github/workflows/scripts/test_codeowner_gate.py` - the cpu-ut CI
+partition only covers `tests/ut`).
 
 ### Choose coverage for the change
 

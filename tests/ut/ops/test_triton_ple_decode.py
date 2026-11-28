@@ -44,9 +44,9 @@ def test_decode_launch_contract(
     inputs = torch.randn(tokens, channels, dtype=dtype)
     residual = torch.randn_like(inputs)
     if window_contiguous:
-        state = torch.randn(tokens + 1, channels, 9, dtype=dtype)
+        state = torch.randn(tokens + 1, channels, 9, dtype=dtype).transpose(1, 2)
     else:
-        state = torch.randn(tokens + 1, 9, channels, dtype=dtype).transpose(1, 2)
+        state = torch.randn(tokens + 1, 9, channels, dtype=dtype)
     weights = torch.randn(channels, kernel_size, dtype=dtype)
     indices = torch.tensor([[1, 0], [2, 0], [3, 0]], dtype=index_dtype)[:, 0]
     outer = torch.randn_like(inputs) if outer_enabled else None
@@ -83,7 +83,7 @@ def test_decode_launch_contract(
     assert capture.args[7] is (token_map if map_enabled else indices)
     assert capture.args[8] is map_enabled
     assert capture.args[9] == 2  # Non-contiguous state-index vector.
-    assert capture.args[10:13] == (state.stride(0), state.stride(2), state.stride(1))
+    assert capture.args[10:13] == (state.stride(0), state.stride(1), state.stride(2))
     assert capture.kwargs["HAS_INIT"] is init_enabled
     assert capture.kwargs["FUSE_RESIDUAL"] is outer_enabled
     assert capture.kwargs["DILATION"] == dilation
@@ -102,7 +102,7 @@ def test_decode_launch_contract(
 @pytest.mark.parametrize("bad_channels,bad_window", [(True, False), (False, True)])
 def test_decode_rejects_invalid_state_shape(bad_channels, bad_window):
     channels = 7
-    state = torch.empty(2, channels - int(bad_channels), 8 if bad_window else 9)
+    state = torch.empty(2, 8 if bad_window else 9, channels - int(bad_channels))
     with pytest.raises(ValueError, match="conv_state must have shape"):
         triton_ple.ple_conv_decode(
             torch.empty(1, channels),

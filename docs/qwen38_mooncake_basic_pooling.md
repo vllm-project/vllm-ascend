@@ -8,7 +8,7 @@ PLE and hidden state use private banks. Views may have a physical block stride
 larger than their payload. Transfers must preserve that stride and leave other
 owners, unused blocks and padding unchanged.
 
-Use Model Runner V2 with `AscendStoreConnector`. The adaptation supports bulk
+Use `AscendStoreConnector`. The adaptation supports bulk
 transfers and the existing Mooncake block-key/Memcache GVA layerwise paths.
 Other connectors retain their existing allocation path. Layerwise QSA opens
 its transfer window after both indexer and main-KV updates; PLE waits before
@@ -20,18 +20,14 @@ a restorable common boundary. With transfer granularity 1536, a 9216-token
 prompt queries at 7680, while 9217 can query at 9216. Layouts whose necessary
 state is all externally cacheable retain the existing lookup behavior.
 
-MRV2 with MTP defers save finalization until after draft generation.
+In addition, MTP defers save finalization until after draft generation.
 `MambaCopyKVConnector.finalize_step()` forwards to the wrapped connector so
 that deferred saves complete and metadata is cleared.
 
 ## Configuration
 
 Install matching vLLM/vLLM-Ascend builds, native extensions and backend runtime.
-Enable V2 and configure the existing connector:
-
-```bash
-export VLLM_USE_V2_MODEL_RUNNER=1
-```
+Configure the existing connector:
 
 ```json
 {
@@ -86,7 +82,7 @@ source/destination bytes and whole-backing sentinels. Scheduler tests cover
 restoration boundaries; model and wrapper tests cover load/update/save order,
 shared-layer deduplication, per-owner state rows and deferred MTP finalization.
 
-CPU mocks do not establish native cross-process transfer correctness or
+Core mocks do not establish native cross-process transfer correctness or
 model-level restoration. Those checks require deployment-specific hardware
 validation; this PR does not add a standalone NPU E2E test.
 
@@ -96,5 +92,5 @@ Earlier model results used a previous dependency/layout stack. They do not
 validate the current packed-page layout. Report hardware and GPQA results
 against the exact tested source revision and runtime in the PR. Distinguish
 external restoration from recomputation using zero local hits, actual backend
-reads and matching output. For SSD, require SSD hits and rewarm bytes after
-eviction; configuration or SSD writes alone do not prove a readback.
+reads and matching output. For NVMe, require NVMe hits and rewarm bytes after
+eviction; configuration or NVMe writes alone do not prove a readback.

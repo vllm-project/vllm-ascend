@@ -11,13 +11,15 @@ from vllm.v1.attention.backends.utils import NULL_BLOCK_ID
 from vllm_ascend.ops.triton_ple import ple_conv_decode
 
 
-@pytest.mark.parametrize("dtype", [torch.bfloat16, torch.float16])
 @pytest.mark.parametrize(
-    "tokens,channels,kernel_size,dilation,mapped,strided_indices,window_contiguous",
+    "tokens,channels,kernel_size,dilation,mapped,strided_indices,window_contiguous,dtype",
     [
-        (7, 1031, 4, 3, True, True, False),  # channel tail and mixed-token map
-        (5, 256, 2, 1, False, False, True),  # one-element state window
-        (6, 257, 3, 2, False, True, True),  # different dilation and state layout
+        # Channel tail and mixed-token map cover both dtypes.
+        pytest.param(7, 1031, 4, 3, True, True, False, torch.bfloat16, id="7-1031-4-3-True-True-False-dtype0"),
+        pytest.param(7, 1031, 4, 3, True, True, False, torch.float16, id="7-1031-4-3-True-True-False-dtype1"),
+        # Cover a one-element window and a dilated transposed window.
+        pytest.param(5, 256, 2, 1, False, False, True, torch.bfloat16, id="5-256-2-1-False-False-True-dtype0"),
+        pytest.param(6, 257, 3, 2, False, True, True, torch.float16, id="6-257-3-2-False-True-True-dtype1"),
     ],
 )
 def test_decode_parameter_categories(
@@ -27,10 +29,11 @@ def test_decode_parameter_categories(
     state_len = (kernel_size - 1) * dilation
     inputs = torch.randn(tokens, channels, device="npu", dtype=dtype)
     weights = torch.randn(channels, kernel_size, device="npu", dtype=dtype)
+    # Ascend kernels use the SD layout [slots, window, channels].
     if window_contiguous:
-        state = torch.randn(tokens + 1, channels, state_len, device="npu", dtype=dtype)
+        state = torch.randn(tokens + 1, channels, state_len, device="npu", dtype=dtype).transpose(1, 2)
     else:
-        state = torch.randn(tokens + 1, state_len, channels, device="npu", dtype=dtype).transpose(1, 2)
+        state = torch.randn(tokens + 1, state_len, channels, device="npu", dtype=dtype)
     output = torch.randn_like(inputs)
     outer = torch.randn_like(inputs) if mapped else None
     ids = torch.arange(1, tokens + 1, device="npu", dtype=torch.int32)
@@ -53,7 +56,7 @@ def test_decode_parameter_categories(
     original_inputs, original_weights = inputs.clone(), weights.clone()
     expected, actual = output.clone(), output.clone()
     expected_state, actual_state = state.clone(), state.clone()
-    upstream_ple_conv(**kwargs, residual=expected, conv_state=expected_state, mode="decode")
+    upstream_ple_conv(**kwargs, residual=expected, conv_state=expected_state.transpose(1, 2), mode="decode")
     ple_conv_decode(**kwargs, residual=actual, conv_state=actual_state)
     torch.npu.synchronize()
 

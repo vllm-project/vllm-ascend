@@ -20,7 +20,7 @@ Unified Cache Manager (UCM) provides an external KV-cache storage layer designed
 
 UCM adopts a **centralized architecture** for KV cache management, constructing a three-tier cache hierarchy:
 
-```bash
+```text
 HBM (GPU Memory) → DRAM (Local Cache) → Storage Backend (SSD/NFS/3FS)
 ```
 
@@ -43,8 +43,8 @@ UCM currently provides the following capabilities:
 
 | Capability | Description |
 |------------|-------------|
-| **Prefix Cache** | Persistent KV cache storage with support for NFS Store, 3FS Store, and Pipeline Store |
-| **Sparse Attention** | Training-free sparse attention methods including GSA (Graph-based Sparse Attention) and CacheBlend for long-context acceleration |
+| **Prefix Cache** | Persistent KV cache storage with support for NFS Store, 3FS Store, and PipelineStore |
+| **Sparse Attention** | Training-free sparse attention methods including GSA (Geometry Sparse Attention) and CacheBlend for long-context acceleration |
 | **PD Disaggregation** | Prefill-Decode disaggregation with multiple modes: P2P, Centralized PD, NPGD, and xPYD |
 | **ReRoPE** | Support for Rotary Position Embedding extensions |
 
@@ -52,7 +52,7 @@ UCM currently provides the following capabilities:
 
 - CUDA (NVIDIA H100, H20, L40, L20)
 - CANN (Atlas A2 inference products, Atlas A3 inference products)
-- MUSA (Mthreads S5000)
+- MUSA (Moore Threads S5000)
 - MACA (MetaX C500)
 
 **Supported Frameworks:**
@@ -68,13 +68,13 @@ UCM currently provides the following capabilities:
 ### Prerequisites
 
 - OS: Linux
-- Hardware with Ascend NPUs. It is typically the Atlas 800 A2 series.
+- Hardware with Ascend NPUs. It is typically the Atlas 800 A2 or Atlas 800T A2 series.
 - vLLM: main branch
-- vLLM Ascend: main branch
+- vLLM-Ascend: main branch
 
 ### UCM Installation
 
-**Please refer to the [official UCM installation guide for Ascend NPU](https://ucm.readthedocs.io/en/latest/user-guide/quick_start/#vllm-ascend)**
+**Please refer to the [official UCM installation guide for Ascend NPU](https://ucm.readthedocs.io/en/latest/user-guide/quick_start/#vllm-ascend).**
 
 ### PD Disaggregation Scenario
 
@@ -128,7 +128,7 @@ vllm serve /models/QwQ-32B \
     --data-parallel-size 1 \
     --tensor-parallel-size 4 \
     --seed 1024 \
-    --max-model-len 17000 \
+    --max-model-len 40960 \
     --max-num-batched-tokens 8000 \
     --max-num-seqs 20 \
     --trust-remote-code \
@@ -155,7 +155,7 @@ vllm serve /models/QwQ-32B \
     --data-parallel-size 1 \
     --tensor-parallel-size 4 \
     --seed 1024 \
-    --max-model-len 17000 \
+    --max-model-len 40960 \
     --max-num-batched-tokens 8000 \
     --max-num-seqs 20 \
     --trust-remote-code \
@@ -264,7 +264,7 @@ vllm serve /models/QwQ-32B \
     --data-parallel-size 1 \
     --tensor-parallel-size 4 \
     --seed 1024 \
-    --max-model-len 17000 \
+    --max-model-len 40960 \
     --max-num-batched-tokens 8000 \
     --max-num-seqs 20 \
     --trust-remote-code \
@@ -311,7 +311,7 @@ vllm serve /models/QwQ-32B \
     --data-parallel-size 1 \
     --tensor-parallel-size 4 \
     --seed 1024 \
-    --max-model-len 17000 \
+    --max-model-len 40960 \
     --max-num-batched-tokens 8000 \
     --trust-remote-code \
     --max-num-seqs 4 \
@@ -402,7 +402,7 @@ vllm serve /models/QwQ-32B \
     --data-parallel-size 2 \
     --tensor-parallel-size 4 \
     --seed 1024 \
-    --max-model-len 17000 \
+    --max-model-len 40960 \
     --max-num-batched-tokens 8000 \
     --max-num-seqs 20 \
     --trust-remote-code \
@@ -452,7 +452,7 @@ vllm bench serve \
 
 After the second run, a significant reduction in TTFT should be observed due to UCM prefix cache hits. Review the vLLM logs for cache hit information:
 
-```bash
+```output
 INFO ucm_connector.py:xxx: request_id: xxx, total_blocks_num: xxx, hit hbm: 0, hit external: xxx
 ```
 
@@ -560,7 +560,7 @@ vllm serve /models/GLM-5.1-w4a8 \
     --tensor-parallel-size $tp_size \
     --enable-expert-parallel \
     --seed 1024 \
-    --max-model-len 17000 \
+    --max-model-len 202752 \
     --max-num-batched-tokens 8000 \
     --trust-remote-code \
     --max-num-seqs 4 \
@@ -680,7 +680,7 @@ vllm serve /models/GLM-5.1-w4a8 \
     --tensor-parallel-size $tp_size \
     --enable-expert-parallel \
     --seed 1024 \
-    --max-model-len 17000 \
+    --max-model-len 202752 \
     --max-num-batched-tokens 8000 \
     --trust-remote-code \
     --max-num-seqs 4 \
@@ -771,7 +771,7 @@ Before each test, KV cache must be pre-seeded with a prefix ratio of **0.8**:
 
 Example for 32k input scenario:
 
-- Pre-seed: 128 requests with 25600 (32k × 0.8) input tokens + 1 output token
+- Pre-seed: 128 requests with 25600 (32000 × 0.8) input tokens + 1 output token
 - Test: 128 requests with 32000 input tokens + 1000 output tokens
 
 This procedure ensures the prefix portion (80% of input) is cached before measuring performance, simulating real-world prefix reuse scenarios.
