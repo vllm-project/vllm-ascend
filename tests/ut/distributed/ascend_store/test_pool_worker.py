@@ -4724,6 +4724,51 @@ class TestKVPoolWorkerReachableMasks(unittest.TestCase):
         self.assertEqual(first.partial_save_gva_per_group, [105])
         self.assertEqual(second.partial_save_gva_per_group, [106])
 
+    def test_alloc_gvas_for_save_caches_group_block_hashes_by_block_size(self):
+        worker = self._make_worker()
+        worker.num_kv_cache_groups = 2
+        worker.cacheable_group_ids = [0, 1]
+        worker.grouped_block_size = [16, 16]
+        worker.kv_cache_group_families = ["g0", "g1"]
+        worker.metadata = [worker.metadata[0], worker.metadata[0]]
+        worker.layerwise_keys = MagicMock()
+        worker.layerwise_keys.make_full_key.side_effect = lambda group_id, block_hash_hex, *_args: (
+            f"llama-7b@{block_hash_hex}@{group_id}"
+        )
+        worker.group_block_len = {0: [64], 1: [64]}
+        worker.group_num_layers = {0: 1, 1: 1}
+        worker.group_uses_align_state = [False, False]
+        worker.m_store.batch_alloc.side_effect = [[101, 102, 103, 104], [201, 202, 203, 204]]
+        block_ids = [10, 11, 12, 13]
+        request = self._make_request(
+            block_hashes=[b"h0", b"h1", b"h2", b"h3"],
+            block_ids_by_group_np=[
+                np.asarray(block_ids, dtype=np.int64),
+                np.asarray(block_ids, dtype=np.int64),
+            ],
+        )
+
+        with patch(
+            "vllm_ascend.distributed.kv_transfer.kv_pool.ascend_store.layerwise.planes.gva.get_block_hashes",
+            wraps=lambda hashes, *_args: hashes,
+        ) as spy_get_block_hashes:
+            worker._data_plane._alloc_gvas_for_save([request])
+
+        self.assertEqual(spy_get_block_hashes.call_count, 1)
+        self.assertEqual(request.block_gvas_by_group_np[0].tolist(), [101, 102, 103, 104])
+        self.assertEqual(request.block_gvas_by_group_np[1].tolist(), [201, 202, 203, 204])
+
+    def test_alloc_gvas_for_save_filters_missing_keys_with_cached_prefix(self):
+        worker = self._make_worker()
+        worker.m_store.batch_is_exist.side_effect = lambda keys: [1, 1, 0, 0][: len(keys)]
+        worker.m_store.batch_alloc.return_value = [103, 104]
+        request = self._make_request(block_hashes=[b"h0", b"h1", b"h2", b"h3"])
+
+        worker._data_plane._alloc_gvas_for_save([request])
+
+        self.assertEqual(request.save_keys, ["llama-7b@h2@0", "llama-7b@h3@0"])
+        self.assertEqual(request.block_gvas_by_group_np[0].tolist(), [0, 0, 103, 104])
+
     def test_process_save_for_layer_batch_splits_masked_runs(self):
         worker = self._make_worker()
         request = self._make_request(store_masks=([False, True, False, True],))

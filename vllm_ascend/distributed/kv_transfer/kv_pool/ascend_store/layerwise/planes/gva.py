@@ -6,7 +6,7 @@
 from __future__ import annotations
 
 import time
-from collections.abc import Iterable
+from collections.abc import Iterable, Sequence
 from dataclasses import dataclass
 from typing import TYPE_CHECKING
 
@@ -141,6 +141,7 @@ class GvaDataPlane(LayerwiseDataPlane):
             if request.can_save is None or not request.can_save:
                 continue
             block_hashes = request.block_hashes
+            group_hashes_by_block_size: dict[int, Sequence[BlockHash | str]] = {}
 
             all_group_gvas: list[np.ndarray] = []
             all_group_block_ids: list[np.ndarray] = []
@@ -170,7 +171,11 @@ class GvaDataPlane(LayerwiseDataPlane):
                     if endpoint_block >= len(block_ids_by_group) or block_ids_by_group[endpoint_block] == 0:
                         raise ValueError("Recurrent cache endpoint has no allocated state page")
                 alloc_size = worker._global_group_alloc_size(group_id)
-                group_block_hashes = get_block_hashes(block_hashes, effective_block_size, worker.hash_block_size)
+                cached_group_hashes = group_hashes_by_block_size.get(effective_block_size)
+                if cached_group_hashes is None:
+                    cached_group_hashes = get_block_hashes(block_hashes, effective_block_size, worker.hash_block_size)
+                    group_hashes_by_block_size[effective_block_size] = cached_group_hashes
+                group_block_hashes = cached_group_hashes
 
                 save_start_block = request.save_start_token // effective_block_size
                 partial_block_index = get_partial_block_index(
@@ -237,17 +242,18 @@ class GvaDataPlane(LayerwiseDataPlane):
                 # SSD blocks on read.
                 missing_keys = worker._pool_keys_missing(candidate_keys)
                 missing_keys.difference_update(public_allocated)
-                transfer_blocks = [
-                    block_idx for block_idx, key in zip(candidate_blocks, candidate_keys) if key in missing_keys
+                transfer_pairs = [
+                    (block_idx, key) for block_idx, key in zip(candidate_blocks, candidate_keys) if key in missing_keys
                 ]
+                transfer_blocks = [block_idx for block_idx, _ in transfer_pairs]
 
                 # batch_alloc is idempotent: allocating an existing key
                 # returns its current, client-registered GVA. Every write
                 # target is therefore allocated fresh within this step; no
                 # cross-step GVA cache is kept.
                 block_gvas: list[int] = []
-                if transfer_blocks:
-                    transfer_keys = [key for key in candidate_keys if key in missing_keys]
+                if transfer_pairs:
+                    transfer_keys = [key for _, key in transfer_pairs]
                     transfer_gvas = worker.m_store.batch_alloc(
                         transfer_keys, [alloc_size] * len(transfer_keys), LAYERWISE_READ_LEASE_TTL_MS
                     )
