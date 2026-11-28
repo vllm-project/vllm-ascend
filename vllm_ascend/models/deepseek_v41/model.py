@@ -2044,9 +2044,10 @@ class DeepseekV41Model(nn.Module, EagleModelMixin):
             self._mtp_hidden_buffer[:num_tokens].copy_(hidden_states.flatten(1))
 
         hidden_states = last_layer.hc_collapse(hidden_states, pre_mix)
+        # RMSNorm is token-local; normalize SP shards before gathering them.
+        hidden_states = self.norm(hidden_states)
         if use_sequence_parallel and self._mtp_hidden_buffer is None:
             hidden_states = sp_all_gather(hidden_states)[:full_num_tokens]
-        hidden_states = self.norm(hidden_states)
         if aux_hidden_states:
             return hidden_states, aux_hidden_states
         return hidden_states

@@ -1,0 +1,11 @@
+pr: 23560
+entries:
+  - category: performance
+    text: >-
+      DeepSeek V4.1 inference on Ascend A2/A3 with sequence parallelism
+      (additional_config.enable_flashcomm1=true, TP > 1 and expert parallelism)
+      avoids redundant final normalization across TP ranks when no MTP hidden-state
+      buffer is required, including DSpark deployments. Final normalization now
+      processes only rank-local token rows without adding communication.
+    model: deepseek-v4.1
+    hardware: [A2, A3]
