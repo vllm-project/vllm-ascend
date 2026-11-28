@@ -151,6 +151,29 @@ def _mamba_block_aligned_split(
     for name in drop_attrs:
         setattr(self, name, False)
     try:
+        # When fine-grained PMU (< block_size) is active alongside internal
+        # prefill checkpoints, a newly admitted hot-hit request whose entire
+        # prompt fits inside block 0 (prefill_end <= block_size) has no prior
+        # block column (cdiv(prefill_end, block_size) - 2 == -1) to export an
+        # internal checkpoint. Splitting every hot request at tail_boundary
+        # forces two full 48-layer prefills + CoW just to cache its unique tail.
+        # Keep cold prime requests (start == 0) split so common prefixes in
+        # block 0 are cached, and finish hot block-0 tails in a single step.
+        block_size = self.cache_config.block_size
+        prefill_end = max(request.num_prompt_tokens, request.num_tokens - 1)
+        junction = getattr(request, "shared_prefix_boundary", 0)
+        if (
+            getattr(self, "mamba_has_prefill_checkpoint_blocks", False)
+            and getattr(self, "mamba_partial_cache_hit", False)
+            and self.hash_block_size < block_size
+            and request.num_computed_tokens == 0
+            and num_computed_tokens > 0
+            and num_computed_tokens + num_new_tokens >= prefill_end
+            and prefill_end <= block_size
+            and not (num_computed_tokens < junction < prefill_end)
+        ):
+            return num_new_tokens
+
         result = _original_mamba_block_aligned_split(
             self,
             request,
@@ -164,7 +187,6 @@ def _mamba_block_aligned_split(
         # final chunk; retaining only the terminal state makes the first hot
         # replay miss every Mamba group. PD crops one token before scheduling,
         # so this also covers API prompts of k * block_size + 1 tokens.
-        block_size = self.cache_config.block_size
         if (
             getattr(self.cache_config, "enable_prefix_caching", True)
             and self.hash_block_size == block_size

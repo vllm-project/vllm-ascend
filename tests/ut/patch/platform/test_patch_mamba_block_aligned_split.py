@@ -332,3 +332,74 @@ def test_producer_handles_missing_drop_attributes(monkeypatch):
     assert result == 42
     assert not hasattr(scheduler, "use_eagle")
     assert not hasattr(scheduler, "use_eagle_block_drop")
+
+
+@pytest.mark.parametrize(
+    ("query_start", "query_end", "checkpoint_pos", "expected"),
+    [
+        # Same-block PMU=128 hits with r >= 1: checkpoint_col = r - 1 != initial_state_col = r
+        (2304, 3584, 3456, True),  # 3.5k-25
+        (6400, 7168, 7040, True),  # 7k-2
+        (7296, 8192, 8064, True),  # 8k-3
+        (14720, 16384, 16256, True),  # 16k-1k
+        # Cross-2-block hits (upstream True)
+        (58880, 65536, 65408, True),  # 64k-1k
+        # Block-0 hits: checkpoint_col == -1 -> False
+        (1152, 1800, 1664, False),  # 1.8k-25
+        (1280, 2048, 1920, False),  # 2k-25
+        # Cross-1-block hit: checkpoint_col == initial_state_col == 0 -> must stay False
+        (2048, 3584, 3456, False),
+        (1536, 3584, 3456, False),
+    ],
+)
+def test_same_block_pmu128_checkpoint_validity(query_start, query_end, checkpoint_pos, expected):
+    from vllm_ascend.patch.platform.patch_mamba_manager import _is_mamba_prefill_checkpoint_valid
+
+    assert (
+        _is_mamba_prefill_checkpoint_valid(
+            query_start=query_start,
+            query_end=query_end,
+            checkpoint_position=checkpoint_pos,
+            hash_block_size=128,
+            mamba_block_size=2048,
+            checkpoint_alignment=64,
+        )
+        is expected
+    )
+
+
+@pytest.mark.parametrize(
+    ("hit", "prompt_len", "expected_tokens"),
+    [
+        # Hot block-0 hits finish in a single step
+        (1152, 1800, 648),  # 1.8k-25
+        (1280, 2048, 768),  # 2k-25
+        # Same-block hits with r >= 1 use internal checkpoint -> single step
+        (2304, 3584, 1280),  # 3.5k-25
+        (6400, 7168, 768),  # 7k-2
+        (7296, 8192, 896),  # 8k-3
+        (14720, 16384, 1664),  # 16k-1k
+        # Cold prime request in block 0 MUST still split at 1152 to populate prefix cache!
+        (0, 1170, 1152),
+    ],
+)
+def test_pmu128_single_step_prefill_and_prime_split(hit, prompt_len, expected_tokens):
+    import vllm_ascend.patch.platform.patch_mamba_manager  # noqa: F401
+
+    scheduler = _scheduler(is_kv_consumer=None)
+    scheduler.block_size = scheduler.cache_config.block_size = 2048
+    scheduler.hash_block_size = 128
+    scheduler.use_eagle = scheduler.use_eagle_block_drop = False
+    scheduler.num_hash_lookahead_tokens = 1
+    scheduler.mamba_partial_cache_hit = True
+    scheduler.mamba_has_prefill_checkpoint_blocks = True
+    scheduler.mamba_prefill_checkpoint_alignment = 64
+    request = _request(num_computed_tokens=0, num_prompt_tokens=prompt_len, num_tokens=prompt_len)
+
+    got = _mamba_block_aligned_split(
+        scheduler,
+        request,
+        num_new_tokens=prompt_len - hit,
+        num_new_local_computed_tokens=hit,
+    )
+    assert got == expected_tokens
