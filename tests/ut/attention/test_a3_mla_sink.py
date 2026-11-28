@@ -93,7 +93,7 @@ def test_a5_preserves_baseline_pd_layout(monkeypatch, connector, expected):
     assert use_component_major_mla_pd_layout(config) is expected
 
 
-@pytest.mark.parametrize("outside_scope", ["model", "runner", "no_draft", "draft_method", "pcp", "pp"])
+@pytest.mark.parametrize("outside_scope", ["model", "no_draft", "draft_method", "pcp", "pp"])
 def test_multi_connector_rejects_unsupported_a3_deployment(outside_scope):
     config = selection_impl().vllm_config
     child = {"kv_connector": "MooncakeConnectorV2", "kv_connector_extra_config": {"use_layerwise": False}}
@@ -104,8 +104,6 @@ def test_multi_connector_rejects_unsupported_a3_deployment(outside_scope):
 
     if outside_scope == "model":
         config.model_config.hf_config.model_type = "other"
-    elif outside_scope == "runner":
-        config.use_v2_model_runner = False
     elif outside_scope == "no_draft":
         config.speculative_config = None
     elif outside_scope == "draft_method":
@@ -142,7 +140,6 @@ def selection_impl():
         use_dcp=False,
         use_pcp=False,
         vllm_config=SimpleNamespace(
-            use_v2_model_runner=True,
             speculative_config=SimpleNamespace(method="dspark", enforce_eager=True),
             model_config=SimpleNamespace(
                 hf_config=SimpleNamespace(model_type="kimi_k31"), max_model_len=16384, enforce_eager=True
@@ -189,7 +186,6 @@ def test_multi_rank_selection_requires_split_dcp_implementation():
     "reason",
     [
         "model",
-        "runner",
         "method",
         "no_spec",
         "page",
@@ -208,8 +204,6 @@ def test_unsupported_config_retains_fia(reason):
     cfg = impl.vllm_config
     if reason == "model":
         cfg.model_config.hf_config.model_type = "deepseek_v3"
-    elif reason == "runner":
-        cfg.use_v2_model_runner = False
     elif reason == "method":
         cfg.speculative_config.method = "eagle"
     elif reason == "no_spec":

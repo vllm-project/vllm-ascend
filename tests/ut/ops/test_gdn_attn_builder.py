@@ -534,14 +534,12 @@ def test_rebound_gdn_graph_keeps_addresses_and_clears_inactive_state():
 
 @pytest.mark.parametrize("builder_cls", [AscendGDNAttentionMetadataBuilder, AscendGDNHostMetadataBuilder])
 @pytest.mark.parametrize("pcp_size", [1, 2])
-@pytest.mark.parametrize("use_v2", [False, True])
-def test_gdn_block_table_reuse_requires_non_pcp_builder(builder_cls, pcp_size, use_v2):
+def test_gdn_block_table_reuse_requires_non_pcp_builder(builder_cls, pcp_size):
     config = _make_vllm_config(num_speculative_tokens=3)
     config.parallel_config.prefill_context_parallel_size = pcp_size
-    config.use_v2_model_runner = use_v2
     spec = MambaSpec(block_size=16, shapes=((1,), (1,)), dtypes=(torch.float32,), num_speculative_blocks=3)
     builder = builder_cls(spec, ["layer0"], config, torch.device("cpu"))
-    assert builder.supports_update_block_table is (use_v2 and pcp_size == 1)
+    assert builder.supports_update_block_table is (pcp_size == 1)
 
 
 @pytest.mark.parametrize("builder_cls", [AscendGDNAttentionMetadataBuilder, AscendGDNHostMetadataBuilder])
@@ -561,10 +559,8 @@ def test_zero_draft_static_decode_uses_non_spec_route(builder_cls, full_graph):
     assert metadata.non_spec_decode_metadata is not None
 
 
-@pytest.mark.parametrize("use_v2", [False, True])
-def test_mixed_prefill_sentinels_do_not_cancel_live_drafts(use_v2):
+def test_mixed_prefill_sentinels_do_not_cancel_live_drafts():
     config = _make_vllm_config(num_speculative_tokens=3)
-    config.use_v2_model_runner = use_v2
     spec = MambaSpec(block_size=16, shapes=((1,), (1,)), dtypes=(torch.float32,), num_speculative_blocks=3)
     builder = AscendGDNAttentionMetadataBuilder(spec, ["layer0"], config, torch.device("cpu"))
     common = create_common_attn_metadata(BatchSpec([24, 8], [2, 8]), 16, torch.device("cpu"))
@@ -679,7 +675,6 @@ def _make_vllm_config(
     model_config.get_num_attention_heads = lambda parallel_config: num_heads
 
     return SimpleNamespace(
-        use_v2_model_runner=True,
         cache_config=SimpleNamespace(mamba_cache_mode=mamba_cache_mode),
         compilation_config=SimpleNamespace(
             cudagraph_mode=cudagraph_mode,
@@ -707,7 +702,6 @@ def test_kpool_capture_uses_global_gdn_capacity(pcp_size, num_spec):
     config = _make_vllm_config(
         max_num_seqs=32, num_speculative_tokens=num_spec, cudagraph_mode=CUDAGraphMode.FULL_DECODE_ONLY
     )
-    config.use_v2_model_runner = True
     config.cache_config.use_kda_recoverssm = True
     config.model_config.hf_text_config.index_kpool = 4
     config.parallel_config.prefill_context_parallel_size = pcp_size
@@ -746,7 +740,6 @@ def test_kpool_capture_uses_global_gdn_capacity(pcp_size, num_spec):
 @pytest.mark.parametrize("capture_limit", [4, None])
 def test_generic_gdn_keeps_local_capture_capacity(capture_limit):
     config = _make_vllm_config(cudagraph_mode=CUDAGraphMode.FULL_DECODE_ONLY)
-    config.use_v2_model_runner = True
     config.parallel_config.prefill_context_parallel_size = 8
     config.compilation_config.max_cudagraph_capture_size = capture_limit
     spec = MambaSpec(block_size=16, shapes=((1,), (1,)), dtypes=(torch.float32,))
@@ -779,7 +772,6 @@ def test_glm_pcp2_mtp5_capture_exceeds_local_limit(builder_cls):
     config = _make_vllm_config(
         max_num_seqs=128, num_speculative_tokens=5, cudagraph_mode=CUDAGraphMode.FULL_DECODE_ONLY
     )
-    config.use_v2_model_runner = True
     config.cache_config.use_kda_recoverssm = True
     config.parallel_config.prefill_context_parallel_size = 2
     config.compilation_config.max_cudagraph_capture_size = 256
@@ -804,7 +796,6 @@ def test_glm_pcp2_mtp5_capture_exceeds_local_limit(builder_cls):
 
 def test_kimi_recoverssm_does_not_inherit_glm_pcp_buffers():
     config = _make_vllm_config(cudagraph_mode=CUDAGraphMode.FULL_DECODE_ONLY)
-    config.use_v2_model_runner = True
     config.cache_config.use_kda_recoverssm = True
     config.parallel_config.prefill_context_parallel_size = 2
     config.compilation_config.max_cudagraph_capture_size = 4
@@ -1007,8 +998,7 @@ def test_host_update_block_table_refreshes_conv_bindings_after_queued_writes():
     assert updated.spec_decode_metadata.use_upstream_recurrent == source.spec_decode_metadata.use_upstream_recurrent
 
 
-@pytest.mark.parametrize("use_v2", [False, True])
-def test_decode_layout_reuse_respects_runner_and_padding_changes(use_v2):
+def test_decode_layout_reuse_respects_padding_changes():
     builder = _make_builder(
         device=torch.device("cpu"),
         num_heads=32,
@@ -1016,8 +1006,6 @@ def test_decode_layout_reuse_respects_runner_and_padding_changes(use_v2):
         num_speculative_blocks=3,
         cudagraph_mode=CUDAGraphMode.FULL_DECODE_ONLY,
     )
-    builder.vllm_config.use_v2_model_runner = use_v2
-    builder.supports_update_block_table = use_v2
     template = None
     previous_count = None
     for count in [2, 2, 1, 1, 2]:
@@ -1029,9 +1017,6 @@ def test_decode_layout_reuse_respects_runner_and_padding_changes(use_v2):
         metadata = builder.build(0, common, accepted, drafts, num_actual_reqs=count)
         assert metadata.num_accepted_tokens.tolist() == [count] * count + [1] * (2 - count)
         assert metadata.spec_query_start_loc.tolist() == [min(i, count) * 4 for i in range(3)]
-        if not use_v2:
-            assert builder._decode_layout_metadata is None
-            continue
         assert builder._decode_layout_metadata is not None
         if count != previous_count:
             assert builder._decode_layout_metadata is not template
@@ -1668,7 +1653,6 @@ def test_adaptive_gdn_real_initialization_gate(monkeypatch, backend_cls, host_me
     monkeypatch.setattr(AscendGatedDeltaNetAttention, "_supports_host_metadata_prefill", lambda: host_metadata)
     builder_cls = backend_cls.get_builder_cls()
     config = _make_vllm_config(num_speculative_tokens=num_steps, enable_adaptive_verification=True)
-    config.use_v2_model_runner = True
     group = AttentionGroup(
         backend=backend_cls,
         layer_names=["layer0"],

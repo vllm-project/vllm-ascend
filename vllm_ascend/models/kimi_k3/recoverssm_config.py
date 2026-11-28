@@ -48,8 +48,5 @@ def validate_request_indexed_kda_recoverssm(vllm_config: VllmConfig) -> None:
         raise ValueError(
             f"Kimi RecoverSSM requires Mamba cache mode {expected_cache_mode} with this prefix caching setting"
         )
-    transfer = vllm_config.kv_transfer_config
-    if transfer is not None and transfer.kv_connector not in ("MooncakeConnectorV2", "MooncakePullConnector"):
-        raise ValueError("KDA RecoverSSM KV transfer requires MooncakeConnectorV2 or MooncakePullConnector")
-    if transfer is not None and is_conv_state_dim_first():
-        raise ValueError("Kimi RecoverSSM Mooncake P/D requires SD convolution cache layout")
+    if vllm_config.kv_transfer_config is not None and is_conv_state_dim_first():
+        raise ValueError("Kimi RecoverSSM KV transfer requires SD convolution cache layout")
