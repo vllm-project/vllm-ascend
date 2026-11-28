@@ -1,0 +1,279 @@
+# yaml-language-server: $schema=https://recipes.vllm.ai/recipe.schema.json
+variants:
+  ascend_bf16:
+    precision: bf16
+    tp: 1
+    label: BF16 · Ascend A2 graph
+    vram_minimum_gb: 3
+    description: Pinned 0.9B BF16 graph configuration on one Ascend 910B4 (32 GB HBM). Historical 910B3 evidence is documented separately; stable 910B3 serving is not claimed. Context uses the checkpoint default; 16384 is the batch-token budget. Long-context inputs are not validated.
+    supported_hardware:
+      - ascend_910b4
+    hardware_overrides:
+      ascend_910b4:
+        docker_image: quay.io/ascend/vllm-ascend:v0.30.0@sha256:28351d337b7f9367073344240fa4e28d99794d549d577eaf317689950064150a
+        docker_serve_command: vllm serve
+        install:
+          pip: false
+          docker: true
+        extra_args:
+          - '--dtype'
+          - bfloat16
+          - '--max-num-batched-tokens'
+          - '16384'
+          - '--gpu-memory-utilization'
+          - '0.80'
+          - '--served-model-name'
+          - PaddlePaddle/PaddleOCR-VL
+          - PaddleOCR-VL-0.9B
+          - '--additional-config'
+          - '{"enable_cpu_binding":true}'
+          - '--compilation-config'
+          - '{"cudagraph_mode":"FULL_DECODE_ONLY"}'
+        extra_env:
+          VLLM_USE_MODELSCOPE: 'True'
+          TASK_QUEUE_ENABLE: '0'
+          CPU_AFFINITY_CONF: '1'
+          PYTORCH_NPU_ALLOC_CONF: expandable_segments:True
+meta:
+  hardware:
+    ascend_910b4: supported
+# The selected 910B4 profile is one non-scalable NPU; do not inherit the
+# core recipe's multi-node TP option for this single-device deployment.
+strategy_hardware:
+  multi_node_tp:
+    ascend_910b4: unsupported
+guide_sections:
+  ascend: |
+    ## Ascend A2 support and version scope
+
+    The selected hardware profile is `ascend_910b4`: a single Ascend 910B4
+    with 32 GB HBM, rather than the shared eight-NPU `ascend_910b` node profile.
+    The BF16 graph variant is restricted to this one-NPU profile and uses the
+    pinned v0.30.0 image. The historical A2 tutorial also covers 910B3,
+    but stable 910B3 serving is not validated by this configuration.
+    The current Ascend tutorial discontinues model support from v0.30.0.
+    The 910B4 stable functional run passed recognition and document parsing.
+    Its shutdown logs showed an EngineDeadError, forced EngineCore termination
+    and a semaphore warning. Stable 910B3 testing remains unverified.
+
+    ### A2 source-tutorial scenarios
+
+    The source tutorial also documents A2 single-NPU graph serving (BF16,
+    `--max-num-batched-tokens 16384`) and a separate Paddle custom-NPU layout pipeline.
+    On 2026-10-13, a dedicated A2 environment (actual Ascend 910B3, CANN 9.1.0)
+    passed all four tasks with both model aliases in BF16 graph mode and a separate
+    native Paddle custom-NPU newspaper pipeline (31 blocks, clean exit). The tested
+    settings use `TASK_QUEUE_ENABLE=0` and `--gpu-memory-utilization 0.80`; the
+    tutorial defaults failed startup on this image. Paddle layout uses its separate
+    CANN 8.0 image, genuine compatible compiler dependencies, ABI 0 ATB libraries,
+    and the standard-library path before forkserver workers. These settings and
+    evidence are maintained in the bilingual Ascend recipe. These historical results cover the single-NPU 910B3 profile. The current-main 910B4 supplement is recorded separately below; 910B2 remains unverified.
+    The companion [Ascend recipe PR](https://github.com/vllm-ascend/vllm-ascend-recipes/pull/101)
+    also records the completed original 1355-page A2 run: Overall 92.4426% using
+    unchanged official ED/TEDS/rendered CDM metrics, with page batch 16 and
+    preprocessing queues disabled. Renderer failures and truncated predictions
+    are retained. This is separate from the 310P profile and does not establish
+    matched performance or formal acceptance. 910B2, long-context inputs,
+    native Docker launch on 310P and nightly CI remain untested.
+
+    The companion Ascend recipe PR was merged on 2026-10-22. Its
+    [A2 PR verification run #427](https://github.com/vllm-ascend/vllm-ascend-recipes/actions/runs/39742255957)
+    completed real inference on the `v0.30.0rc2` A2 image: four hash-checked sample
+    downloads and all eight recognition checks (four tasks under both aliases) passed.
+    This A2 result does not validate the replacement `v0.30.0rc2-310p` image or
+    replace the full-dataset accuracy and performance evidence above.
+    Multi-node PD is not supported by this tutorial.
+
+    ### Current-main A2 supplement on 910B4
+
+    HiDevLab allocated a single 910B4 with 32 GB HBM on 2026-11-06, rather than
+    the historical 64 GB 910B3. The dedicated `ascend_910b4` profile retains the
+    tested BF16 graph/TP1, batch 16384 and memory-utilization 0.80 settings; the
+    checkpoint default context is not replaced by a 16384-token context cap.
+    The exposed physical device was davinci3, mapped to logical NPU 0 by this
+    environment. This does not validate 910B3, 910B2 or long-context inputs.
+
+    Native current-main serving used driver 25.5.2, CANN 9.2.1, Python 3.12.16,
+    vLLM source `5df63a7203cdb9328d824a27b682e77c7b9928be` and Ascend source
+    `d96c01e5c2266d6df061311e8966e096bc542f68`, with clean tracked trees.
+    Original recognition weights and every model file match the previous frozen
+    baseline. Sixteen requests passed: both aliases, four tasks and one warmup
+    plus one measured round. Content and stop reasons were checked. Startup,
+    inference and explicit frontend shutdown passed the ERROR/Traceback audit.
+
+    After the full-data run below, a separate fresh service also passed the
+    exact published remote-URL document command with page batch 16 and native
+    NPU layout. It produced 31 blocks with checked content/bounds/JSON/Markdown;
+    all 27 recognition requests returned HTTP 200. Server and client logs
+    passed both ERROR/Traceback and case-insensitive error/exception/traceback
+    scans. The frontend exited with code 0 without a forced kill. All original
+    recognition model files and tracked native source trees were rechecked
+    after these runs and remained identical; no task/NPU processes remained.
+
+    The exact shared document parser also passed the official PNG and the frozen
+    one-page PDF: both returned 31 layout blocks with checked content, bounds,
+    JSON and Markdown. All 55 recognition HTTP calls returned 200; server and
+    client log audits passed. Layout used the complete pinned CANN 8.0 image
+    below under PRoot 5.5.0, all blobs independently SHA256-verified, with
+    host-visible compiler paths and separate Paddle 3.2.0/custom-NPU 3.2.0,
+    PaddleOCR 3.3.2 and PaddleX 3.3.13. No driver or model code was changed.
+
+    The main registry tag resolved to index
+    `sha256:4b537a90f25f7d282927b49f474f9d8ecf61fd0bf556c28e9ec1ac54d48371c3`,
+    which was the previous 910B4 builder pin. The platform did not expose the native
+    container image ID, so that lookup is recorded separately from its measured
+    source/package identity. No normal Docker CLI launch or future-main support
+    is claimed. Metadata remains supported rather than verified. Generated
+    Docker examples assume a host exposing `/dev/davinci0`; the native HiDevLab
+    run used its exposed `/dev/davinci3` and does not validate that Docker device
+    binding.
+
+
+    All 1355 unchanged original OmniDocBench v1.5 images then produced Markdown:
+    25888 HTTP 200 responses, 25873 stop and 15 length-limited outputs. One empty
+    Markdown and all truncated outputs remain in evaluation. Prediction plus
+    Markdown/crop saving took 4634.496337 seconds, or 3.42029250 seconds per
+    original image; initialization (39.96218 seconds) and cleanup were excluded.
+    Page batch 16, queues disabled, layout batch 8, VLRec batch 4096, temperature
+    0, output cap 4096 and no external warmup were used. The server restarted
+    after the pilot; compiler/filesystem caches may persist. The local API audit
+    hop and progress output are included in timing. All inference/client logs
+    passed the case-insensitive error/exception/traceback scan.
+
+    The unchanged official evaluator at the commit above, with fresh render
+    caches and two CDM workers, exited normally: text edit distance
+    0.04415666895, table TEDS 0.90661323468, formula CDM
+    0.91141464103, Overall 92.46237356%. The frozen ModelZoo
+    component-rounding calculation gives 92.46733333%.
+    All 1054 formula pairs, including 13 zero scores and all renderer/tokenizer
+    failures, are retained. Evaluation used 2 GiB/no-swap/two CPUs, recorded
+    cgroup peak 1398452224 bytes and zero OOM events. This is the measured native
+    910B4 graph result, separate from 310P, historical 910B3 and untested 910B2.
+    The linked official reference publishes no separate A2 numeric target; that
+    numeric comparison is N/A, with these measurements retained. It does not
+    establish matched-reference performance or formal acceptance.
+
+    Full-run host sampling reached 34359693312 bytes including image-preparation
+    file cache, with sampled limit-hit delta 87720 and zero OOM kills; this is
+    not pure inference RSS. HBM sampling reached 31519 of 32768 reported MB,
+    with 235 successful full-phase samples and no sampler errors. The timeline
+    started before service startup; exact transient peaks are not claimed.
+
+    ### Ascend references
+
+    - [Pinned Ascend tutorial](https://github.com/vllm-project/vllm-ascend/blob/0830899b4e3f55ea6ed9f3518385e9d81192ae29/docs/source/tutorials/models/PaddleOCR-VL.md)
+    - [ModelZoo OM integration and evaluation](https://gitcode.com/Ascend/ModelZoo-PyTorch/tree/e779117e8cfeba296a7105e26adac0741ab04768/ACL_PyTorch/built-in/ocr/PP-DocLayoutV2)
+    - [OmniDocBench v1.5](https://huggingface.co/datasets/opendatalab/OmniDocBench/tree/v1_5)
+    - [Official ModelScope demonstration assets (same SHA256 required)](https://modelscope.cn/datasets/PaddlePaddle/PaddleOCR-VL_demo)
+    - [Pinned Hugging Face demonstration assets](https://huggingface.co/datasets/PaddlePaddle/PaddleOCR-VL_demo/tree/702b96b0a06740b0ed3d41ba382a5bf69986dcae/imgs)
+
+    ### A2 document parsing with native Paddle NPU layout
+
+    PP-DocLayoutV2 uses Paddle custom-NPU on A2 and must remain separate from the vLLM environment. The historical run used a real 910B3; it does not validate 910B2. The following immutable CANN 8.0 layout image preserves that compiler/runtime boundary.
+
+    ```bash
+    export IMAGE=ccr-2vdh3abv-pub.cnc.bj.baidubce.com/device/paddle-npu:cann800-ubuntu20-npu-910b-base-aarch64-gcc84@sha256:9bbc08c1bed9c064f0775da4a7bd1c857fa33d0d51bcd705e6829f4cbcf86911
+    docker run --rm -it --name paddleocr-layout-a2 --net=host --shm-size=1g \
+        --device /dev/davinci0 --device /dev/davinci_manager \
+        --device /dev/devmm_svm --device /dev/hisi_hdc \
+        -v /usr/local/Ascend/driver:/usr/local/Ascend/driver:ro \
+        -v /usr/local/bin/npu-smi:/usr/local/bin/npu-smi \
+        -v /usr/local/dcmi:/usr/local/dcmi -v "$PWD":/work -w /work \
+        -e ASCEND_RT_VISIBLE_DEVICES=0 "$IMAGE" bash
+    # Inside the Paddle container (Python 3.10, aarch64):
+    source /usr/local/Ascend/ascend-toolkit/set_env.sh
+    source /usr/local/Ascend/nnal/atb/set_env.sh --cxx_abi=0
+    python -m pip install 'numpy<2' 'setuptools<81' 'protobuf==3.20.3' decorator sympy scipy attrs psutil paddlepaddle==3.2.0
+    python -m pip install https://paddle-whl.bj.bcebos.com/stable/npu/paddle-custom-npu/paddle_custom_npu-3.2.0-cp310-cp310-linux_aarch64.whl
+    python -m pip install 'paddleocr[doc-parser]==3.3.2' safetensors modelscope
+    python - <<'PY'
+    import sys
+    import sysconfig
+    import paddle
+
+    sys.path.insert(0, sysconfig.get_path('stdlib'))
+    assert 'npu' in paddle.device.get_all_custom_device_type()
+    paddle.utils.run_check()
+    PY
+    modelscope download --model PaddlePaddle/PP-DocLayoutV2 --local_dir PP-DocLayoutV2
+    ```
+
+    Save the following previously verified shared parser as `parse_document.py` in the layout environment. Run it with `--layout-device npu` for A2.
+
+    ```python
+    import argparse
+    import json
+    import time
+    from pathlib import Path
+
+    from paddleocr import PaddleOCRVL
+
+    parser = argparse.ArgumentParser()
+    parser.add_argument('--input', required=True)
+    parser.add_argument('--layout-model', type=Path, required=True)
+    parser.add_argument('--output', type=Path, default=Path('document-output'))
+    parser.add_argument('--server-url', default='http://127.0.0.1:8000/v1')
+    parser.add_argument('--layout-device', choices=['cpu', 'npu'], default='cpu')
+    parser.add_argument('--page-batch-size', type=int, default=16)
+    args = parser.parse_args()
+    if args.layout_device == 'npu':
+        # OpenCV adds its package directory; CANN compiler workers need stdlib first.
+        import sys
+        import sysconfig
+        sys.path.insert(0, sysconfig.get_path('stdlib'))
+    if args.layout_device == 'cpu':
+        # CPU Paddle preprocessing + the ModelZoo-patched ACL InferSession(0).
+        # PP-DocLayoutV2 still runs on NPU; Paddle custom-NPU is not used on 310P.
+        assert (args.layout_model / 'inference_linux_aarch64.om').is_file(), 'Compile the aarch64 OM model first'
+    # Bound queued page images on the tested 32 GiB A2 host.
+    # Preserve every other official pipeline setting, including layout batches.
+    from paddlex.inference import load_pipeline_config
+    assert args.page_batch_size > 0
+    config = load_pipeline_config('PaddleOCR-VL')
+    config['batch_size'] = args.page_batch_size
+    config['use_queues'] = False
+    pipeline = PaddleOCRVL(
+        paddlex_config=config,
+        vl_rec_backend='vllm-server',
+        vl_rec_server_url=args.server_url,
+        layout_detection_model_name='PP-DocLayoutV2',
+        layout_detection_model_dir=str(args.layout_model),
+        use_doc_orientation_classify=False,
+        use_doc_unwarping=False,
+        device=args.layout_device,
+    )
+    args.output.mkdir(parents=True, exist_ok=True)
+    start = time.perf_counter()
+    count = 0
+    try:
+        for result in pipeline.predict_iter(args.input):
+            result.save_to_json(str(args.output))
+            result.save_to_markdown(str(args.output))
+            count += 1
+        elapsed = time.perf_counter() - start
+    finally:
+        pipeline.close()
+        if args.layout_device == 'cpu':
+            from ais_bench.infer.interface import InferSession
+            pipeline.paddlex_pipeline.layout_det_model.om_sess.free_resource()
+            InferSession.finalize()
+    assert count > 0, 'No pages parsed'
+    assert list(args.output.glob('*.md')), 'No Markdown output'
+    assert list(args.output.glob('*.json')), 'No JSON output'
+    (args.output / 'timing.json').write_text(json.dumps({'pages': count, 'seconds': elapsed, 'seconds_per_page': elapsed / count, 'scope': 'pipeline prediction only; excludes pipeline initialization', 'layout_device': args.layout_device, 'page_batch_size': args.page_batch_size, 'use_queues': config['use_queues']}, indent=2) + '\n')
+    print(f'Parsed {count} page(s) in {elapsed:.3f}s')
+    ```
+
+    Run the parser with the native A2 layout device:
+
+    ```bash
+    python parse_document.py --input https://paddle-model-ecology.bj.bcebos.com/paddlex/imgs/demo_image/paddleocr_vl_demo.png --layout-model PP-DocLayoutV2 --layout-device npu --page-batch-size 16 --server-url http://127.0.0.1:8000/v1 --output document-output
+    ```
+
+    The A2 layout path uses 16-page batches with preprocessing queues disabled on a 32 GiB host. Earlier queue-enabled A2 attempts hit that quota; their failures remain recorded. This memory setting changes the document-processing configuration and must be included in timing comparisons. It does not change Golden annotations or metric definitions.
+
+    ### Accuracy and performance acceptance boundaries
+
+    The historical tutorial delegates accuracy and performance to the [ModelZoo PP-DocLayoutV2 guide](https://gitcode.com/Ascend/ModelZoo-PyTorch/tree/master/ACL_PyTorch/built-in/ocr/PP-DocLayoutV2). Its published 300I DUO single-chip reference is Overall 92.43%, a cited official 92.86%, and performance 12.10 seconds per input file. Its test.py starts timing after pipeline initialization, includes prediction and Markdown saving, and divides elapsed time by the original input-file count. PDFs may contain several pages per file. These are reference values, not new measurements. Warmup, concurrency, token limits and the permitted accuracy tolerance are not fully specified by the reference table. No A2-specific numeric target is published there.
+
+    Use unchanged OmniDocBench v1.5 inputs and annotations and evaluator commit 523fd1d529c3e9d0088c662e983aa70fb9585c9a. Compute original text edit distance, table TEDS and rendered formula CDM; retain empty/truncated outputs and renderer failures. Keep model, layout model, precision, image digest, page/region batching, queues, concurrency, token cap, warmup, timing scope and peak memory with each result. The historical 1355-page scores belong to their recorded old images and are not replacement-image acceptance evidence.

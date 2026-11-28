@@ -1,3 +1,8 @@
 # PaddleOCR-VL
 
 PaddleOCR-VL has been discontinued since vLLM Ascend v0.30.0 and will no longer receive support or fixes in subsequent versions. For deployment, please refer to the [historical version documentation](https://docs.vllm.ai/projects/ascend/en/v0.23.0/tutorials/models/PaddleOCR-VL.html).
+
+The [original PaddleOCR-VL 0.9B recipe (Ascend 910B4, BF16)](https://recipes.vllm.ai/PaddlePaddle/PaddleOCR-VL?hardware=ascend_910b4&variant=ascend_bf16)
+records a pinned single-NPU 910B4 (A2) BF16 configuration and
+separate historical 910B3 recognition/layout evidence. Check its tested
+versions and limitations before deployment; the discontinuation above still applies.
