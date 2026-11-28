@@ -83,6 +83,8 @@ class HardwareCapability(Enum):
     CANN_MEGAMOE_SHARED_EXPERT_FUSION = auto()
     # Split a mixed chunked-prefill batch into separate prefill and decode FIA calls.
     CHUNKED_PREFILL_PHASE_SPLIT = auto()
+    # Unfold causal speculative-verification queries into single-query TND FIA rows.
+    SINGLE_QUERY_SPEC_VERIFY_FIA = auto()
     # CANN device-side FlashAttn metadata with strided paged GQA K/V.
     DEVICE_LENGTH_FLASH_ATTN = auto()
     # Optional flash_attn_npu_3 device-tiling ABI on A2/A3/A5.
@@ -523,6 +525,7 @@ _HARDWARE_PROFILES: Mapping[AscendDeviceType, HardwareProfile] = MappingProxyTyp
                     HardwareCapability.DEVICE_LENGTH_FLASH_ATTN,
                     HardwareCapability.FLASH_ATTN_NPU_3,
                     HardwareCapability.CHUNKED_PREFILL_PHASE_SPLIT,
+                    HardwareCapability.SINGLE_QUERY_SPEC_VERIFY_FIA,
                     HardwareCapability.CLUSTER_CPU_TOPOLOGY,
                     HardwareCapability.DSA_C128_STATE_SMALL_BLOCK_SIZES,
                     HardwareCapability.DSV4_COMPRESSED_CACHE,
