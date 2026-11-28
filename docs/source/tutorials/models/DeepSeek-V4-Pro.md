@@ -636,13 +636,13 @@ Select the tab that matches the deployment hardware.
 
     #### 950DT products {: #dsv4pro-5-2-950dt }
 
-    This section shows a 2P1D deployment on 8 Ascend 950DT nodes (96GB × 8) with the `DeepSeek-V4-Pro-0813` checkpoint. The Prefill side (2P) runs 2 Prefill instances, and each instance is a single logical engine with `DP1/TP1/PP2` plus `--prefill-context-parallel-size 8` spread over 2 nodes (`--nnodes 2`): one PP stage runs on each node. The Decode side (1D) uses 4 nodes as one Decode pool containing 32 DP ranks with the `DP32/TP1` configuration, and each Decode node starts 8 local DP ranks. Each Prefill instance declares `"prefill": {"dp_size": 1, "tp_size": 1, "pp_size": 2, "pp_layer_partition": "32,29"}` in `--kv-transfer-config`, while the Decode side declares `"decode": {"dp_size": 32, "tp_size": 1}`. Assign a unique `kv_port` to every Prefill instance and to the Decode pool.
+    This section shows a 2P1D deployment on 8 Ascend 950DT nodes (96GB × 8) with the `DeepSeek-V4-Pro-0813` checkpoint. The Prefill side (2P) runs 2 Prefill instances, and each instance is a single logical engine with `DP1/TP1/PP4` plus `--prefill-context-parallel-size 4` spread over 2 nodes (`--nnodes 2`): two PP stages run on each node. The Decode side (1D) uses 4 nodes as one Decode pool containing 32 DP ranks with the `DP32/TP1` configuration, and each Decode node starts 8 local DP ranks. Each Prefill instance declares `"prefill": {"dp_size": 1, "tp_size": 1, "pp_size": 4, "pp_layer_partition": "16,16,16,13"}` in `--kv-transfer-config`, while the Decode side declares `"decode": {"dp_size": 32, "tp_size": 1}`. Assign a unique `kv_port` to every Prefill instance and to the Decode pool.
 
     Before you start, set `nic_name` and `local_ip` in every script below to the NIC name and IP address of the current node before starting the service.
 
     1. Prepare the script `launch_online_dp.py` on each Decode node. The Prefill engines are started directly by `vllm serve` on the Prefill nodes, so this script is not required there. The launcher is shared by all hardware tabs and is provided in [Common Script and Parameter Descriptions](#dsv4pro-5-2-common).
 
-    2. Prepare the Prefill startup scripts. There are 2 Prefill instances, and each one is a PP2 engine spread across 2 nodes: the master node (`--node-rank 0`) starts the engine and its API server, while the worker node (`--node-rank 1`) joins the same engine with `--headless`. `--master-addr` must point to the master node's service IP so that the worker can join the cross-node process group, and both nodes must use identical model, TP, PP, PCP, and `VLLM_PP_LAYER_PARTITION` settings. `--port $1` takes the engine port from the first command-line argument of the script, for example `bash run_p_node0.sh 8000`.
+    2. Prepare the Prefill startup scripts. There are 2 Prefill instances, and each one is a PP4 engine spread across 2 nodes: the master node (`--node-rank 0`) starts the engine and its API server, while the worker node (`--node-rank 1`) joins the same engine with `--headless`. `--master-addr` must point to the master node's service IP so that the worker can join the cross-node process group, and both nodes must use identical model, TP, PP, PCP, and `VLLM_PP_LAYER_PARTITION` settings. `--port $1` takes the engine port from the first command-line argument of the script, for example `bash run_p_node0.sh 8000`.
 
         1. `run_p_node0.sh` on the master node of Prefill instance 1:
 
@@ -672,7 +672,7 @@ Select the tab that matches the deployment hardware.
             export HCCL_CONNECT_TIMEOUT=1200
 
             export VLLM_USE_V2_MODEL_RUNNER=1
-            export VLLM_PP_LAYER_PARTITION="32,29"
+            export VLLM_PP_LAYER_PARTITION="16,16,16,13"
             export VLLM_USE_FASTOKENS=1
             export ASCEND_LOCAL_COMM_RES='{"version":"1.3"}'
 
@@ -684,9 +684,9 @@ Select the tab that matches the deployment hardware.
                 --node-rank 0 \
                 --master-addr $node0_ip \
                 --tensor-parallel-size 1 \
-                --prefill-context-parallel-size 8 \
+                --prefill-context-parallel-size 4 \
                 --data-parallel-size 1 \
-                --pipeline-parallel-size 2 \
+                --pipeline-parallel-size 4 \
                 --enable-expert-parallel \
                 --seed 1024 \
                 --max-model-len 1048576 \
@@ -703,7 +703,7 @@ Select the tab that matches the deployment hardware.
                 --tool-call-parser deepseek_v4 \
                 --enable-auto-tool-choice \
                 --reasoning-parser deepseek_v4 \
-                --gpu-memory-utilization 0.94 \
+                --gpu-memory-utilization 0.92 \
                 --enforce-eager \
                 --additional-config '{"enable_cpu_binding":true,"enable_fused_mc2":0,"multistream_overlap_shared_expert":true,"enable_shared_expert_dp":true}' \
                 --kv-transfer-config '{
@@ -711,7 +711,7 @@ Select the tab that matches the deployment hardware.
                     "kv_role":"kv_producer",
                     "kv_port":"30000",
                     "kv_connector_extra_config":{
-                        "prefill":{"dp_size":1,"tp_size":1,"pp_size":2,"pp_layer_partition":"32,29"},
+                        "prefill":{"dp_size":1,"tp_size":1,"pp_size":4,"pp_layer_partition":"16,16,16,13"},
                         "decode":{"dp_size":32,"tp_size":1}
                     }
                 }'
@@ -783,7 +783,7 @@ Select the tab that matches the deployment hardware.
                 "kv_role":"kv_consumer",
                 "kv_port":"30100",
                 "kv_connector_extra_config":{
-                    "prefill":{"dp_size":1,"tp_size":1,"pp_size":2,"pp_layer_partition":"32,29"},
+                    "prefill":{"dp_size":1,"tp_size":1,"pp_size":4,"pp_layer_partition":"16,16,16,13"},
                     "decode":{"dp_size":32,"tp_size":1}
                 }
             }' \
@@ -858,9 +858,9 @@ Select the tab that matches the deployment hardware.
     Key Parameter Descriptions:
 
     - `--kv-cache-dtype fp8` sets the KV cache dtype to FP8, and `--attention_config.indexer_kv_dtype fp8` sets the index-side KV dtype to FP8. The P and D sides must use the same KV data types so that the transferred KV cache is directly reusable.
-    - `--pipeline-parallel-size 2` / `--nnodes 2` / `--node-rank` / `--master-addr` distribute each Prefill engine (`DP1/TP1/PP2`) over 2 nodes with one PP stage per node; the worker node (`--node-rank 1`) runs headless, and `--master-addr` is the service IP of the instance's master node for the cross-node process group.
-    - `VLLM_PP_LAYER_PARTITION="32,29"` partitions the 61 target layers across the 2 PP stages; the same partition must be declared in `kv_connector_extra_config.prefill.pp_layer_partition`.
-    - `--prefill-context-parallel-size 8` spreads the prompt across the 8 NPUs of each PP stage.
+    - `--pipeline-parallel-size 4` / `--nnodes 2` / `--node-rank` / `--master-addr` distribute each Prefill engine (`DP1/TP1/PP4`) over 2 nodes with two PP stages per node; the worker node (`--node-rank 1`) runs headless, and `--master-addr` is the service IP of the instance's master node for the cross-node process group.
+    - `VLLM_PP_LAYER_PARTITION="16,16,16,13"` partitions the 61 target layers across the 4 PP stages; the same partition must be declared in `kv_connector_extra_config.prefill.pp_layer_partition`.
+    - `--prefill-context-parallel-size 4` spreads the prompt across the 4 NPUs of each PP stage.
     - `--kv-transfer-config` uses `MooncakeConnectorV2` for KV transfer; it is required because pipeline parallelism is enabled.
     - `--additional-config`: `enable_fused_mc2: 0` disables Fused MC2 and instead overlaps shared-expert computation with MoE communication via `multistream_overlap_shared_expert: true`, with `enable_shared_expert_dp: true` placing shared experts on DP ranks; `combine_quant_mode: 4` forces the MoE MC2 combine stage on Decode nodes to use FP8 (MXFP float8_e4m3) communication quantization.
 
@@ -1533,7 +1533,7 @@ Select the tab that matches the deployment hardware.
         export HCCL_CONNECT_TIMEOUT=1200
 
         export VLLM_USE_V2_MODEL_RUNNER=1
-        export VLLM_PP_LAYER_PARTITION="32,29"
+        export VLLM_PP_LAYER_PARTITION="16,16,16,13"
         export VLLM_USE_FASTOKENS=1
         export ASCEND_LOCAL_COMM_RES='{"version":"1.3"}'
 
@@ -1550,9 +1550,9 @@ Select the tab that matches the deployment hardware.
             --node-rank 0 \
             --master-addr $node0_ip \
             --tensor-parallel-size 1 \
-            --prefill-context-parallel-size 8 \
+            --prefill-context-parallel-size 4 \
             --data-parallel-size 1 \
-            --pipeline-parallel-size 2 \
+            --pipeline-parallel-size 4 \
             --enable-expert-parallel \
             --seed 1024 \
             --max-model-len 1048576 \
@@ -1570,7 +1570,7 @@ Select the tab that matches the deployment hardware.
             --tool-call-parser deepseek_v4 \
             --enable-auto-tool-choice \
             --reasoning-parser deepseek_v4 \
-            --gpu-memory-utilization 0.94 \
+            --gpu-memory-utilization 0.92 \
             --enforce-eager \
             --additional-config '{"enable_cpu_binding":true,"enable_fused_mc2":0,"multistream_overlap_shared_expert":true,"enable_shared_expert_dp":true}' \
             --kv-transfer-config '{
@@ -1585,7 +1585,7 @@ Select the tab that matches the deployment hardware.
                             "kv_role":"kv_producer",
                             "kv_port":"30000",
                             "kv_connector_extra_config":{
-                                "prefill":{"dp_size":1,"tp_size":1,"pp_size":2,"pp_layer_partition":"32,29"},
+                                "prefill":{"dp_size":1,"tp_size":1,"pp_size":4,"pp_layer_partition":"16,16,16,13"},
                                 "decode":{"dp_size":32,"tp_size":1}
                             }
                         },
@@ -1683,7 +1683,7 @@ Select the tab that matches the deployment hardware.
                         "kv_role":"kv_consumer",
                         "kv_port":"30100",
                         "kv_connector_extra_config":{
-                            "prefill":{"dp_size":1,"tp_size":1,"pp_size":2,"pp_layer_partition":"32,29"},
+                            "prefill":{"dp_size":1,"tp_size":1,"pp_size":4,"pp_layer_partition":"16,16,16,13"},
                             "decode":{"dp_size":32,"tp_size":1}
                         }
                     },
@@ -2571,7 +2571,7 @@ Refer to [vLLM Benchmark](https://docs.vllm.ai/en/latest/benchmarking/) for more
 | --- | --- | --- | --- | --- |
 | Short Sequence / High Throughput | 1P1D deployment (2 Prefill + 2 Decode A3 nodes) | 64 (A3) | DeepSeek-V4-Pro-0813-w4a8 | Prefill uses DP1/TP2/PP2/PCP8 with 16 sequences, while Decode uses DP16/TP2/PP1/PCP1 with 30 sequences and 180 batched tokens. Enable Fused MC2 on Prefill to prioritize throughput. |
 | Long Context (~1M Input, Reference) | 1P1D deployment (2 Prefill + 2 Decode A3 nodes) | 64 (A3) | DeepSeek-V4-Pro-0813-w4a8 | For this separate long-context reference, use DP2/TP16 on both sides, reduce both sides to 2 sequences, and reduce Decode batched tokens to 16 to reserve memory for a 1M-token context. |
-| Long Context (~1M Input) | 2P1D deployment (4 Prefill + 4 Decode Ascend 950DT nodes; each Prefill instance spans 2 nodes) | 64 (Ascend 950DT) | DeepSeek-V4-Pro-0813 | Run 2 Prefill instances, each a DP1/TP1/PP2 engine with prefill context parallel (PCP8) over 2 nodes, and one Decode pool with DP32/TP1. |
+| Long Context (~1M Input) | 2P1D deployment (4 Prefill + 4 Decode Ascend 950DT nodes; each Prefill instance spans 2 nodes) | 64 (Ascend 950DT) | DeepSeek-V4-Pro-0813 | Run 2 Prefill instances, each a DP1/TP1/PP4 engine with prefill context parallel (PCP4) over 2 nodes, and one Decode pool with DP32/TP1. |
 
 #### Table 2: Detailed Node Configuration
 
@@ -2581,12 +2581,12 @@ Refer to [vLLM Benchmark](https://docs.vllm.ai/en/latest/benchmarking/) for more
 | Short Sequence / High Throughput | Decode Pool | 32 (2 A3 nodes) | 2 | 16 | 30 | 180 | 150000 | 5 | Off | On | Off | PCP=1 |
 | Long Context (~1M Input, Reference) | Prefill Pool | 32 (2 A3 nodes) | 16 | 2 | 2 | 4096 | 1048576 | 5 | Off | On | On | PCP=1 |
 | Long Context (~1M Input, Reference) | Decode Pool | 32 (2 A3 nodes) | 16 | 2 | 2 | 16 | 1048576 | 5 | Off | On | Off | PCP=1 |
-| Long Context (~1M Input) | Prefill Pool | 32 (4 950DT nodes, 2 instances) | 1 | 1 | 16 | 8192 | 1048576 | 5 | Off | Off | Off | PCP=8 |
+| Long Context (~1M Input) | Prefill Pool | 32 (4 950DT nodes, 2 instances) | 1 | 1 | 16 | 8192 | 1048576 | 5 | Off | Off | Off | PCP=4 |
 | Long Context (~1M Input) | Decode Pool | 32 (4 950DT nodes) | 1 | 32 | 32 | 512 | 1048576 | 5 | Off | Off | Off | PCP=1 |
 
 > `FC` reports the FlashComm1.
 >
-> `DSA-CP (MRv1) / PCP (MRv2)` describes context parallelism according to the model runner version: MRv1 uses the `enable_dsa_cp` switch, while MRv2 uses `--prefill-context-parallel-size` to specify the PCP size. `PCP=8` means eight-way context parallelism; `PCP=1` means no context parallelism. For the long-context Prefill reference, enable FlashComm1 and disable context parallelism (`enable_dsa_cp: false` on MRv1, or PCP size `1` on MRv2). The long-context example for 950DT products runs on the V2 model runner and uses `PCP=8` on Prefill; `enable_dsa_cp` is mutually exclusive with PCP and must stay off there.
+> `DSA-CP (MRv1) / PCP (MRv2)` describes context parallelism according to the model runner version: MRv1 uses the `enable_dsa_cp` switch, while MRv2 uses `--prefill-context-parallel-size` to specify the PCP size. `PCP=8` means eight-way context parallelism; `PCP=1` means no context parallelism. For the long-context Prefill reference, enable FlashComm1 and disable context parallelism (`enable_dsa_cp: false` on MRv1, or PCP size `1` on MRv2). The long-context example for 950DT products runs on the V2 model runner and uses `PCP=4` on Prefill; `enable_dsa_cp` is mutually exclusive with PCP and must stay off there.
 >
 > Fused MC2 is disabled in the long-context reference configuration because it increases memory usage. If sufficient memory is available and higher performance is the priority, enabling Fused MC2 on Prefill is recommended.
 >
