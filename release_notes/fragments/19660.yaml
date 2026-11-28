@@ -1,0 +1,4 @@
+pr: 19660
+entries:
+  - category: bugfix
+    text: Fixed cross-prefill KV shard selection in the Mooncake V1 and hybrid connectors when prefill and decode use different TP sizes. Cross-prefill sources must use the same TP size as the receiving prefill instance.
