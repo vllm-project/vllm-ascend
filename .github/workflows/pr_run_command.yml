@@ -202,6 +202,11 @@ jobs:
             fail_lookup "found $TOTAL runs on $PR_SHA, more than one page; refusing to guess which are still active"
           fi
 
+          # Unrelated-label runs never test this commit or produce its gate.
+          RUNS=$(printf '%s' "$RUNS" | jq '.workflow_runs |= map(
+            select(.name != "E2E" or (((.display_title // "") | startswith("E2E (ignored label): ")) | not)))') \
+            || fail_lookup "could not filter ignored label runs for $PR_SHA"
+
           # action_required is counted separately: such a run already exists and is
           # only waiting for a maintainer to approve it, so re-triggering cannot
           # make it start any sooner. Folding it into "busy" would turn /run into a

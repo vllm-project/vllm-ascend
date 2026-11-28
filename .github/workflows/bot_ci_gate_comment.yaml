@@ -50,14 +50,21 @@ concurrency:
   # they pile up in the runner queue) or by pull_requests[0].number (that array
   # is unreliable/empty for workflow_run, which would collapse every PR into
   # one group and cancel unrelated PRs' comments).
-  group: ci-gate-comment-${{ github.event.workflow_run.head_sha }}
+  # Ignored labels must not cancel the comment for a real gate verdict.
+  group: >-
+    ci-gate-comment-${{ github.event.workflow_run.name == 'E2E' &&
+      startsWith(github.event.workflow_run.display_title, 'E2E (ignored label): ')
+      && format('run-{0}', github.event.workflow_run.id) || github.event.workflow_run.head_sha }}
   cancel-in-progress: true
 
 jobs:
   comment:
     # Only runs that actually produced a verdict are interesting; cancelled
     # / timed_out / skipped runs have no gate result worth commenting on.
-    if: ${{ contains(fromJSON('["success", "failure"]'), github.event.workflow_run.conclusion) }}
+    if: >-
+      ${{ !(github.event.workflow_run.name == 'E2E' &&
+        startsWith(github.event.workflow_run.display_title, 'E2E (ignored label): ')) &&
+        contains(fromJSON('["success", "failure"]'), github.event.workflow_run.conclusion) }}
     runs-on: linux-amd64-cpu-1-hk
     steps:
       - name: Download gate result artifact

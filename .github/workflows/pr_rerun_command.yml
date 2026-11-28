@@ -113,8 +113,12 @@ jobs:
           fi
 
           # Dedup: keep only the latest run per workflow name (by run ID)
+          # Filter ignored-label E2E runs before dedup so they cannot shadow
+          # the real failed CI run for this commit.
           CANDIDATE_RUNS=$(echo "$RUNS" | jq -r '
-            [.workflow_runs[] | {id: .id, name: .name, status: .status, conclusion: .conclusion, event: .event}] |
+            [.workflow_runs[]
+              | select(.name != "E2E" or (((.display_title // "") | startswith("E2E (ignored label): ")) | not))
+              | {id: .id, name: .name, status: .status, conclusion: .conclusion, event: .event}] |
             group_by(.name) |
             map(max_by(.id)) |
             .[] | "\(.id)|\(.name)|\(.status)|\(.conclusion // "null")|\(.event)"')

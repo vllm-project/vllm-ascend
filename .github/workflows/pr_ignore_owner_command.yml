@@ -149,7 +149,8 @@ jobs:
           # turns that into {"id":null,...} rather than plain null - check the
           # id itself, not the whole object.
           RUN=$(printf '%s' "$RUNS" | jq -c '[.workflow_runs[]
-            | select(.name == "E2E" and .event == "pull_request")]
+            | select(.name == "E2E" and .event == "pull_request"
+              and (((.display_title // "") | startswith("E2E (ignored label): ")) | not))]
             | sort_by(.created_at) | last // {} | {id, status, conclusion}')
 
           if [ "$(printf '%s' "$RUN" | jq -r '.id // empty')" = "" ]; then

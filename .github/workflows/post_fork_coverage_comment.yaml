@@ -57,7 +57,10 @@ concurrency:
   # newest one posts. Do NOT key by workflow_run.id (no dedup, runs pile up
   # in the runner queue) or by pull_requests[0].number (empty for fork PRs
   # on workflow_run, which would collapse every PR into one group).
-  group: post-coverage-comment-${{ github.event.workflow_run.head_sha }}
+  # Ignored labels must not cancel the comment for a real CI run.
+  group: >-
+    post-coverage-comment-${{ startsWith(github.event.workflow_run.display_title, 'E2E (ignored label): ')
+      && format('run-{0}', github.event.workflow_run.id) || github.event.workflow_run.head_sha }}
   cancel-in-progress: true
 
 permissions:
@@ -67,7 +70,9 @@ permissions:
 
 jobs:
   post-coverage-comment:
-    # For workflow_run events any completed E2E run qualifies. E2E is
+    if: >-
+      ${{ !startsWith(github.event.workflow_run.display_title, 'E2E (ignored label): ') }}
+    # For workflow_run events any completed CI-eligible E2E run qualifies. E2E is
     # pull_request-only, and the pr-context artifact (uploaded by the E2E
     # run's upload-pr-context job) gates the posting inside the steps - so a
     # failed e2e matrix does not block the comment as long as cpu-ut

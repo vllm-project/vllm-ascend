@@ -48,6 +48,21 @@ defaults:
   run:
     shell: bash -el {0}
 
+concurrency:
+  # Label, push and /download requests for one PR share a waiter. Unrelated
+  # labels and manual downloads cannot cancel that waiter, even while pending.
+  group: >-
+    model-downloader-${{
+      (github.event_name == 'pull_request' &&
+        (github.event.label.name == 'model-dataset-download' ||
+          (github.event.action == 'synchronize' &&
+            contains(github.event.pull_request.labels.*.name, 'model-dataset-download'))) &&
+        format('pr-{0}', github.event.pull_request.number)) ||
+      (github.event_name == 'repository_dispatch' &&
+        format('pr-{0}', github.event.client_payload.pull_request.number)) ||
+      format('run-{0}', github.run_id) }}
+  cancel-in-progress: true
+
 jobs:
   download:
     name: Download models and datasets
@@ -56,10 +71,6 @@ jobs:
       github.event.label.name == 'model-dataset-download' ||
       (github.event.action == 'synchronize' &&
        contains(github.event.pull_request.labels.*.name, 'model-dataset-download'))
-    # Only a qualifying download may supersede an existing waiter.
-    concurrency:
-      group: ascend-${{ github.workflow_ref }}-${{ github.event.pull_request.number || github.event.client_payload.pull_request.number || github.run_id }}
-      cancel-in-progress: true
     runs-on: linux-amd64-cpu-1-hk
     container:
       image: swr.cn-southwest-2.myhuaweicloud.com/base_image/ascend-ci/vllm-ascend/act-environments-ubuntu:act-22.04
