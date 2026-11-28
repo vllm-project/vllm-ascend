@@ -10,7 +10,7 @@ In simple terms, structured decoding gives LLMs a "template" to follow. Users pr
 
 Diagram of a schema constraining model output to the desired structure.
 
-![structured decoding](./images/structured_output_1.png)
+![guided decoding](./images/structured_output_1.png)
 
 ## Usage in vLLM-Ascend
 

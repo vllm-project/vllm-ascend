@@ -1822,7 +1822,6 @@ def test_v41_query_bound_is_independent_of_adaptive_policy(method, enabled, num_
             max_num_new_slots_for_drafting=0,
             parallel_drafting=False,
         ),
-        use_v2_model_runner=True,
     )
     # No parallel_config is needed to report the backend's query-width bound.
     # Unsupported CP combinations are rejected at platform config validation.

@@ -21,7 +21,7 @@ from typing import Any, cast
 
 import torch
 from vllm.triton_utils import tl, triton
-from vllm.v1.worker.gpu.sample.gumbel import _TL_RAND_MIN
+from vllm.v1.worker.gpu.sample.gumbel import _TL_RAND_MIN, spec_step_seed
 from vllm.v1.worker.gpu.spec_decode.rejection_sampler_utils import (
     _compute_cumulative_log_p_kernel,
     _compute_global_residual_mass,
@@ -165,7 +165,9 @@ def _probabilistic_rejection_kernel(
                 accepted = draft_sampled >= 0
                 if accepted:
                     u_pos = tl.load(pos_ptr + logit_idx).to(tl.int32)
-                    u_seed = tl.randint(seed, u_pos)
+                    # An uncommitted position can be verified again at a
+                    # different step in the next block.
+                    u_seed = tl.randint(spec_step_seed(seed, i), u_pos)
                     u = tl.max(tl.rand(u_seed, tl.arange(0, 1)).to(tl.float32), axis=0)
                     u = tl.maximum(u, _TL_RAND_MIN)
                     prefix_joint_ratio = tl.exp(tl.load(cumulative_log_p_ptr + logit_idx).to(tl.float32))

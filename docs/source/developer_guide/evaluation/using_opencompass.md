@@ -103,7 +103,7 @@ models = [
 Run the following command:
 
 ```shell
-python3 run.py opencompass/configs/eval_vllm_ascend_demo.py --debug
+cd opencompass && python3 run.py configs/eval_vllm_ascend_demo.py --debug
 ```
 
 After 1 to 2 minutes, the output is shown below:

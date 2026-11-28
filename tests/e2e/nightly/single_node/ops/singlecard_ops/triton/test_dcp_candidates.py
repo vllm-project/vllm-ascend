@@ -127,6 +127,53 @@ def test_sorted_pack_preserves_score_bits_at_local_id_limit(dtype, world, rows):
     assert torch.equal(actual.cpu(), expected)
 
 
+@pytest.mark.parametrize("sort_candidates,fuse_sort", [(False, False), (True, False), (True, True)])
+@pytest.mark.parametrize("dtype", [torch.bfloat16, torch.float32])
+def test_pack_skips_empty_local_prefix_and_padding(sort_candidates, fuse_sort, dtype):
+    # All raw slots look valid, including the empty prefix between two live rows.
+    torch.npu.set_device(0)
+    rows, k = 128, 2048
+    ids = torch.arange(k, dtype=torch.int32).repeat(rows, 1).view(rows, 1, k)
+    scores = (k - ids).to(dtype)
+    visible = torch.zeros(rows, dtype=torch.int32)
+    visible[[0, 2]] = k
+    device_ids, device_scores, device_visible = ids.npu(), scores.npu(), visible.npu()
+
+    def run():
+        return pack_local_candidates(
+            device_ids,
+            device_scores,
+            8,
+            0,
+            768,
+            sort_candidates=sort_candidates,
+            fuse_sort=fuse_sort,
+            visible_lengths=device_visible,
+        )
+
+    def check(packed):
+        live = visible[:, None] > 0
+        expected_ids = torch.where(live, local_to_global(ids[:, 0], 8, 0, 768), -1)
+        expected_scores = torch.where(live, scores[:, 0].float(), -torch.inf)
+        assert torch.equal(packed.cpu(), torch.stack((expected_ids, expected_scores.view(torch.int32)), -1))
+
+    for _ in range(3):
+        packed = run()
+    check(packed)
+    graph = torch.npu.NPUGraph()
+    with torch.npu.graph(graph):
+        captured = run()
+    # Formerly live rows become padding, and previously skipped rows become
+    # live. Raw candidate buffers stay poisoned with plausible data throughout.
+    for active_rows in ([1, 3, rows - 1], [], [0, 2]):
+        visible.zero_()
+        visible[active_rows] = k
+        device_visible.copy_(visible)
+        graph.replay()
+        check(captured)
+    graph.reset()
+
+
 def test_bf16_candidates_pack_and_global_topk_match_reference():
     world, rows, topk, interleave = 8, 2, 16, 768
     packed, ids, values = [], [], []

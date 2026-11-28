@@ -900,81 +900,115 @@ vLLM Ascend revision.
     engines.
 
     For W8A8 weights, use Prefill DP4/TP4 and Decode DP8/TP2. Adjust the
-    launcher, connector layouts, and proxy endpoints to match that topology.
+    launcher and proxy endpoints to match that topology.
 
     #### 5.2.1.1 Prepare the DP Launcher
 
-    Save the following script as `launch_online_dp.py` on both nodes. It divides
-    the node's visible devices among local DP ranks and starts one vLLM process per
-    rank.
+    Save the following script from the [official example](https://github.com/vllm-project/vllm-ascend/blob/main/examples/external_online_dp/launch_online_dp.py)
+    as `launch_online_dp.py` on both nodes, beside the node's `run_dp_template.sh`.
+    Run the launcher from that directory. It starts one vLLM process per local DP
+    rank, assigning `tp-size * pcp-size * pp-size` devices to each rank.
+    The templates below use PP=1; leave `--pp-size` at its default of `1`.
 
     ```python
+    #!/usr/bin/env python3
+    """Launch one shell template per local DP rank."""
+
     import argparse
-    import multiprocessing
     import os
+    import signal
     import subprocess
     import sys
+    import time
+
+    POLL_INTERVAL = 0.1
 
 
     def parse_args():
         parser = argparse.ArgumentParser()
-        parser.add_argument("--dp-size", type=int, required=True)
-        parser.add_argument("--tp-size", type=int, default=1)
-        parser.add_argument("--pcp-size", type=int, default=1)
-        parser.add_argument("--dp-size-local", type=int, default=-1)
-        parser.add_argument("--dp-rank-start", type=int, default=0)
-        parser.add_argument("--dp-address", type=str, required=True)
-        parser.add_argument("--dp-rpc-port", type=str, default="12345")
-        parser.add_argument("--vllm-start-port", type=int, default=9000)
-        return parser.parse_args()
+        parser.add_argument("--dp-size", type=int, required=True, help="Global data parallel size.")
+        parser.add_argument("--tp-size", type=int, default=1, help="Tensor parallel size.")
+        parser.add_argument("--pcp-size", type=int, default=1, help="Prefill context parallel size (default: 1).")
+        parser.add_argument("--pp-size", type=int, default=1, help="Pipeline parallel size (default: 1).")
+        parser.add_argument("--dp-size-local", type=int, default=-1, help="Local DP size; defaults to --dp-size.")
+        parser.add_argument("--dp-rank-start", type=int, default=0, help="First global DP rank on this node.")
+        parser.add_argument("--dp-address", required=True, help="IP address of the DP master node.")
+        parser.add_argument("--dp-rpc-port", type=int, default=12345, help="DP RPC port.")
+        parser.add_argument("--vllm-start-port", type=int, default=9000, help="First API port on this node.")
+        parser.add_argument("--template", "--script", default="./run_dp_template.sh", help="Shell template path.")
+        args = parser.parse_args()
+
+        if args.dp_size_local == -1:
+            args.dp_size_local = args.dp_size
+        if min(args.dp_size, args.dp_size_local, args.tp_size, args.pcp_size, args.pp_size) < 1:
+            parser.error("Parallel sizes must be positive.")
+        if args.dp_rank_start < 0 or args.dp_rank_start + args.dp_size_local > args.dp_size:
+            parser.error("Local DP ranks exceed the global DP range.")
+        if not os.path.isfile(args.template):
+            parser.error(f"Template does not exist: {args.template}")
+        return args
 
 
-    args = parse_args()
-    dp_size = args.dp_size
-    tp_size = args.tp_size
-    pcp_size = args.pcp_size
-    dp_size_local = args.dp_size if args.dp_size_local == -1 else args.dp_size_local
+    def handle_sigterm(signum, frame):
+        raise SystemExit()
 
 
-    def run_command(visible_devices, dp_rank, vllm_engine_port):
-        command = [
-            "bash",
-            "./run_dp_template.sh",
-            visible_devices,
-            str(vllm_engine_port),
-            str(dp_size),
-            str(dp_rank),
-            args.dp_address,
-            args.dp_rpc_port,
-            str(tp_size),
-            str(pcp_size),
-        ]
-        subprocess.run(command, check=True)
+    def main():
+        args = parse_args()
+        devices_per_rank = args.tp_size * args.pcp_size * args.pp_size
+        processes = []
+        try:
+            signal.signal(signal.SIGTERM, handle_sigterm)
+            for i in range(args.dp_size_local):
+                dp_rank = args.dp_rank_start + i
+                port = args.vllm_start_port + i
+                devices = ",".join(str(x) for x in range(i * devices_per_rank, (i + 1) * devices_per_rank))
+                command = [
+                    "bash",
+                    "-o",
+                    "pipefail",
+                    args.template,
+                    devices,  # $1: visible devices
+                    str(port),  # $2: API port
+                    str(args.dp_size),  # $3: global DP size
+                    str(dp_rank),  # $4: global DP rank
+                    args.dp_address,  # $5: DP address
+                    str(args.dp_rpc_port),  # $6: DP RPC port
+                    str(args.tp_size),  # $7: TP
+                    str(args.pcp_size),  # $8: PCP
+                    str(args.pp_size),  # $9: PP
+                ]
+
+                print(f"DP rank={dp_rank}, devices={devices}, API port={port}", flush=True)
+                # Start all local ranks before waiting; each rank owns a process group.
+                processes.append(subprocess.Popen(command, start_new_session=True))
+
+            # Check every rank so a running rank cannot hide another rank's failure.
+            while True:
+                running = False
+                for i, process in enumerate(processes):
+                    code = process.poll()
+                    if code is None:
+                        running = True
+                    elif code != 0:
+                        raise RuntimeError(f"DP rank {args.dp_rank_start + i} exited with code {code}")
+                if not running:
+                    return 0
+                time.sleep(POLL_INTERVAL)
+        except BaseException:
+            # Notify every recorded rank, including workers whose shell has exited.
+            for process in processes:
+                try:
+                    os.killpg(process.pid, signal.SIGTERM)
+                except ProcessLookupError:
+                    continue
+            for process in processes:
+                process.wait()
+            raise
 
 
     if __name__ == "__main__":
-        if not os.path.exists("./run_dp_template.sh"):
-            print("Template file ./run_dp_template.sh does not exist.")
-            sys.exit(1)
-
-        devices_per_rank = tp_size * pcp_size
-        processes = []
-        for i in range(dp_size_local):
-            dp_rank = args.dp_rank_start + i
-            vllm_engine_port = args.vllm_start_port + i
-            visible_devices = ",".join(
-                str(device)
-                for device in range(i * devices_per_rank, (i + 1) * devices_per_rank)
-            )
-            process = multiprocessing.Process(
-                target=run_command,
-                args=(visible_devices, dp_rank, vllm_engine_port),
-            )
-            processes.append(process)
-            process.start()
-
-        for process in processes:
-            process.join()
+        sys.exit(main())
     ```
 
     The launcher arguments are:
@@ -983,31 +1017,40 @@ vLLM Ascend revision.
     |-----------|-------------|
     | `--dp-size` | Global DP size within the Prefill or Decode node group. |
     | `--tp-size` | Tensor-parallel size within each DP rank. |
-    | `--pcp-size` | Prefill context-parallel size; each DP rank uses `tp-size * pcp-size` logical devices. Defaults to `1`. |
-    | `--dp-size-local` | Number of DP ranks started on the current node. |
+    | `--pcp-size` | Prefill context-parallel size. Defaults to `1`. |
+    | `--pp-size` | Pipeline-parallel size. Leave at the default of `1` for the templates below. |
+    | `--dp-size-local` | Number of DP ranks started on the current node. Defaults to `--dp-size`. |
     | `--dp-rank-start` | First DP rank assigned to this node. It is `0` for both single-node groups in this 1P1D example. |
     | `--dp-address` | IP address of the node that coordinates the corresponding DP group. Use the Prefill IP on the Prefill node and the Decode IP on the Decode node. |
     | `--dp-rpc-port` | DP coordination port. It must be unused and reachable within the node group. |
     | `--vllm-start-port` | First API port; the launcher increments it for each local DP rank. |
+    | `--template`, `--script` | Path to the shell template. Defaults to `./run_dp_template.sh`. |
 
-    The launcher passes eight positional arguments to `run_dp_template.sh`:
+    The launcher passes nine positional arguments to `run_dp_template.sh`:
 
     | Position | Value | Used by the template |
     |----------|-------|----------------------|
-    | `$1` | `visible_devices` | `ASCEND_RT_VISIBLE_DEVICES` |
-    | `$2` | `vllm_engine_port` | `--port` |
-    | `$3` | `dp_size` | `--data-parallel-size` |
+    | `$1` | `devices` | `ASCEND_RT_VISIBLE_DEVICES` |
+    | `$2` | `port` | `--port` |
+    | `$3` | `args.dp_size` | `--data-parallel-size` |
     | `$4` | `dp_rank` | `--data-parallel-rank` |
     | `$5` | `args.dp_address` | `--data-parallel-address` |
     | `$6` | `args.dp_rpc_port` | `--data-parallel-rpc-port` |
-    | `$7` | `tp_size` | `--tensor-parallel-size` |
-    | `$8` | `pcp_size` | `--prefill-context-parallel-size` |
+    | `$7` | `args.tp_size` | `--tensor-parallel-size` |
+    | `$8` | `args.pcp_size` | `--prefill-context-parallel-size` |
+    | `$9` | `args.pp_size` | Unused; PP remains `1`. |
 
     #### 5.2.1.2 Start the Prefill Node
 
     On the Prefill node, save the following script as `run_dp_template.sh`. Set
     `LOCAL_IP`, `NIC_NAME`, and `MODEL_PATH` to the Prefill node's service IP,
     network interface, and local checkpoint path.
+
+    The `--eplb-config` settings below use `window_size: 64` and
+    `step_interval: 128` for short benchmark runs. These smaller values provide
+    faster load feedback and more frequent expert rearrangements. For production
+    deployments, use `window_size: 1000` and `step_interval: 3000` for more stable
+    behavior, as recommended in the [EPLB guide](../../user_guide/feature_guide/expert_parallelism_load_balancer.md).
 
     ```shell
     #!/usr/bin/env bash
@@ -1025,6 +1068,7 @@ vLLM Ascend revision.
     export TP_SOCKET_IFNAME="$NIC_NAME"
     export HCCL_SOCKET_IFNAME="$NIC_NAME"
     export VLLM_USE_V2_MODEL_RUNNER=1
+    export VLLM_USE_FASTOKENS=1
     export VLLM_ENGINE_READY_TIMEOUT_S=36000
     export PYTORCH_NPU_ALLOC_CONF=expandable_segments:True
     export HCCL_BUFFSIZE=1024
@@ -1042,6 +1086,13 @@ vLLM Ascend revision.
         --tensor-parallel-size $7 \
         --prefill-context-parallel-size $8 \
         --enable-expert-parallel \
+        --enable-eplb \
+        --eplb-config '{
+            "window_size":64,
+            "step_interval":128,
+            "policy":"stair",
+            "num_redundant_experts":16
+        }' \
         --seed 1024 \
         --served-model-name dsv41 \
         --max-model-len 1048576 \
@@ -1062,19 +1113,17 @@ vLLM Ascend revision.
         --enable-prefix-caching \
         --engram-config '{"cpu_offload":true,"dp_shared_memory":true}' \
         --additional-config '{
-            "enable_cpu_binding":true,
-            "enable_fused_mc2":2,
-            "enable_flashcomm1":false,
-            "multistream_overlap_shared_expert":false
+            "enable_cpu_binding": true,
+            "weight_nz_mode": 2,
+            "enable_fused_mc2": 3,
+            "enable_flashcomm1": false,
+            "multistream_overlap_shared_expert": false,
+            "enable_shared_expert_dp": true
         }' \
         --kv-transfer-config '{
-            "kv_connector":"MooncakeHybridConnector",
+            "kv_connector":"MooncakeConnectorV2",
             "kv_role":"kv_producer",
-            "kv_port":"30000",
-            "kv_connector_extra_config":{
-                "prefill":{"dp_size":4,"tp_size":1},
-                "decode":{"dp_size":16,"tp_size":1}
-            }
+            "kv_port":"30000"
         }'
     ```
 
@@ -1113,6 +1162,7 @@ vLLM Ascend revision.
     MODEL_PATH="<YOUR_MODEL_PATH>"
 
     export VLLM_USE_V2_MODEL_RUNNER=1
+    export VLLM_USE_FASTOKENS=1
     export VLLM_ENGINE_READY_TIMEOUT_S=36000
     export PYTORCH_NPU_ALLOC_CONF=expandable_segments:True
     export HCCL_IF_IP="$LOCAL_IP"
@@ -1136,7 +1186,7 @@ vLLM Ascend revision.
         --seed 1024 \
         --served-model-name dsv41 \
         --max-model-len 1048576 \
-        --max-num-batched-tokens 512 \
+        --max-num-batched-tokens 432 \
         --max-num-seqs 72 \
         --async-scheduling \
         --block-size 128 \
@@ -1153,23 +1203,20 @@ vLLM Ascend revision.
         --speculative-config '{"num_speculative_tokens":5,"method":"dspark"}' \
         --compilation-config '{"cudagraph_mode":"FULL_DECODE_ONLY"}' \
         --kv-transfer-config '{
-            "kv_connector":"MooncakeHybridConnector",
+            "kv_connector":"MooncakeConnectorV2",
             "kv_role":"kv_consumer",
-            "kv_port":"30100",
-            "kv_connector_extra_config":{
-                "prefill":{"dp_size":4,"tp_size":1},
-                "decode":{"dp_size":16,"tp_size":1}
-            }
+            "kv_port":"30100"
         }' \
         --engram-config '{"cpu_offload":true,"dp_shared_memory":true}' \
         --additional-config '{
-            "ascend_compilation_config":{
-                "enable_npugraph_ex":true,
-                "enable_static_kernel":false
+            "ascend_compilation_config": {
+                "enable_npugraph_ex": true,
+                "enable_static_kernel": false
             },
-            "enable_cpu_binding":true,
-            "multistream_overlap_shared_expert":true,
-            "recompute_scheduler_enable":true
+            "enable_cpu_binding": true,
+            "weight_nz_mode": 2,
+            "recompute_scheduler_enable": true,
+            "enable_fused_mc2": 3
         }'
     ```
 
@@ -1195,7 +1242,9 @@ vLLM Ascend revision.
     in [Prefill-Decode Disaggregation (DeepSeek)](../features/pd_disaggregation_mooncake_multi_node.md).
     Configure the proxy with Prefill endpoints `<PREFILL_NODE_IP>:7100` through
     `<PREFILL_NODE_IP>:7103` and Decode endpoints `<DECODE_NODE_IP>:7100` through
-    `<DECODE_NODE_IP>:7115`.
+    `<DECODE_NODE_IP>:7115`. Add `--workers 4` to the proxy command to run four
+    proxy worker processes with shared scheduling state. This does not change
+    the number of Prefill or Decode engines.
 
     #### 5.2.1.5 Key Parameter Descriptions
 
@@ -1203,6 +1252,27 @@ vLLM Ascend revision.
       to 36,000 seconds to finish startup. This includes weight loading and Decode
       graph preparation.
     - `VLLM_USE_V2_MODEL_RUNNER=1` selects model runner V2 on both roles.
+    - `VLLM_USE_FASTOKENS=1` enables the fastokens tokenizer backend. Both
+      containers must include `fastokens>=0.3.5`.
+    - `--enable-eplb` enables expert parallel load balancing on Prefill.
+      `--eplb-config` configures the following parameters:
+
+        - `window_size: 64`: Number of recent steps used to record expert load.
+        - `step_interval: 128`: Number of steps between expert rearrangement
+          attempts. When this exceeds `window_size`, only metrics from the last
+          `window_size` steps are used.
+        - `policy: "stair"`: Selects Ascend's STAIR expert load-balancing policy.
+        - `num_redundant_experts: 16`: Total number of redundant physical experts
+          across the EP group, not per rank. Redundant experts consume additional
+          device memory, and `(num_experts + num_redundant_experts)` must be
+          divisible by the expert-parallel size.
+
+        As in Section 5.2.1.2, `window_size: 64` and `step_interval: 128` are
+        intended for short benchmark runs, providing faster load feedback and
+        more opportunities for expert rearrangement. For production deployments,
+        use `window_size: 1000` and `step_interval: 3000` for more stable behavior.
+        See [Expert Parallel Load Balancing](../../user_guide/feature_guide/expert_parallelism_load_balancer.md).
+
     - `--data-parallel-size`, `--prefill-context-parallel-size`, and
       `--tensor-parallel-size` define DP4/PCP4/TP1 on Prefill and DP16/PCP1/TP1
       on Decode. Their product is 16 on each node. The launcher assigns four
@@ -1216,16 +1286,13 @@ vLLM Ascend revision.
       `7100-7115` on Decode. These endpoints must be reachable by the PD proxy.
     - Both roles use `--max-model-len 1048576`. Prefill uses
       `--max-num-batched-tokens 8192` and `--max-num-seqs 16` to favor prompt
-      throughput, while Decode uses `512` and `72` respectively to favor decode
-      concurrency. Tune these role-specific scheduler limits independently.
-    - `MooncakeHybridConnector` transfers KV cache between the two roles.
+      throughput, while Decode uses `432` and `72` respectively to limit the
+      per-step token budget and active sequences. Tune these role-specific
+      scheduler limits independently for the workload's latency and throughput.
+    - `MooncakeConnectorV2` transfers KV cache between the two roles using its
+      default non-layerwise pull mode.
       `kv_role` must be `kv_producer` on Prefill and `kv_consumer` on Decode.
       `kv_port` must be reachable and must not conflict with another service.
-    - `kv_connector_extra_config` must match the actual global layouts on both
-      sides: Prefill DP4/TP1 and Decode DP16/TP1. PCP4 is configured separately
-      with `--prefill-context-parallel-size`; it does not change `tp_size` in the
-      connector configuration. Keep both connector layouts identical in the
-      Prefill and Decode commands.
     - Both roles use DSpark with five speculative tokens. Prefill runs the target
       model in eager mode. Decode uses `FULL_DECODE_ONLY` for the target model
       and allows graph execution for the DSpark draft model as well.
@@ -1238,14 +1305,18 @@ vLLM Ascend revision.
       Decode path while Prefill remains outside the captured graph.
     - Prefix caching is enabled only on Prefill. Decode disables it and enables
       `recompute_scheduler_enable` so Prefill can recompute unavailable KV cache.
+    - Both roles set `weight_nz_mode: 2` to allow NZ conversion for supported
+      FP16/BF16 weights as well as quantized weights. This is a runtime weight
+      format setting; continue to use the same W4A8 checkpoint on both roles.
     - Prefill uses the following `--additional-config` options:
 
         - `enable_cpu_binding: true` enables Ascend-native CPU affinity for worker
         processes and runtime threads.
-        - `enable_fused_mc2: 2` selects the MegaMoE path on Prefill.
+        - `enable_fused_mc2: 3` requests MegaMoE with shared-expert fusion.
         - `enable_flashcomm1: false` disables FlashComm for compatibility with SWA bounded replay.
         - `multistream_overlap_shared_expert: false` disables shared-expert
         multistream overlap on Prefill, where MegaMoE is enabled.
+        - `enable_shared_expert_dp: true` requests shared-expert data parallelism.
 
     - Decode uses the following `--additional-config` options:
 
@@ -1255,17 +1326,14 @@ vLLM Ascend revision.
         kernel generation while retaining the enhanced ACL Graph path.
         - `enable_cpu_binding: true` enables Ascend-native CPU affinity for worker
         processes and runtime threads.
-        - `multistream_overlap_shared_expert: true` enables shared-expert multistream
-        overlap on Decode, where MegaMoE is not enabled. Shared-expert execution
-        overlaps routed-expert computation on separate streams.
+        - `enable_fused_mc2: 3` requests MegaMoE with shared-expert fusion.
         - `recompute_scheduler_enable: true` enables the PD Decode recomputation
         scheduler. When the Decode-side KV cache is unavailable, the request can be
         sent back to Prefill to recompute it. Enable this option only on Decode.
 
-      The Prefill and Decode configurations are role-specific. Do not copy the
-      Prefill MegaMoE and PCP options to Decode, or the Decode graph, multistream,
-      and recomputation options to Prefill, without validating the resulting
-      topology and performance.
+      The Prefill and Decode configurations are role-specific. Validate the
+      topology and performance before changing the Prefill PCP settings or the
+      Decode graph and recomputation settings.
 
       `HCCL_IF_IP` and the socket interface variables must select the same high-speed
       service network used by the configured node IPs. `HCCL_BUFFSIZE` is `1024` on
@@ -1957,14 +2025,18 @@ Select the tab for the target hardware.
     #### 5.3.2 Memcache KV Cache Pool
 
     This configuration extends the A3 1P1D deployment in [Section 5.2](#52-1p1d-pd-disaggregated-deployment) with a
-    Memcache KV Cache Pool. `MooncakeHybridConnector` continues to transfer KV
+    Memcache KV Cache Pool. `MooncakeConnectorV2` continues to transfer KV
     cache from Prefill to Decode, while `AscendStoreConnector` stores reusable KV
     cache in Memcache. Both connectors are configured as children of
     `MultiConnector`.
 
-    DeepSeek-V4.1-Flash does not support layerwise KV Cache Pool access because its
-    CED hybrid-attention model structure is incompatible with layer-by-layer KV
-    save and load. Keep `use_layerwise` set to `false` on both Prefill and Decode.
+    Use the same W4A8 checkpoint as [Section 5.2](#52-1p1d-pd-disaggregated-deployment). This recipe uses
+    Prefill DP4/PCP4/TP1 with EPLB, Decode DP16/TP1 with a 432-token budget and
+    72 sequences, and `weight_nz_mode: 2` on both roles. Both containers must
+    include `fastokens>=0.3.5`.
+    `MooncakeConnectorV2` uses its default non-layerwise pull mode; keep the
+    `AscendStoreConnector` child for pool access. Check connector port allocations
+    as described in the [KV transfer configuration guide](../../user_guide/feature_guide/kv_cache_pool_ascend_store.md#kv-transfer-config-common-parameters).
 
     Before starting vLLM, follow the
     [Memcache backend guide](../../user_guide/feature_guide/kv_cache_pool_ascend_store.md#scenario-2-memcache-backend)
@@ -2063,16 +2135,22 @@ Select the tab for the target hardware.
     For additional parameters and capacity constraints, refer to
     [Memcache and vLLM separated deployment](../../user_guide/feature_guide/kv_cache_pool_ascend_store.md#Memcache-and-vLLM-Separated-Deployment).
 
-    Reuse `launch_online_dp.py` from [Section 5.2.1.1](#5211-prepare-the-dp-launcher). Set `MEMCACHE_INSTALL_PATH` to
-    the `Location` reported by `pip show memcache_hybrid`, and set
-    `MEMCACHE_CONFIG_DIR` to the absolute directory containing the configuration
-    files above on both nodes.
+    Reuse `launch_online_dp.py` from [Section 5.2.1.1](#5211-prepare-the-dp-launcher).
+    In each role script below, set `MEMCACHE_INSTALL_PATH` to the `Location`
+    reported by `pip show memcache_hybrid`, and `MEMCACHE_CONFIG_DIR` to the
+    absolute directory containing the configuration files above.
 
     ##### 5.3.2.2 Start the Prefill Node with Pooling
 
-    On the Prefill node, save the following script as `run_dp_template.sh`. Set
-    `LOCAL_IP`, `NIC_NAME`, `MODEL_PATH`, `MEMCACHE_INSTALL_PATH`, and
+    On the Prefill node, save the following script as `run_dp_template.sh`.
+    Set `LOCAL_IP`, `NIC_NAME`, `MODEL_PATH`, `MEMCACHE_INSTALL_PATH`, and
     `MEMCACHE_CONFIG_DIR` for the local environment.
+
+    The `--eplb-config` settings below use `window_size: 64` and
+    `step_interval: 128` for short benchmark runs. These smaller values provide
+    faster load feedback and more frequent expert rearrangements. For production
+    deployments, use `window_size: 1000` and `step_interval: 3000` for more stable
+    behavior, as recommended in the [EPLB guide](../../user_guide/feature_guide/expert_parallelism_load_balancer.md).
 
     ```shell
     #!/usr/bin/env bash
@@ -2091,6 +2169,7 @@ Select the tab for the target hardware.
     export TP_SOCKET_IFNAME="$NIC_NAME"
     export HCCL_SOCKET_IFNAME="$NIC_NAME"
     export VLLM_USE_V2_MODEL_RUNNER=1
+    export VLLM_USE_FASTOKENS=1
     export VLLM_ENGINE_READY_TIMEOUT_S=36000
     export PYTORCH_NPU_ALLOC_CONF=expandable_segments:True
     export HCCL_BUFFSIZE=1024
@@ -2112,12 +2191,22 @@ Select the tab for the target hardware.
         --tensor-parallel-size $7 \
         --prefill-context-parallel-size $8 \
         --enable-expert-parallel \
+        --enable-eplb \
+        --eplb-config '{
+            "window_size": 64,
+            "step_interval": 128,
+            "policy": "stair",
+            "num_redundant_experts": 16
+        }' \
         --seed 1024 \
         --served-model-name dsv41 \
         --max-model-len 1048576 \
         --max-num-batched-tokens 8192 \
         --max-num-seqs 16 \
-        --speculative-config '{"num_speculative_tokens":5,"method":"dspark"}' \
+        --speculative-config '{
+            "num_speculative_tokens": 5,
+            "method": "dspark"
+        }' \
         --trust-remote-code \
         --block-size 128 \
         --tokenizer-mode deepseek_v41 \
@@ -2130,12 +2219,17 @@ Select the tab for the target hardware.
         --enforce-eager \
         --swa-bounded-replay \
         --enable-prefix-caching \
-        --engram-config '{"cpu_offload":true,"dp_shared_memory":true}' \
+        --engram-config '{
+            "cpu_offload": true,
+            "dp_shared_memory": true
+        }' \
         --additional-config '{
-            "enable_cpu_binding":true,
-            "enable_fused_mc2":2,
-            "enable_flashcomm1":false,
-            "multistream_overlap_shared_expert":false
+            "enable_cpu_binding": true,
+            "weight_nz_mode": 2,
+            "enable_fused_mc2": 3,
+            "enable_flashcomm1": false,
+            "multistream_overlap_shared_expert": false,
+            "enable_shared_expert_dp": true
         }' \
         --kv-transfer-config '{
             "kv_connector":"MultiConnector",
@@ -2145,13 +2239,9 @@ Select the tab for the target hardware.
             "kv_connector_extra_config":{
                 "connectors":[
                     {
-                        "kv_connector":"MooncakeHybridConnector",
+                        "kv_connector":"MooncakeConnectorV2",
                         "kv_role":"kv_producer",
-                        "kv_port":"30000",
-                        "kv_connector_extra_config":{
-                            "prefill":{"dp_size":4,"tp_size":1},
-                            "decode":{"dp_size":16,"tp_size":1}
-                        }
+                        "kv_port":"30000"
                     },
                     {
                         "kv_connector":"AscendStoreConnector",
@@ -2159,7 +2249,7 @@ Select the tab for the target hardware.
                         "kv_connector_extra_config":{
                             "backend":"memcache",
                             "lookup_rpc_port":"0",
-                            "use_layerwise":false
+                            "use_layerwise":true
                         }
                     }
                 ]
@@ -2173,8 +2263,8 @@ Select the tab for the target hardware.
 
     ##### 5.3.2.3 Start the Decode Node with Pooling
 
-    On the Decode node, save the following script as `run_dp_template.sh`. Set
-    `LOCAL_IP`, `NIC_NAME`, `MODEL_PATH`, `MEMCACHE_INSTALL_PATH`, and
+    On the Decode node, save the following script as `run_dp_template.sh`.
+    Set `LOCAL_IP`, `NIC_NAME`, `MODEL_PATH`, `MEMCACHE_INSTALL_PATH`, and
     `MEMCACHE_CONFIG_DIR` for the local environment.
 
     ```shell
@@ -2190,6 +2280,7 @@ Select the tab for the target hardware.
     MEMCACHE_CONFIG_DIR="<MEMCACHE_CONFIG_DIR>"
 
     export VLLM_USE_V2_MODEL_RUNNER=1
+    export VLLM_USE_FASTOKENS=1
     export VLLM_ENGINE_READY_TIMEOUT_S=36000
     export PYTORCH_NPU_ALLOC_CONF=expandable_segments:True
     export HCCL_IF_IP="$LOCAL_IP"
@@ -2217,7 +2308,7 @@ Select the tab for the target hardware.
         --seed 1024 \
         --served-model-name dsv41 \
         --max-model-len 1048576 \
-        --max-num-batched-tokens 512 \
+        --max-num-batched-tokens 432 \
         --max-num-seqs 72 \
         --async-scheduling \
         --block-size 128 \
@@ -2231,8 +2322,13 @@ Select the tab for the target hardware.
         --safetensors-load-strategy lazy \
         --gpu-memory-utilization 0.95 \
         --quantization ascend \
-        --speculative-config '{"num_speculative_tokens":5,"method":"dspark"}' \
-        --compilation-config '{"cudagraph_mode":"FULL_DECODE_ONLY"}' \
+        --speculative-config '{
+            "num_speculative_tokens": 5,
+            "method": "dspark"
+        }' \
+        --compilation-config '{
+            "cudagraph_mode": "FULL_DECODE_ONLY"
+        }' \
         --kv-transfer-config '{
             "kv_connector":"MultiConnector",
             "kv_role":"kv_consumer",
@@ -2241,13 +2337,9 @@ Select the tab for the target hardware.
             "kv_connector_extra_config":{
                 "connectors":[
                     {
-                        "kv_connector":"MooncakeHybridConnector",
+                        "kv_connector":"MooncakeConnectorV2",
                         "kv_role":"kv_consumer",
-                        "kv_port":"30100",
-                        "kv_connector_extra_config":{
-                            "prefill":{"dp_size":4,"tp_size":1},
-                            "decode":{"dp_size":16,"tp_size":1}
-                        }
+                        "kv_port":"30100"
                     },
                     {
                         "kv_connector":"AscendStoreConnector",
@@ -2261,15 +2353,19 @@ Select the tab for the target hardware.
                 ]
             }
         }' \
-        --engram-config '{"cpu_offload":true,"dp_shared_memory":true}' \
+        --engram-config '{
+            "cpu_offload": true,
+            "dp_shared_memory": true
+        }' \
         --additional-config '{
-            "ascend_compilation_config":{
-                "enable_npugraph_ex":true,
-                "enable_static_kernel":false
+            "ascend_compilation_config": {
+                "enable_npugraph_ex": true,
+                "enable_static_kernel": false
             },
-            "enable_cpu_binding":true,
-            "multistream_overlap_shared_expert":true,
-            "recompute_scheduler_enable":true
+            "enable_cpu_binding": true,
+            "weight_nz_mode": 2,
+            "recompute_scheduler_enable": true,
+            "enable_fused_mc2": 3
         }'
     ```
 
@@ -2279,27 +2375,26 @@ Select the tab for the target hardware.
     ##### 5.3.2.4 Startup and Verification
 
     Start the components in this order: Memcache MetaService, standalone Memcache
-    on both Prefill and Decode nodes, Decode engines, Prefill engines, and then the
+    on both Prefill and Decode nodes, Prefill engines, Decode engines, and then the
     PD proxy.
 
     Wait until both standalone Memcache processes report successful initialization
     before starting the Decode engines. Then wait until every Decode engine reports
     `Application startup complete` before starting Prefill. After every Prefill engine is ready, start the proxy with the
-    same endpoint mapping described in [Section 5.2.1.4](#5214-deploy-the-pd-proxy).
+    same endpoint mapping and `--workers 4` setting described in
+    [Section 5.2.1.4](#5214-deploy-the-pd-proxy).
 
-    Send the same request twice with a reusable prefix. Confirm that Prefill logs
-    show Memcache lookup, get, put, and hit activity, and that Decode logs still
-    show normal Prefill-to-Decode KV transfer.
+    Send a long prompt to populate the pool, then reuse its prefix with a
+    different suffix. Check all Prefill ranks for increased
+    `external_prefix_cache_hits_total` and successful Memcache get/load activity.
+    Confirm that Decode logs still show normal Prefill-to-Decode KV transfer.
 
     Key pooling parameters:
 
     - `MultiConnector` combines live P-to-D transfer through
-      `MooncakeHybridConnector` with persistent prefix reuse through
+      `MooncakeConnectorV2` with persistent prefix reuse through
       `AscendStoreConnector`.
     - `backend: "memcache"` selects Memcache as the KV Cache Pool backend.
-    - `use_layerwise: false` is required for DeepSeek-V4.1-Flash. Do not enable
-      layerwise pooling for this model because its CED hybrid-attention structure
-      is not supported by the layerwise path.
 
     For Memcache configuration, capacity tuning, and troubleshooting, refer to the
     [Memcache backend guide](../../user_guide/feature_guide/kv_cache_pool_ascend_store.md#scenario-2-memcache-backend).
@@ -2825,6 +2920,28 @@ KV cache for the 1M-token context. For the A2 two-node colocated deployment,
 keep `--gpu-memory-utilization` at `0.9`: each 64GB device already reports
 about 61.4 GiB of HBM in use at that setting, so higher values leave no
 headroom for the KV cache.
+
+For peak-performance benchmarking on the A3 Decode node, use four-way tensor
+parallelism for `lm_head`. Merge the following entry into the existing
+`--additional-config` JSON object:
+
+```json
+{
+    "finegrained_tp_config": {
+        "lmhead_tensor_parallel_size": 4
+    }
+}
+```
+
+Use these Decode scheduling limits with the configuration above:
+
+```shell
+--max-num-seqs 24 \
+--max-num-batched-tokens 168
+```
+
+See [Fine-Grained Tensor Parallelism](../../user_guide/feature_guide/Fine_grained_TP.md)
+for parameter details.
 
 ### 9.1 Tool-Assisted Tuning with msmodeling
 

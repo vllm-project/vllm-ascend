@@ -70,13 +70,17 @@ There is no extra work to do on decode nodes.
 
 Requirements and limitations:
 
-- Shared-buffer Layerwise Prefill Offload requires Memcache and eager mode.
-- `SfaRemoteD2HConnector` is the only supported connector to be used with prefill offload and decode offload.
+- Shared-buffer Layerwise Prefill Offload requires Memcache and a top-level
+  `kv_role` of `kv_producer`.
+- When graph execution is enabled with `use_layerwise: true` on
+  `AscendStoreConnector`, use `PIECEWISE` graph mode.
+- Use `SfaRemoteD2HConnector` when combining prefill offload with sparse decode offload.
 
 For a combined deployment, Prefill TP must be greater than or equal to Decode
 TP and divisible by it.
 
-Add the following options to the Prefill launch command. `MultiConnector` lets
+For the combined example, add the following options to the Prefill launch
+command, including `--enforce-eager`. `MultiConnector` lets
 `AscendStoreConnector` offload layer buffers to Memcache while
 `SfaRemoteD2HConnector` exposes the same buffers to Decode:
 
