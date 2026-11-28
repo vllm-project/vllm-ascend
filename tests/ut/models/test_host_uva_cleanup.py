@@ -2,6 +2,7 @@
 """Real shared mappings with simulated CANN initialization/cleanup failures."""
 
 import gc
+import logging
 import weakref
 from multiprocessing import shared_memory
 from types import SimpleNamespace
@@ -36,15 +37,23 @@ def shared_buffer_factory(monkeypatch):
     monkeypatch.setattr(npu, "_host_library", lambda: lib)
     monkeypatch.setattr(npu.DeviceOperator, "host_register_flags", lambda: 0)
     monkeypatch.setattr(npu.shared_memory, "SharedMemory", make_shm)
-    monkeypatch.setattr(npu.dist, "get_global_rank", lambda group, rank: 0)
+    monkeypatch.setattr(npu.dist, "get_global_rank", lambda group, rank: (1, 3)[rank])
     monkeypatch.setattr(npu.dist, "broadcast_object_list", lambda *a, **kw: None)
     monkeypatch.setattr(npu.dist, "barrier", lambda **kw: None)
     monkeypatch.setattr(npu.dist, "all_gather_object", lambda errors, error, **kw: errors.__setitem__(0, error))
     group = SimpleNamespace(cpu_group=None, rank_in_group=0, world_size=2)
 
-    def construct():
+    def construct(buffer_name="shared", checkpoint_layer_id=None):
         try:
-            owner = npu.SharedUvaBuffer((8, 32), torch.bfloat16, "cpu", group, "shared", torch.nn.Module())
+            owner = npu.SharedUvaBuffer(
+                (8, 32),
+                torch.bfloat16,
+                "cpu",
+                group,
+                buffer_name,
+                torch.nn.Module(),
+                checkpoint_layer_id=checkpoint_layer_id,
+            )
         except npu.HostUvaBufferCleanupError as exc:
             owners.append(weakref.ref(exc.host_buffer))
             raise
@@ -65,6 +74,112 @@ def shared_buffer_factory(monkeypatch):
         shm.close()
 
 
+@pytest.mark.parametrize(("layer", "table", "rc"), [(1, "codes", 0), (14, "scales", 207001)])
+def test_shared_engram_registration_events(shared_buffer_factory, monkeypatch, caplog, layer, table, rc):
+    construct, lib, names, real_shm = shared_buffer_factory
+    caplog.set_level(logging.INFO, logger=npu.logger.name)
+    events = []
+    clock = Mock(side_effect=[10.0, 11.25])
+    monkeypatch.setattr(npu, "monotonic", clock)
+
+    def log(fmt, *args):
+        events.append(fmt % args)
+        assert clock.call_count == (0 if len(events) == 1 else 2)
+
+    def register(pointer, size, flags):
+        assert len(events) == 1 and "registration start" in events[0]
+        assert clock.call_count == 1
+        return rc
+
+    monkeypatch.setattr(npu.logger, "info", log)
+    lib.aclrtHostRegisterV2.side_effect = register
+    if rc:
+        with pytest.raises(RuntimeError, match=f"rank 1: .*aclrtHostRegisterV2 failed: rc={rc}"):
+            construct(f"_{table}_uva", layer)
+        lib.aclrtHostGetDevicePointer.assert_not_called()
+        lib.aclrtHostUnregister.assert_not_called()
+    else:
+        construct(f"_{table}_uva", layer).close()
+        lib.aclrtHostUnregister.assert_called_once()
+    key = f"rank=1 layer={layer} table={table} bytes=512 shm={names[0]}"
+    assert events == [
+        f"Shared Engram registration start {key}",
+        f"Shared Engram registration end {key} elapsed=1.250000s rc={rc}",
+    ]
+    with pytest.raises(FileNotFoundError):
+        real_shm(name=names[0])
+
+
+@pytest.mark.parametrize(("layer", "level"), [(None, logging.INFO), (14, logging.WARNING)])
+def test_shared_registration_skips_disabled_diagnostics(shared_buffer_factory, monkeypatch, caplog, layer, level):
+    construct, lib, _, _ = shared_buffer_factory
+    caplog.set_level(level, logger=npu.logger.name)
+    clock = Mock(side_effect=AssertionError("registration clock should only run for INFO diagnostics"))
+    info = Mock()
+    rank_lookup = Mock(return_value=0)
+    monkeypatch.setattr(npu, "monotonic", clock)
+    monkeypatch.setattr(npu.logger, "info", info)
+    monkeypatch.setattr(npu.dist, "get_global_rank", rank_lookup)
+
+    construct("_codes_uva", layer).close()
+
+    clock.assert_not_called()
+    info.assert_not_called()
+    rank_lookup.assert_called_once_with(None, 0)  # Broadcast leader only.
+    lib.aclrtHostRegisterV2.assert_called_once()
+    lib.aclrtHostGetDevicePointer.assert_called_once()
+    lib.aclrtHostUnregister.assert_called_once_with(lib.aclrtHostRegisterV2.call_args.args[0])
+
+
+def test_completion_log_failure_releases_registered_range(shared_buffer_factory, monkeypatch, caplog):
+    construct, lib, names, real_shm = shared_buffer_factory
+    caplog.set_level(logging.INFO, logger=npu.logger.name)
+    monkeypatch.setattr(npu.logger, "info", Mock(side_effect=[None, RuntimeError("log failed")]))
+    with pytest.raises(RuntimeError, match="log failed"):
+        construct("_codes_uva", 14)
+    lib.aclrtHostGetDevicePointer.assert_not_called()
+    lib.aclrtHostUnregister.assert_called_once()
+    with pytest.raises(FileNotFoundError):
+        real_shm(name=names[0])
+
+
+def test_end_clock_failure_releases_registered_range(shared_buffer_factory, monkeypatch, caplog):
+    construct, lib, names, real_shm = shared_buffer_factory
+    caplog.set_level(logging.INFO, logger=npu.logger.name)
+    monkeypatch.setattr(npu, "monotonic", Mock(side_effect=[10.0, OSError("end clock failed")]))
+
+    with pytest.raises(RuntimeError, match="OSError: end clock failed"):
+        construct("_codes_uva", 14)
+
+    lib.aclrtHostRegisterV2.assert_called_once()
+    lib.aclrtHostUnregister.assert_called_once_with(lib.aclrtHostRegisterV2.call_args.args[0])
+    lib.aclrtHostGetDevicePointer.assert_not_called()
+    with pytest.raises(FileNotFoundError):
+        real_shm(name=names[0])
+
+
+@pytest.mark.parametrize("reporter", ["clock", "logger"])
+def test_failed_registration_preserves_cann_error_if_reporting_fails(
+    shared_buffer_factory, monkeypatch, caplog, reporter
+):
+    construct, lib, names, real_shm = shared_buffer_factory
+    caplog.set_level(logging.INFO, logger=npu.logger.name)
+    lib.aclrtHostRegisterV2.return_value = 207001
+    failure = OSError(f"end {reporter} failed")
+    if reporter == "clock":
+        monkeypatch.setattr(npu, "monotonic", Mock(side_effect=[10.0, failure]))
+    else:
+        monkeypatch.setattr(npu.logger, "info", Mock(side_effect=[None, failure]))
+
+    with pytest.raises(RuntimeError, match=rf"rank 1: .*rc=207001.*end {reporter} failed"):
+        construct("_scales_uva", 14)
+
+    lib.aclrtHostGetDevicePointer.assert_not_called()
+    lib.aclrtHostUnregister.assert_not_called()
+    with pytest.raises(FileNotFoundError):
+        real_shm(name=names[0])
+
+
 @pytest.mark.parametrize("failure", ["register", "device_pointer", "peer"])
 def test_failed_initialization_unlinks_shared_name(shared_buffer_factory, monkeypatch, failure):
     construct, lib, names, real_shm = shared_buffer_factory
@@ -76,7 +191,8 @@ def test_failed_initialization_unlinks_shared_name(shared_buffer_factory, monkey
         monkeypatch.setattr(
             npu.dist, "all_gather_object", lambda errors, error, **kw: errors.__setitem__(1, "peer failed")
         )
-    with pytest.raises(RuntimeError, match="initialization failed"):
+    failed_rank = 3 if failure == "peer" else 1
+    with pytest.raises(RuntimeError, match=f"initialization failed: rank {failed_rank}:"):
         construct()
     with pytest.raises(FileNotFoundError):
         real_shm(name=names[0])

@@ -43,8 +43,9 @@ def embedding_runtime(monkeypatch):
     _stub(
         monkeypatch,
         f"{prefix}.npu",
-        HostUvaBuffer=Mock(),
-        SharedUvaBuffer=Mock(),
+        HostUvaBuffer=Mock,
+        HostUvaBufferCleanupError=RuntimeError,
+        SharedUvaBuffer=Mock,
         gather_dequantize_engram_int8=Mock(),
         gather_dequantize_host_uva=Mock(),
         quantize_engram_rows=Mock(side_effect=AssertionError("native checkpoint must not be requantized")),

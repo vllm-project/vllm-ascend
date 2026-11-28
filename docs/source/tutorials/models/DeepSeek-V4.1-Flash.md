@@ -2965,6 +2965,59 @@ Keep the following options in the serving command:
 --enable-auto-tool-choice
 ```
 
+### 10.2 Which shared Engram table is still registering on 950DT&950PR products?
+
+With `--engram-config '{"cpu_offload":true,"dp_shared_memory":true}'`, these
+events come only from the local `SharedUvaBuffer` path, where DP or PCP peers
+map the same TP shard. With four-card TP4/DP1/PCP1 and local host offload,
+each shard has no sharing peer and uses a private `HostUvaBuffer`. The remote
+Engram path on these products skips local table allocation. Skip this check
+for both paths.
+
+Each participating worker logs `Shared Engram registration start` before
+entering `aclrtHostRegisterV2`. Match it to the `end` event by global rank,
+checkpoint layer, table (`codes` or `scales`), bytes and shared memory name (`shm`).
+An unmatched start identifies the last call entered by that worker. The end
+event gives the time inside the call in seconds and the CANN return code.
+For the 1017 checkpoint, compare the maximum `elapsed` across ranks for
+`layer=14 table=codes`. Each rank registers each table in one call.
+
+To check a mapping's backing, wait for its matching `end` with `rc=0` and
+sample while that worker still holds the mapping. In the single-node 950DT
+run of the 1017 checkpoint with DP4/TP1/PCP1, all four ranks registered
+codes and scales for layers 1 and 14. We sampled after all 16 calls succeeded
+(4 ranks × 2 layers × 2 tables). From the worker's PID namespace, use its PID
+and the exact `shm` name from its log. This reads mapping metadata without
+touching table contents.
+
+```bash
+pid=1234       # worker PID
+shm=psm_abcd   # shm from the corresponding event
+if ! awk -v path="/dev/shm/$shm" '
+    /^[[:xdigit:]]+-[[:xdigit:]]+ / { match_vma = ($6 == path); vmas += match_vma }
+    match_vma && $1 == "Size:"           { size += $2; sizes++ }
+    match_vma && $1 == "ShmemPmdMapped:" { pmd += $2; pmds++ }
+    END {
+        if (!vmas || !size || sizes != vmas || pmds != vmas) exit 1
+        printf "ShmemPmdMapped=%d KiB Size=%d KiB coverage=%.5f%%\n", pmd, size, 100*pmd/size
+    }' "/proc/$pid/smaps"; then
+    echo 'PMD coverage unknown'
+fi
+```
+
+For Docker, a private tmpfs with `huge=advise` lets Linux honor the existing
+`MADV_HUGEPAGE` request when shmem transparent huge pages are available.
+The four-rank 1017 experiment used a 208 GiB volume for 188.8 GiB of shared
+tables plus other IPC. Size the volume for your own replica.
+
+```bash
+docker volume create --driver local --opt type=tmpfs --opt device=tmpfs \
+    --opt 'o=size=208g,huge=advise' engram-shm
+```
+
+Pass `-v engram-shm:/dev/shm` to `docker run`. Check coverage on each rank
+because the kernel can fall back to smaller pages under memory pressure.
+
 For common environment, installation, and parameter issues, refer to the
 [Public FAQs](../../faqs.md).
 

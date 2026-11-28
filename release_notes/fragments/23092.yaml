@@ -1,0 +1,9 @@
+pr: 23092
+entries:
+  - category: feature
+    text: >-
+      Operators can trace a stalled shared host Engram registration during
+      DeepSeek-V4.1-Flash startup without changing the default configuration.
+      Before each registration, the worker logs its global rank, checkpoint layer
+      and table (codes or scales) at INFO. When the call returns, the worker
+      logs the elapsed seconds and raw CANN return code.

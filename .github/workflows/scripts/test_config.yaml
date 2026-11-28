@@ -46,6 +46,7 @@ curated_tests:
     - tests/e2e/pull_request/one_card/aclgraph/test_qli_metadata_a5.py
     - tests/e2e/pull_request/one_card/test_expert_offload_a5.py
     - tests/e2e/pull_request/four_card/test_data_parallel_tp2.py
+    - tests/e2e/pull_request/four_card/test_engram_registration_performance.py
     - tests/e2e/pull_request/four_card/test_glm5_3_flash_hif8.py
     - tests/e2e/pull_request/one_card/test_mla_fp8_decode_layout_a5.py
     - tests/e2e/pull_request/one_card/test_flash_attn_precision.py
@@ -146,6 +147,8 @@ runner_mapping:
   tests/e2e/pull_request/two_card:
     default: a3-2
     310p: 310p-2
+  tests/e2e/pull_request/four_card/test_engram_registration_performance\.py$:
+    default: a5-4
   tests/e2e/pull_request/four_card:
     default: a3-4
     310p: 310p-4
