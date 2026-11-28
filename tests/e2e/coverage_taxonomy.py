@@ -60,6 +60,7 @@ ALLOWED_VALUES: dict[str, set[str]] = {
         "batch_invariant",
         "guided_decoding",
         "pooling",
+        "kv_pool",
         "compile_fusion",
         "aclgraph",
         "xlite",
