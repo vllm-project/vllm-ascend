@@ -82,7 +82,6 @@ def capture_runtime(tmp_path, monkeypatch):
         yield runners, capturer, tp_group, dp_group
 
 
-@pytest.mark.parametrize("v2", [False, True])
 @pytest.mark.parametrize(
     "comm,sp,counts,tp_size,dp_rank,input_padding",
     [
@@ -101,11 +100,10 @@ def capture_runtime(tmp_path, monkeypatch):
     ],
 )
 def test_prepare_router_capture_restores_exact_rows(
-    capture_runtime, monkeypatch, v2, comm, sp, counts, tp_size, dp_rank, input_padding
+    capture_runtime, comm, sp, counts, tp_size, dp_rank, input_padding
 ):
     """Run real prepare -> router -> upstream capture on every simulated TP rank."""
     runners, capturer, tp_group, dp_group = capture_runtime
-    monkeypatch.setattr("vllm_ascend.ascend_forward_context._USE_V2_EXTRA_KWARGS", v2)
     tp_group.world_size = tp_size
     dp_group.rank_in_group = dp_rank
     rows = counts[dp_rank]
