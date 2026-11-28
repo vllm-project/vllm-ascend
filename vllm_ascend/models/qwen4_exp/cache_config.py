@@ -4,7 +4,7 @@ from __future__ import annotations
 
 import math
 from collections.abc import Callable
-from dataclasses import dataclass
+from dataclasses import dataclass, replace
 from typing import Final
 
 import regex as re
@@ -19,6 +19,7 @@ try:
 except ImportError:
     from vllm.v1.core.kv_cache_planning import may_override_num_blocks
 from vllm.v1.kv_cache_interface import (
+    AttentionSpec,
     CircularBufferSpec,
     FullAttentionSpec,
     HiddenStateCacheSpec,
@@ -35,12 +36,14 @@ from vllm_ascend.core.kv_cache_interface import (
     get_kv_cache_compression_ratio,
 )
 
+QWEN4_EXP_MODEL_TYPES: Final = ("qwen4_exp", "qwen4_exp_text", "qwen4_exp_mtp")
 QSA_MAIN: Final = "qsa_main"
 QSA_RAW: Final = "qsa_raw"
 QSA_COMPRESSED: Final = "qsa_compressed"
 GDN: Final = "gdn"
 PLE: Final = "ple"
 HIDDEN: Final = "hidden"
+_CACHE_BANK_ALIGNMENT: Final = 16
 
 
 @dataclass(frozen=True)
@@ -110,6 +113,12 @@ def _group_member_specs(group: KVCacheGroupSpec) -> dict[str, KVCacheSpec]:
     return {name: group.kv_cache_spec for name in group.layer_names}
 
 
+def is_qwen4_exp_model(vllm_config: VllmConfig) -> bool:
+    model_config = getattr(vllm_config, "model_config", None)
+    model_type = getattr(getattr(model_config, "hf_text_config", None), "model_type", None)
+    return model_type in QWEN4_EXP_MODEL_TYPES
+
+
 def _classify_spec(layer_name: str, spec: KVCacheSpec) -> str | None:
     if isinstance(spec, HiddenStateCacheSpec):
         return HIDDEN
@@ -171,14 +180,16 @@ def _real_page_size_bytes(spec: KVCacheSpec) -> int:
     return int(getattr(spec, "real_page_size_bytes", spec.page_size_bytes))
 
 
-def build_qwen4_kv_cache_layout(
-    kv_cache_groups: list[KVCacheGroupSpec],
-    num_blocks: int,
-) -> Qwen4KVCacheLayout | None:
-    """Build shared QSA/GDN slots; PLE and hidden states have private storage."""
+@dataclass(frozen=True)
+class _Qwen4RoleMembers:
+    role_members: dict[str, list[tuple[str, KVCacheSpec]]]
+    owner_group_ids: dict[str, int]
 
-    if num_blocks <= 0:
-        raise ValueError("Qwen4 hybrid layout requires a positive block count")
+
+def _collect_qwen4_role_members(
+    kv_cache_groups: list[KVCacheGroupSpec],
+) -> _Qwen4RoleMembers | None:
+    """Classify and validate Qwen4 cache owners without legacy slab sizing."""
     role_members: dict[str, list[tuple[str, KVCacheSpec]]] = {
         QSA_MAIN: [],
         QSA_RAW: [],
@@ -202,11 +213,7 @@ def build_qwen4_kv_cache_layout(
 
     if not role_members[QSA_RAW]:
         return None
-    # PLE belongs to only the pipeline stage that owns the PLE layer, so it is
-    # optional in a per-stage layout.  When present it still receives its
-    # private allocation and owner mapping below.
     required = (QSA_MAIN, QSA_RAW, QSA_COMPRESSED, GDN)
-    owner_roles = (*required, PLE)
     missing = [role for role in required if not role_members[role]]
     if missing or unknown:
         details = [(name, type(spec).__name__) for name, spec in unknown]
@@ -230,25 +237,6 @@ def build_qwen4_kv_cache_layout(
     for role in (GDN, PLE, HIDDEN):
         role_members[role].sort(key=lambda item: _owner_sort_key(item[0]))
 
-    dtype_sizes = {
-        get_dtype_size(dtype)
-        for role in owner_roles
-        for _, spec in role_members[role]
-        for dtype in (spec.dtypes if isinstance(spec, MambaSpec) else (spec.dtype,))
-    }
-    alignment = math.lcm(16, *dtype_sizes)
-    gdn_specs = [spec for _, spec in role_members[GDN] if isinstance(spec, MambaSpec)]
-    max_ssm_bytes = max(_state_bytes(spec, 1) for spec in gdn_specs)
-    conv_bytes = max(_state_bytes(spec, 0) for spec in gdn_specs)
-    for layer_name, spec in role_members[QSA_MAIN]:
-        assert isinstance(spec, FullAttentionSpec)
-        kv_token_bytes = spec.num_kv_heads * (spec.head_size + spec.head_size_v) * get_dtype_size(spec.dtype)
-        minimum_block_size = round_up((max_ssm_bytes + kv_token_bytes - 1) // kv_token_bytes, 128)
-        if spec.block_size < minimum_block_size or spec.block_size % 128:
-            raise ValueError(
-                f"{layer_name} block_size={spec.block_size} violates packed K/V-SSM alignment: "
-                f"minimum={minimum_block_size}, kernel_multiple=128"
-            )
     for source in qsa_sources:
         main_name, main_spec = qsa_by_role[QSA_MAIN][source]
         compressed_name, compressed_spec = qsa_by_role[QSA_COMPRESSED][source]
@@ -256,6 +244,8 @@ def build_qwen4_kv_cache_layout(
         assert isinstance(main_spec, FullAttentionSpec)
         assert isinstance(compressed_spec, MLAAttentionSpec)
         assert isinstance(raw_spec, CircularBufferSpec)
+        if main_spec.block_size % 128:
+            raise ValueError(f"{main_name} block_size={main_spec.block_size} must be a multiple of 128")
         compress_ratio = get_kv_cache_compression_ratio(compressed_spec)
         same_block_table = owner_group_ids[main_name] == owner_group_ids[compressed_name]
         if same_block_table and compressed_spec.block_size != main_spec.block_size:
@@ -271,6 +261,44 @@ def build_qwen4_kv_cache_layout(
         if raw_spec.block_size % compress_ratio:
             raise ValueError(
                 f"{raw_name} circular capacity={raw_spec.block_size} is not aligned to ratio={compress_ratio}"
+            )
+
+    return _Qwen4RoleMembers(role_members=role_members, owner_group_ids=owner_group_ids)
+
+
+def build_qwen4_kv_cache_layout(
+    kv_cache_groups: list[KVCacheGroupSpec],
+    num_blocks: int,
+) -> Qwen4KVCacheLayout | None:
+    """Build shared QSA/GDN slots; PLE and hidden states have private storage."""
+
+    if num_blocks <= 0:
+        raise ValueError("Qwen4 hybrid layout requires a positive block count")
+    collected = _collect_qwen4_role_members(kv_cache_groups)
+    if collected is None:
+        return None
+    role_members = collected.role_members
+    owner_group_ids = collected.owner_group_ids
+    owner_roles = (QSA_MAIN, QSA_RAW, QSA_COMPRESSED, GDN, PLE)
+
+    dtype_sizes = {
+        get_dtype_size(dtype)
+        for role in owner_roles
+        for _, spec in role_members[role]
+        for dtype in (spec.dtypes if isinstance(spec, MambaSpec) else (spec.dtype,))
+    }
+    alignment = math.lcm(_CACHE_BANK_ALIGNMENT, *dtype_sizes)
+    gdn_specs = [spec for _, spec in role_members[GDN] if isinstance(spec, MambaSpec)]
+    max_ssm_bytes = max(_state_bytes(spec, 1) for spec in gdn_specs)
+    conv_bytes = max(_state_bytes(spec, 0) for spec in gdn_specs)
+    for layer_name, spec in role_members[QSA_MAIN]:
+        assert isinstance(spec, FullAttentionSpec)
+        kv_token_bytes = spec.num_kv_heads * (spec.head_size + spec.head_size_v) * get_dtype_size(spec.dtype)
+        minimum_block_size = round_up((max_ssm_bytes + kv_token_bytes - 1) // kv_token_bytes, 128)
+        if spec.block_size < minimum_block_size or spec.block_size % 128:
+            raise ValueError(
+                f"{layer_name} block_size={spec.block_size} violates packed K/V-SSM alignment: "
+                f"minimum={minimum_block_size}, kernel_multiple=128"
             )
     main_pages = [
         _qsa_main_page_bytes(spec) for _, spec in role_members[QSA_MAIN] if isinstance(spec, FullAttentionSpec)
@@ -300,19 +328,13 @@ def build_qwen4_kv_cache_layout(
         cursor += page_size * num_blocks
     slot_backing_size = round_up(cursor, alignment)
 
-    # PP can expose QSA owners from only one stage while one state group
-    # contains owners aggregated across stages.  State groups have disjoint
-    # block IDs and can reuse slots, so only the largest individual group must
-    # fit alongside the globally indexed QSA owners.
+    # PP can expose fewer QSA owners than there are layers in a state group.
     state_group_sizes: dict[tuple[str, int], int] = {}
     for role in (GDN, PLE):
         for layer_name, _ in role_members[role]:
             key = (role, owner_group_ids[layer_name])
             state_group_sizes[key] = state_group_sizes.get(key, 0) + 1
-    slot_count = max(
-        len(role_members[QSA_MAIN]),
-        max(state_group_sizes.values(), default=0),
-    )
+    slot_count = max(len(role_members[QSA_MAIN]), max(state_group_sizes.values(), default=0))
     owners: list[CacheOwner] = []
     for role in owner_roles:
         group_slots: dict[int, int] = {}
@@ -605,20 +627,64 @@ def _merge_mamba_state_groups(
     return result
 
 
-def _private_page_bytes(owner: CacheOwner) -> int:
-    # PLE has one dense state bank, independent of QSA slot count and page padding.
-    return owner.spec.real_page_size_bytes if owner.role == PLE else owner.spec.page_size_bytes
+def _get_qwen4_exp_cache_slots(
+    kv_cache_groups: list[KVCacheGroupSpec],
+) -> list[tuple[int, list[str]]]:
+    collected = _collect_qwen4_role_members(kv_cache_groups)
+    if collected is None:
+        return []
+
+    role_members = collected.role_members
+    owner_group_ids = collected.owner_group_ids
+    shared_slots = [
+        (spec.page_size_bytes, [layer_name], {owner_group_ids[layer_name]})
+        for layer_name, spec in role_members[QSA_MAIN]
+    ]
+    slots = [(page_size, names) for page_size, names, _ in shared_slots]
+    shared_slots.sort(key=lambda slot: slot[0])
+    private_gdn_pages: list[int] = []
+    for layer_name, spec in role_members[GDN]:
+        assert isinstance(spec, MambaSpec)
+        page_size = spec.page_size_bytes
+        group_id = owner_group_ids[layer_name]
+        alignment = math.lcm(*(get_dtype_size(dtype) for dtype in spec.dtypes))
+        # Each scheduler group may use a slot once. Other groups can reuse
+        # its pages because live manager block IDs belong to just one group.
+        for stride, names, groups in shared_slots:
+            if page_size <= stride and stride % alignment == 0 and group_id not in groups:
+                names.append(layer_name)
+                groups.add(group_id)
+                break
+        else:
+            # Heterogeneous or quantized layouts, small block sizes and PP
+            # stages with more state layers than QSA slots keep a private slot
+            # in the same backing instead of failing.
+            slots.append((page_size, [layer_name]))
+            private_gdn_pages.append(page_size)
+    if private_gdn_pages:
+        logger.warning_once(
+            "Qwen4 cache planner could not overlay %d GDN state layer(s) onto QSA main slots "
+            "(largest GDN page %d bytes, largest QSA main page %d bytes). They use private "
+            "slots in the shared backing, which increases the bytes per cache block. Check "
+            "the block size and KV cache dtype if this is unexpected.",
+            len(private_gdn_pages),
+            max(private_gdn_pages),
+            max(stride for stride, _, _ in shared_slots),
+        )
+    for role in (QSA_RAW, QSA_COMPRESSED, PLE, HIDDEN):
+        for layer_name, spec in role_members[role]:
+            slots.append((spec.page_size_bytes, [layer_name]))
+    return slots
 
 
 def get_qwen4_exp_pool_bytes_per_block(
     kv_cache_groups: list[KVCacheGroupSpec],
+    vllm_config: VllmConfig | None = None,
 ) -> int | None:
-    """Charge shared slots once, plus one private bank per PLE/hidden owner."""
-    layout = build_qwen4_kv_cache_layout(kv_cache_groups, num_blocks=1)
-    if layout is None:
-        return None
-    private_bytes = sum(_private_page_bytes(owner) for owner in layout.owners if owner.role in (HIDDEN, PLE))
-    return layout.slot_count * layout.slot_backing_size + private_bytes
+    """Charge each shared slot and each private bank once."""
+    del vllm_config
+    slots = _get_qwen4_exp_cache_slots(kv_cache_groups)
+    return sum(round_up(page_size, _CACHE_BANK_ALIGNMENT) for page_size, _ in slots) or None
 
 
 def get_qwen4_exp_kv_cache_groups(
@@ -630,6 +696,17 @@ def get_qwen4_exp_kv_cache_groups(
     owners = _prepare_qsa_composite_groups(kv_cache_spec)
     if owners is None:
         return None
+    if is_qwen4_exp_model(vllm_config):
+        # Keep QSA kernel pages, raw rings, and Mamba (GDN/PLE) specs compact
+        # so GDN overlays onto QSA main slots whenever its real page fits.
+        kv_cache_spec = kv_cache_spec.copy()
+        qsa_names = set.union(*owners)
+        for name, spec in list(kv_cache_spec.items()):
+            if name not in qsa_names and _classify_spec(name, spec) not in (PLE, GDN):
+                continue
+            assert isinstance(spec, (AttentionSpec, MambaSpec))
+            if spec.page_size_padded is not None:
+                kv_cache_spec[name] = replace(spec, page_size_padded=None)
     groups = get_default_groups(vllm_config, kv_cache_spec)
     groups = _merge_qsa_composite_groups(groups, kv_cache_spec, *owners)
     groups = _merge_mamba_state_groups(groups, len(owners[0]))
@@ -647,92 +724,41 @@ def get_qwen4_exp_kv_cache_config(
     kv_cache_groups: list[KVCacheGroupSpec],
     available_memory: int,
 ) -> KVCacheConfig | None:
-    """Plan state slabs and block-packed K/V-or-SSM pages per ordinal slot.
-
-    The main descriptor API cannot express that one logical QSA/GDN owner has
-    two disjoint physical regions.  Descriptors therefore publish the anchor
-    region and shared backing geometry; the Ascend runner reconstructs every
-    role from the same capability-derived layout.  Different cache groups
-    deliberately alias the same allocation because a physical block ID is
-    owned by only one group at a time.
-    """
-    probe = build_qwen4_kv_cache_layout(
-        kv_cache_groups,
-        num_blocks=1,
-    )
-    if probe is None:
+    """Plan shared QSA/GDN slots and their companion banks in one backing."""
+    slots = _get_qwen4_exp_cache_slots(kv_cache_groups)
+    if not slots:
         return None
 
-    private_owners = [owner for owner in probe.owners if owner.role in (HIDDEN, PLE)]
-    private_bytes_per_block = sum(_private_page_bytes(owner) for owner in private_owners)
-    slab_bytes_per_block = probe.slot_backing_size
-    bytes_per_block = probe.slot_count * slab_bytes_per_block + private_bytes_per_block
-    candidate = available_memory // bytes_per_block
-    while candidate > 0:
-        candidate_layout = build_qwen4_kv_cache_layout(
-            kv_cache_groups,
-            num_blocks=candidate,
-        )
-        assert candidate_layout is not None
-        required = (
-            candidate_layout.slot_count * candidate_layout.slot_backing_size + private_bytes_per_block * candidate
-        )
-        if required <= available_memory:
-            break
-        candidate -= 1
-    num_blocks = may_override_num_blocks(vllm_config, candidate)
-    layout = build_qwen4_kv_cache_layout(
-        kv_cache_groups,
-        num_blocks=num_blocks,
-    )
-    assert layout is not None
-    backing_size = layout.slot_count * layout.slot_backing_size
+    bytes_per_block = sum(round_up(page_size, _CACHE_BANK_ALIGNMENT) for page_size, _ in slots)
+    num_blocks = may_override_num_blocks(vllm_config, available_memory // bytes_per_block)
+    backing_size = num_blocks * bytes_per_block
     logger.info_once(
-        "Qwen4 cache pool: %d blocks, shared page %d bytes, pool block %d bytes, available %d bytes",
+        "Qwen4 cache pool: %d blocks, pool block %d bytes, available %d bytes",
         num_blocks,
-        layout.region("r0").page_size_bytes,
         bytes_per_block,
         available_memory,
     )
 
-    region_by_role = {
-        QSA_MAIN: "r0",
-        QSA_RAW: "r4",
-        QSA_COMPRESSED: "r5",
-        GDN: "r1",
-    }
     tensors: list[KVCacheTensor] = []
-    for role, region_name in region_by_role.items():
-        owners_by_group: dict[int, list[CacheOwner]] = {}
-        for owner in layout.owners:
-            if owner.role == role:
-                owners_by_group.setdefault(owner.group_id, []).append(owner)
-        region = layout.region(region_name)
-        for group_owners in owners_by_group.values():
-            owners = sorted(group_owners, key=lambda owner: owner.slot)
-            tensors.append(
-                KVCacheTensor(
-                    size=backing_size,
-                    layers=[owner.layer_name for owner in owners],
-                    layer_stride=layout.slot_backing_size,
-                    block_stride=region.block_stride,
-                    offset=region.offset + owners[0].slot * layout.slot_backing_size,
-                )
+    offset = 0
+    for page_size, names in slots:
+        # Publish one descriptor per owner with the same placement for each
+        # alias. A nonzero layer stride keeps kernel-page splitting enabled.
+        tensors.extend(
+            KVCacheTensor(
+                size=backing_size,
+                layers=[name],
+                layer_stride=num_blocks * page_size,
+                block_stride=page_size,
+                offset=offset,
             )
-    tensors.extend(
-        KVCacheTensor(
-            size=_private_page_bytes(owner) * num_blocks,
-            layers=[owner.layer_name],
-            layer_stride=_private_page_bytes(owner) * num_blocks,
-            block_stride=_private_page_bytes(owner),
-            offset=0,
+            for name in names
         )
-        for owner in private_owners
-    )
+        offset += num_blocks * round_up(page_size, _CACHE_BANK_ALIGNMENT)
 
     return KVCacheConfig(
         num_blocks=num_blocks,
         kv_cache_tensors=tensors,
         kv_cache_groups=kv_cache_groups,
-        prefix_cache_retention_interval=(vllm_config.cache_config.prefix_cache_retention_interval),
+        prefix_cache_retention_interval=vllm_config.cache_config.prefix_cache_retention_interval,
     )

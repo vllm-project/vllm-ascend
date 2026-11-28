@@ -68,6 +68,7 @@ from vllm_ascend.models.qwen4_exp.cache_config import (
     get_qwen4_exp_kv_cache_config,
     get_qwen4_exp_kv_cache_groups,
     get_qwen4_exp_pool_bytes_per_block,
+    is_qwen4_exp_model,
 )
 from vllm_ascend.models.step5.cache_config import (
     get_step5_kv_cache_config_from_groups,
@@ -181,6 +182,11 @@ class AscendKVCacheConfigBuilder(DefaultKVCacheConfigBuilder):
         """Return the pool cost used to build the native descriptors."""
         if vllm_config.model_config.hf_config.model_type == "kimi_k31":
             return paired_sfa_pool_bytes(kv_cache_groups)
+        if is_qwen4_exp_model(vllm_config):
+            qwen_bytes = get_qwen4_exp_pool_bytes_per_block(kv_cache_groups, vllm_config)
+            if qwen_bytes is not None:
+                return qwen_bytes
+            return super()._get_pool_bytes_per_block(vllm_config, kv_cache_groups)
         pools = _get_replicated_draft_pools(kv_cache_groups)
         if pools is not None:
             return sum(_upstream_pool_bytes_per_block(vllm_config, pool) for pool in pools)
@@ -190,7 +196,7 @@ class AscendKVCacheConfigBuilder(DefaultKVCacheConfigBuilder):
             return get_deepseek_v41_pool_bytes_per_block(kv_cache_groups)
         if _get_glm5_next_cache_layout(kv_cache_groups) is not None:
             return get_glm5_next_pool_bytes_per_block(kv_cache_groups)
-        qwen_bytes = get_qwen4_exp_pool_bytes_per_block(kv_cache_groups)
+        qwen_bytes = get_qwen4_exp_pool_bytes_per_block(kv_cache_groups, vllm_config)
         if qwen_bytes is not None:
             return qwen_bytes
         if tq_cache.uses_turboquant_groups(kv_cache_groups):
@@ -515,7 +521,7 @@ def get_ascend_kv_cache_config_from_groups(
     ``_attach_transfer_and_speculation_metadata`` before returning; see it for
     why the PD role must ride on the config object.
     """
-    pools = _get_replicated_draft_pools(kv_cache_groups)
+    pools = None if is_qwen4_exp_model(vllm_config) else _get_replicated_draft_pools(kv_cache_groups)
     if not kv_cache_groups:
         kv_cache_config = DefaultKVCacheConfigBuilder().get_kv_cache_config_from_groups(
             vllm_config, kv_cache_groups, num_blocks
@@ -551,7 +557,7 @@ def get_ascend_kv_cache_config_from_groups(
         kv_cache_config = get_deepseek_v41_kv_cache_config(vllm_config, kv_cache_groups, num_blocks)
     elif _get_glm5_next_cache_layout(kv_cache_groups) is not None:
         kv_cache_config = get_glm5_next_kv_cache_config(vllm_config, kv_cache_groups, num_blocks)
-    elif (qwen_pool_bytes := get_qwen4_exp_pool_bytes_per_block(kv_cache_groups)) is not None:
+    elif (qwen_pool_bytes := get_qwen4_exp_pool_bytes_per_block(kv_cache_groups, vllm_config)) is not None:
         kv_cache_config = get_qwen4_exp_kv_cache_config(vllm_config, kv_cache_groups, num_blocks * qwen_pool_bytes)
         assert kv_cache_config is not None
     elif not _is_deepseek_v4_groups(kv_cache_groups):

@@ -86,7 +86,7 @@ def test_qwen4_exp_is_wired_only_through_mrv2() -> None:
     assert "AscendQwen4ExpModelState" in model
     assert "Qwen4ExpModelState" in model_state
     assert "AscendMambaHybridModelState" in model_state
-    assert "build_qwen4_kv_cache_layout" in v2_attn
+    assert "build_qwen4_kv_cache_layout" not in v2_attn
     assert "QSAMetadataBuilder" in v2_attn
     assert "AscendQSABackend" in v2_speculator
     assert 'self.attn_architecture = "QSA"' in v2_speculator
