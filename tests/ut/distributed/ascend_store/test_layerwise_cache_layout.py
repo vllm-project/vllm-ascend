@@ -22,6 +22,7 @@ from vllm_ascend.distributed.kv_transfer.kv_pool.ascend_store.layerwise.layerwis
     get_cache_views,
     get_layerwise_reuse_layout,
     get_physical_layer_index,
+    parse_layerwise_prefetch_layers,
 )
 
 
@@ -129,6 +130,39 @@ def test_prefetch_count_can_be_overridden():
     )
 
     assert layout.num_prefetch_layers == 3
+
+
+def test_prefetch_count_defaults_to_min_shared_buffers_and_eight():
+    layout_under_cap = LayerwiseCacheConfig.parse(27, {"layerwise_num_shared_buffers": 5})
+    layout_over_cap = LayerwiseCacheConfig.parse(27, {"layerwise_num_shared_buffers": 12})
+
+    assert layout_under_cap.num_prefetch_layers == 5
+    assert layout_over_cap.num_prefetch_layers == 8
+
+
+@pytest.mark.parametrize(
+    ("raw_value", "expected"),
+    [
+        (1, 1),
+        (3, 3),
+        ("3", 3),
+    ],
+)
+def test_prefetch_count_accepts_positive_ints_and_decimal_strings(raw_value, expected):
+    layout = LayerwiseCacheConfig.parse(27, {"layerwise_prefetch_layers": raw_value})
+    assert layout.num_prefetch_layers == expected
+    assert parse_layerwise_prefetch_layers(raw_value, default=1) == expected
+
+
+@pytest.mark.parametrize(
+    "invalid_value",
+    [0, -1, True, False, 1.5, 2.0, "", "-1", "1.5", "abc"],
+)
+def test_prefetch_count_rejects_invalid_values(invalid_value):
+    with pytest.raises((ValueError, TypeError)):
+        LayerwiseCacheConfig.parse(27, {"layerwise_prefetch_layers": invalid_value})
+    with pytest.raises((ValueError, TypeError)):
+        parse_layerwise_prefetch_layers(invalid_value, default=1)
 
 
 def test_reuse_config_is_scoped_to_layerwise_backend_connector():
