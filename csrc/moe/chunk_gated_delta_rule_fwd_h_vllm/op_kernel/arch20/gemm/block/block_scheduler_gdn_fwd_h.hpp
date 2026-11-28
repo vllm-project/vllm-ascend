@@ -34,6 +34,7 @@ CATLASS_DEVICE T Max(T a, T b) {
 namespace Catlass::Gemm::Block {
 
 struct GDNFwdHOffsets {
+    uint32_t slot;        // headInnerIdx: which L1-resident h bank this body's head uses
     uint32_t hSrcOffset;
     uint32_t hDstOffset;
     uint32_t uvOffset;
@@ -47,6 +48,8 @@ struct GDNFwdHOffsets {
     bool isInitialState;
     bool isFinalState;
     uint32_t blockTokens;
+    uint32_t vTileStart;
+    uint32_t vTileDim;
     bool isDummyHead;
     uint32_t batchIdx;
     uint32_t headIdx;
@@ -63,7 +66,7 @@ struct BlockSchedulerGdnFwdH {
     uint32_t vHeadDim;
     uint32_t chunkSize;
     uint32_t initalStateStride0;
-    uint32_t vBlockSize{128};
+    uint32_t vBlockSize;
     uint32_t isVariedLen;
     uint32_t shapeBatch;
     uint32_t tokenBatch;
@@ -85,6 +88,7 @@ struct BlockSchedulerGdnFwdH {
 
     uint32_t iterId {0};
     bool hasDummyHead;
+    bool pairHeads;
     bool isRunning;
     bool processNewTask {true};
     bool firstLoop {true};
@@ -129,6 +133,7 @@ struct BlockSchedulerGdnFwdH {
         vNumHead = gdnFwdHTilingData->vNumHead;
         kHeadDim = gdnFwdHTilingData->kHeadDim;
         vHeadDim = gdnFwdHTilingData->vHeadDim;
+        vBlockSize = gdnFwdHTilingData->vTileDim;
         chunkSize = gdnFwdHTilingData->chunkSize;
         // Contiguous state layout: stride equals vHeadDim (initalStateStride0 attr removed).
         initalStateStride0 = gdnFwdHTilingData->vHeadDim;
@@ -171,12 +176,14 @@ struct BlockSchedulerGdnFwdH {
 
         cubeCoreIdx = coreIdx;
         cubeCoreNum = coreNum;
-        vLoops = vHeadDim / vBlockSize;
+        vLoops = (vHeadDim + vBlockSize - 1) / vBlockSize;
         taskNum = vLoops * batch * vNumHead;
         headGroups = vNumHead / kNumHead;
         hasDummyHead = (taskNum % (PING_PONG_STAGES * cubeCoreNum) <= cubeCoreNum) && (taskNum % (PING_PONG_STAGES * cubeCoreNum) > 0);
         taskLoops = (taskNum + cubeCoreNum * PING_PONG_STAGES - 1) / (cubeCoreNum * PING_PONG_STAGES);
-        headInnerLoop = taskNum > cubeCoreNum ? PING_PONG_STAGES : 1;
+        // A head pair must stay within a batch and V tile, including packed batches.
+        pairHeads = (vNumHead % PING_PONG_STAGES == 0);
+        headInnerLoop = pairHeads && taskNum > cubeCoreNum ? PING_PONG_STAGES : 1;
         taskIdx = cubeCoreIdx * headInnerLoop;
         isRunning = taskIdx < taskNum;
 
@@ -223,13 +230,20 @@ struct BlockSchedulerGdnFwdH {
         offsets[currStage].hWorkOffset = (cubeCoreIdx * PING_PONG_STAGES + currStage) * kHeadDim * vHeadDim;
         offsets[currStage].vWorkOffset = (cubeCoreIdx * PING_PONG_STAGES + currStage) * chunkSize * vHeadDim;
         offsets[currStage].blockTokens = offsets[currStage].isFinalState ? (batchTokens - chunkIdx * chunkSize) : chunkSize;
+        offsets[currStage].vTileStart = vIdx * vBlockSize;
+        offsets[currStage].vTileDim = Min(vHeadDim - offsets[currStage].vTileStart, vBlockSize);
         offsets[currStage].isDummyHead = headInnerLoop < PING_PONG_STAGES && headInnerIdx >= headInnerLoop;
         offsets[currStage].batchIdx = batchIdx;
         offsets[currStage].headIdx = vHeadIdx;
         offsets[currStage].chunkIdx = chunkIdx;
+        offsets[currStage].slot = headInnerIdx;
 
         processNewTask = chunkIdx == batchChunks - 1 && headInnerIdx == PING_PONG_STAGES - 1;
         if (processNewTask) {
+            if (!pairHeads) {
+                taskIdx += cubeCoreNum;
+                return;
+            }
             uint32_t currLoopIdx = taskIdx / (PING_PONG_STAGES * cubeCoreNum);
             headInnerLoop = ((currLoopIdx + 2 == taskLoops) && hasDummyHead) ? 1 : PING_PONG_STAGES;
             taskIdx = (currLoopIdx + 1) * PING_PONG_STAGES * cubeCoreNum + headInnerLoop * cubeCoreIdx;
