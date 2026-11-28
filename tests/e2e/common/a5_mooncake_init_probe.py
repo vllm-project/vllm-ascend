@@ -6,6 +6,7 @@ import ctypes
 import hashlib
 import json
 import os
+import shutil
 from pathlib import Path
 
 
@@ -38,6 +39,18 @@ def main():
     parser.add_argument("--user", type=int, required=True, choices=(0, 1))
     args = parser.parse_args()
     event("process", pid=os.getpid(), user=args.user)
+    # Observe HIXL's documented tool locations without substituting a tool,
+    # guessing a bond/device ID, or changing any network configuration.
+    for name in ("/usr/local/Ascend/driver/tools/hccn_tool", shutil.which("hccn_tool")):
+        if name:
+            path = Path(name)
+            event(
+                "tool_path",
+                path=name,
+                resolved=str(path.resolve()),
+                exists=path.is_file(),
+                executable=os.access(path, os.X_OK),
+            )
     # Import and select only inside this isolated child, as a spawned worker does.
     event("torch_import_start")
     import torch
