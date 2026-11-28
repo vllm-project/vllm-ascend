@@ -41,6 +41,7 @@ class MooncakeTransferMetadata(KVConnectorHandshakeMetadata):
     dcp_sharded: list[bool]
     local_ip: str = ""
     handshake_port: int = 0
+    dcp_rank: int | None = None
 
     def __post_init__(self) -> None:
         if self.cp_kv_cache_interleave_size <= 0:
@@ -95,6 +96,7 @@ class MooncakeTPTransferMetadata:
     kv_caches_base_addr: list[list[int]]
     local_ip: str
     handshake_port: int
+    dcp_rank: int | None = None
 
 
 @dataclass(frozen=True)
