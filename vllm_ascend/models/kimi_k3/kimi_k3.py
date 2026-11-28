@@ -767,6 +767,154 @@ class AscendKimiDSAAttention(AscendKimiMLAAttention):
             self.impl.g_proj = self.g_proj
 
 
+def _kimi_gdn_forward_ascend(
+    self,
+    mixed_qkv: torch.Tensor,
+    g1: torch.Tensor,
+    g2: torch.Tensor,
+    beta: torch.Tensor,
+    core_attn_out: torch.Tensor,
+) -> None:
+    # Ascend port of the upstream Kimi GDN _forward: the GPU FLA triton
+    # kernels are replaced with fla_npu causal conv + the shared Ascend KDA
+    # kernel wrappers (vllm_ascend.ops.kda), following the same metadata
+    # handling as AscendKimiK3DeltaAttention._forward. Bound onto
+    # KimiGatedDeltaNetAttention for standalone Kimi-Linear checkpoints
+    # (low-rank gate, see the decoder-layer branch below).
+    from einops import rearrange
+    from vllm.v1.attention.backends.utils import PAD_SLOT_ID
+
+    from vllm_ascend.ops.kda import run_chunk_kda, run_recurrent_kda
+
+    forward_context = get_forward_context()
+    attn_metadata_raw = forward_context.attn_metadata
+    if attn_metadata_raw is None:
+        core_attn_out.zero_()
+        return
+    attn_metadata = attn_metadata_raw.get(self.prefix)
+    if attn_metadata is None:
+        # Profile/warmup dummy runs skip mamba-family metadata.
+        core_attn_out.zero_()
+        return
+    m = attn_metadata
+    num_actual_tokens = m.num_actual_tokens
+    mixed_qkv = mixed_qkv[:num_actual_tokens]
+    g1 = g1[:, :num_actual_tokens]
+    g2 = g2[:num_actual_tokens]
+    # The Ascend chunk kernel consumes sigmoided beta; apply it here once.
+    beta = beta[:, :num_actual_tokens].float().sigmoid()
+
+    conv_weight_t = getattr(self, "_kimi_gdn_conv_weight_t", None)
+    if conv_weight_t is None or conv_weight_t.device != mixed_qkv.device:
+        w = self.conv1d.weight
+        conv_weight_t = (
+            w.view(w.size(0), w.size(2)).transpose(0, 1).to(device=mixed_qkv.device, dtype=mixed_qkv.dtype).contiguous()
+        )
+        self._kimi_gdn_conv_weight_t = conv_weight_t
+
+    conv_state, recurrent_state = self.kv_cache
+
+    if m.spec_sequence_masks is not None:
+        raise NotImplementedError("speculative decode is not supported for the Ascend Kimi GDN path")
+    if m.num_prefills > 0 and m.num_decodes > 0:
+        raise NotImplementedError("mixed prefill+decode batches are not supported for the Ascend Kimi GDN path yet")
+
+    if m.num_prefills > 0:
+        from fla_npu.ops.ascendc import causal_conv1d_fn
+
+        prefill_meta = m.non_spec_prefill_metadata
+        conv_meta = prefill_meta.causal_conv1d
+        cache_indices = conv_meta.cache_indices
+        if cache_indices.dim() == 2:
+            cache_indices = cache_indices[:, 0]
+        mixed_qkv = causal_conv1d_fn(
+            mixed_qkv,
+            conv_weight_t,
+            None,
+            conv_states=conv_state,
+            query_start_loc=conv_meta.query_start_loc,
+            cache_indices=cache_indices.contiguous(),
+            has_initial_state=conv_meta.initial_state_mode,
+            activation="silu",
+            pad_slot_id=PAD_SLOT_ID,
+            null_block_id=0,
+        )
+    elif m.num_decodes > 0:
+        from fla_npu.ops.ascendc import causal_conv1d_update
+
+        decode_meta = m.non_spec_decode_metadata
+        conv_meta = decode_meta.causal_conv1d
+        cache_indices = conv_meta.cache_indices
+        if cache_indices.dim() == 2:
+            cache_indices = cache_indices[:, 0]
+        out_buf = torch.empty_like(mixed_qkv)
+        mixed_qkv = causal_conv1d_update(
+            mixed_qkv,
+            conv_state,
+            conv_weight_t,
+            bias=None,
+            activation="silu",
+            conv_state_indices=cache_indices.contiguous(),
+            query_start_loc=conv_meta.query_start_loc,
+            max_query_len=1,
+            null_block_id=0,
+            out=out_buf,
+        )
+    else:
+        # Idle dummy step: no live conv/recurrent work.
+        core_attn_out.zero_()
+        return
+
+    q, k, v = (rearrange(x, "n (h d) -> 1 n h d", d=self.head_dim) for x in mixed_qkv.chunk(3, dim=-1))
+    state_indices = m.non_spec_state_indices_tensor
+
+    if m.num_prefills > 0:
+        # run_chunk_kda expects host-side cu_seqlens (a Sequence[int]); it
+        # derives chunk indices itself when none are supplied.
+        cu_seqlens = m.non_spec_query_start_loc.tolist()
+        safe_indices = torch.where(state_indices < 0, torch.zeros_like(state_indices), state_indices)
+        initial_state = recurrent_state[safe_indices].clone()
+        has_init = conv_meta.initial_state_mode
+        if has_init is not None:
+            initial_state = initial_state * has_init.reshape(-1, *([1] * (initial_state.dim() - 1))).to(
+                initial_state.dtype
+            )
+        core, final_state = run_chunk_kda(
+            q,
+            k,
+            v,
+            g1,
+            beta,
+            initial_state,
+            cu_seqlens,
+            [],
+            self.A_log,
+            self.dt_bias,
+            lower_bound=self.gate_lower_bound,
+        )
+        valid = state_indices >= 0
+        recurrent_state[state_indices[valid]] = final_state[valid]
+    else:
+        core = run_recurrent_kda(
+            q,
+            k,
+            v,
+            g1,
+            beta,
+            recurrent_state,
+            m.non_spec_query_start_loc[: m.num_decodes + 1],
+            state_indices,
+            self.A_log,
+            self.dt_bias,
+            lower_bound=self.gate_lower_bound,
+        )
+
+    core_attn_out[:, :num_actual_tokens] = core
+    core_attn_out[:, num_actual_tokens:].zero_()
+    norm_out = core_attn_out[:, :num_actual_tokens]
+    norm_out.copy_(self.o_norm(norm_out, g2))
+
+
 class AscendKimiDecoderLayer(UpstreamKimiDecoderLayer):
     """Upstream Kimi decoder structure with Ascend attention backends."""
 
@@ -789,11 +937,45 @@ class AscendKimiDecoderLayer(UpstreamKimiDecoderLayer):
         quant_config = vllm_config.quant_config
 
         if config.is_kda_layer(layer_idx):
-            self.self_attn = AscendKimiK3DeltaAttention(
-                config,
-                vllm_config,
-                prefix=f"{prefix}.self_attn",
-            )
+            # Standalone Kimi-Linear checkpoints use a low-rank KDA gate
+            # (f_a_proj -> f_b_proj) and carry no use_full_rank_gate key;
+            # only Kimi-K3's full-rank gate can use the private KDA path.
+            # Mirror the upstream branch in
+            # vllm/models/kimi_k3/nvidia/model.py and route low-rank-gate
+            # layers through the GDN linear-attention path.
+            kda_config = config.linear_attn_config or {}
+            if not kda_config.get("use_full_rank_gate", False):
+                from vllm.model_executor.layers.mamba.gdn.kimi_gdn_linear_attn import (
+                    KimiGatedDeltaNetAttention,
+                )
+
+                # The upstream Kimi GDN layer inherits vLLM's GPU
+                # GDNAttentionBackend, whose metadata builder does not accept
+                # the num_actual_reqs kwarg vllm-ascend passes (worker/v2/
+                # attn_utils.py). Route it to the Ascend GDN backend the same
+                # way the Qwen GDN wiring does. The Kimi-specific
+                # get_state_shape is kept: it feeds the same state-shape
+                # calculator with Kimi's conv size.
+                from vllm_ascend.ops.gdn import AscendGatedDeltaNetAttention
+
+                KimiGatedDeltaNetAttention.get_attn_backend = AscendGatedDeltaNetAttention.get_attn_backend
+                # The upstream _forward runs vLLM's GPU FLA triton kernels
+                # (they assert state.is_cuda). Replace it with the Ascend KDA
+                # kernel stack (fla_npu conv + run_chunk_kda/run_recurrent_kda)
+                # following the same flow as AscendKimiK3DeltaAttention._forward.
+                KimiGatedDeltaNetAttention._forward = _kimi_gdn_forward_ascend
+
+                self.self_attn = KimiGatedDeltaNetAttention(
+                    config,
+                    vllm_config,
+                    prefix=f"{prefix}.self_attn",
+                )
+            else:
+                self.self_attn = AscendKimiK3DeltaAttention(
+                    config,
+                    vllm_config,
+                    prefix=f"{prefix}.self_attn",
+                )
         elif getattr(config, "dsa_config", None) is not None and config.is_dsa_layer(layer_idx):
             self.self_attn = AscendKimiDSAAttention(config, vllm_config, f"{prefix}.self_attn", topk_indices_buffer)
         else:
