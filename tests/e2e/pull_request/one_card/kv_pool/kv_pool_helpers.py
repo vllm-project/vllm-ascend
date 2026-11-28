@@ -379,11 +379,19 @@ THROUGHPUT_LIMITS = {"default": 0.30, "memcache_bulk_tier2": 0.25, "memcache_lay
 #   3. with no candidate present, keep /dev/loop0 so the skip reason names the
 #      provisioning path the case expects.
 _UBSIO_DISK_CANDIDATES = ("/mnt/boostio",)
+# The Kubernetes device plugin injects its loop node somewhere inside this
+# range; the node number drifts between runs, so every probe walks it.
+_UBSIO_LOOP_NODE_COUNT = 8
+
+
+def _visible_loop_nodes() -> list[str]:
+    """Return the /dev/loop[0-7] nodes present right now, lowest index first."""
+    return [f"/dev/loop{i}" for i in range(_UBSIO_LOOP_NODE_COUNT) if os.path.exists(f"/dev/loop{i}")]
 
 
 def _probe_ubsio_disk() -> str:
     """Probe for a device-plugin injected loop node, lowest index first."""
-    available = [f"/dev/loop{i}" for i in range(8) if os.path.exists(f"/dev/loop{i}")]
+    available = _visible_loop_nodes()
     if available:
         print(
             f"[kv_pool_a2] UBS IO loop-device probe: {available[0]} (candidates found: {', '.join(available)})",
@@ -487,15 +495,22 @@ def _mooncake_version() -> str:
         return "0"
 
 
-def _hugepages_total() -> int:
+def _hugepage_fields() -> dict[str, int]:
+    """Read the hugepage lines of interest from /proc/meminfo ({} on failure)."""
+    fields: dict[str, int] = {}
     try:
         with open("/proc/meminfo", encoding="utf-8") as meminfo:
             for line in meminfo:
-                if line.startswith("HugePages_Total:"):
-                    return int(line.split()[1])
-    except OSError:
-        return 0
-    return 0
+                key, sep, value = line.partition(":")
+                if sep and key in ("HugePages_Total", "HugePages_Free", "Hugepagesize"):
+                    fields[key] = int(value.split()[0])
+    except (OSError, ValueError, IndexError):
+        pass
+    return fields
+
+
+def _hugepages_total() -> int:
+    return _hugepage_fields().get("HugePages_Total", 0)
 
 
 def _mooncake_supports_ssd_prefetch() -> bool:
@@ -1216,7 +1231,13 @@ def _apply_cpu_isolation(case: str) -> None:
 
 
 def _log_env_diagnostics(case: str) -> None:
-    """V4: record the CPU/NUMA knobs that decide whether the pool path is isolated."""
+    """V4: record the CPU/NUMA knobs that decide whether the pool path is isolated.
+
+    Also snapshots the three runner-infrastructure facts a green leg stands
+    on, so each one is verifiable from the CI log alone: the RoCE binding
+    (_log_roce_binding), the visible 2MB hugepage reservation
+    (_log_hugepages) and the injected UBS IO loop node (_log_ubsio_disk).
+    """
     allowed = _allowed_cpus()
     numa, numa_cores = _card_numa_cpus()
     migratepages = shutil.which("migratepages") or "missing"
@@ -1232,6 +1253,8 @@ def _log_env_diagnostics(case: str) -> None:
         f"migratepages={migratepages} nice_minus5={nice_ok} cpu_isolate={CPU_ISOLATE}",
         flush=True,
     )
+    _log_roce_binding(case)
+    _log_hugepages(case)
     _log_ubsio_disk(case)
 
 
@@ -1368,13 +1391,61 @@ def _apply_collective_if_env(case: str) -> None:
     os.environ["TP_SOCKET_IFNAME"] = ip_if
 
 
+def _log_roce_binding(case: str) -> None:
+    """Print the effective RoCE/business-plane binding for this leg.
+
+    ``HCCL_IF_IP`` is the address the HCCL collective and the HIXL AdxlEngine
+    create their RoCE endpoint on (see :func:`_apply_collective_if_env`, which
+    ran before this log line). Printing the effective values per leg keeps a
+    wrong-plane binding - e.g. a pod overlay address picked because the
+    business-plane NIC is not visible in this container - diagnosable from
+    the log alone.
+    """
+    ip = os.environ.get("HCCL_IF_IP", "")
+    iface = os.environ.get("HCCL_SOCKET_IFNAME", "")
+    print(
+        f"[kv_pool_a2] {case}: RoCE binding: HCCL_IF_IP={ip or '<unset>'} HCCL_SOCKET_IFNAME={iface or '<unset>'}",
+        flush=True,
+    )
+
+
+def _log_hugepages(case: str) -> None:
+    """Print the host's visible hugepage reservation before every leg.
+
+    The memcache local service mmaps its pooled DRAM tier (4GB tier-2 / 8GB
+    tier-3) from the host's 2MB hugepage reservation and intermittently
+    aborts with ENOMEM without it (runs 45219536792, 45305264291,
+    45528263688, 45535186724), so a green leg is only meaningful when the
+    reservation is visible here. Informational only: provisioning the
+    reservation is a host concern, not a test verdict - the mooncake legs
+    were verified passing with none reserved at all.
+    """
+    fields = _hugepage_fields()
+    if not fields:
+        print(
+            f"[kv_pool_a2] {case}: hugepage state unreadable (/proc/meminfo missing or has no hugepage lines)",
+            flush=True,
+        )
+        return
+    print(
+        f"[kv_pool_a2] {case}: 2MB hugepages: "
+        f"total={fields.get('HugePages_Total', 0)} "
+        f"free={fields.get('HugePages_Free', 0)} "
+        f"Hugepagesize={fields.get('Hugepagesize', 0)}kB "
+        "(the memcache DRAM tier mmaps from this reservation)",
+        flush=True,
+    )
+
+
 def _log_ubsio_disk(case: str) -> None:
     """Print the tier-3 device state that every skip decision below depends on.
 
     The workflow's log pipeline mangles pytest skip reasons (observed as
     ``SKIPPED[INFO] Model cache cleared`` with the real reason dropped), so the
     disk facts - path, existence, block-device bit, stat mode and symlink
-    target - are printed up front for every memcache tier-3 run.
+    target - are printed up front for every memcache tier-3 run. The visible
+    /dev/loop[0-7] candidates are re-probed per leg because the device
+    plugin's node number drifts between runs.
     """
     exists = os.path.exists(MEMCACHE_UBSIO_DISK)
     if exists:
@@ -1384,10 +1455,12 @@ def _log_ubsio_disk(case: str) -> None:
         detail = f"exists=True type={kind} mode={oct(mode & 0o170000)} real={target}"
     else:
         detail = "exists=False (not mounted in this container)"
+    loop_nodes = _visible_loop_nodes()
+    loop_detail = ", ".join(loop_nodes) if loop_nodes else "none visible in this container"
     print(
         f"[kv_pool_a2] {case}: ubsio_disk {MEMCACHE_UBSIO_DISK!r} {detail} "
         f"tier={MEMCACHE_TIER3_DRAM_TIER} tier_gb={_dram_tier_gb(MEMCACHE_TIER3_DRAM_TIER):g} "
-        f"devices={MEMCACHE_UBSIO_DEVICES}",
+        f"devices={MEMCACHE_UBSIO_DEVICES}; loop-node probe: {loop_detail}",
         flush=True,
     )
 
