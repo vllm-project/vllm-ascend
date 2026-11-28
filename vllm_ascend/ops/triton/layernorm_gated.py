@@ -9,6 +9,18 @@
 import torch
 from vllm.triton_utils import tl, triton
 
+from vllm_ascend.ops.triton.layernorm_gated_dispatch import (
+    BASE16_MAX_N_GROUP,
+    WIDE_FP16_BLOCK_N,
+    WIDE_FT_MAX_N_GROUP,
+    WIDE_FT_MIN_N_GROUP,
+    WIDE_FT_VECTOR_CORES,
+    DispatchConfigError,
+    WideRmsMode,
+    _select_layernorm_launch,
+)
+from vllm_ascend.ops.triton.triton_utils import get_ub_size_bytes, get_vectorcore_num
+
 _ACTIVATION_SWISH = 0
 _ACTIVATION_SIGMOID = 1
 
@@ -118,6 +130,90 @@ def _layer_norm_fwd_1pass_kernel_npu(
     tl.store(y_ptrs, y, mask=row_mask[:, None] & col_mask[None, :])
 
 
+@triton.heuristics({"HAS_BIAS": lambda args: args["B"] is not None})
+@triton.heuristics({"HAS_Z": lambda args: args["Z"] is not None})
+@triton.jit(
+    do_not_specialize=[
+        "stride_x_row",
+        "stride_y_row",
+        "stride_z_row",
+        "M",
+        "N",
+        "eps",
+        "num_m_blocks",
+    ]
+)
+def _layer_norm_fwd_persistent_hoist_kernel_npu(
+    X,
+    Y,
+    W,
+    B,
+    Z,
+    Mean,
+    Rstd,
+    stride_x_row,
+    stride_y_row,
+    stride_z_row,
+    M,
+    N,
+    eps,
+    num_m_blocks,
+    BLOCK_M: tl.constexpr,
+    BLOCK_N: tl.constexpr,
+    HAS_BIAS: tl.constexpr,
+    HAS_Z: tl.constexpr,
+    NORM_BEFORE_GATE: tl.constexpr,
+    IS_RMS_NORM: tl.constexpr,
+    ACTIVATION: tl.constexpr,
+):
+    pid = tl.program_id(0)
+    num_programs = tl.num_programs(0)
+    cols = tl.arange(0, BLOCK_N)
+    col_mask = cols < N
+    w = tl.load(W + cols, mask=col_mask).to(tl.float32)
+    if HAS_BIAS:
+        b = tl.load(B + cols, mask=col_mask).to(tl.float32)
+
+    for tile_id in range(pid, num_m_blocks, num_programs):
+        rows = tile_id * BLOCK_M + tl.arange(0, BLOCK_M)
+        row_mask = rows < M
+        x_ptrs = X + rows[:, None] * stride_x_row + cols[None, :]
+        x = tl.load(x_ptrs, mask=row_mask[:, None] & col_mask[None, :]).to(tl.float32)
+        if HAS_Z:
+            z_ptrs = Z + rows[:, None] * stride_z_row + cols[None, :]
+            z = tl.load(z_ptrs, mask=row_mask[:, None] & col_mask[None, :]).to(tl.float32)
+            if not NORM_BEFORE_GATE:
+                if ACTIVATION == 0:
+                    x *= z * tl.sigmoid(z)
+                else:
+                    x *= tl.sigmoid(z)
+
+        if not IS_RMS_NORM:
+            mean = tl.sum(x, axis=1) / N
+            xbar = tl.where(col_mask[None, :], x - mean[:, None], 0.0)
+            var = tl.sum(xbar * xbar, axis=1) / N
+            tl.store(Mean + rows, mean, mask=row_mask)
+        else:
+            xbar = tl.where(col_mask[None, :], x, 0.0)
+            var = tl.sum(xbar * xbar, axis=1) / N
+        rstd = 1.0 / tl.sqrt(var + eps)
+        tl.store(Rstd + rows, rstd, mask=row_mask)
+        if not IS_RMS_NORM:
+            x_hat = (x - mean[:, None]) * rstd[:, None]
+        else:
+            x_hat = x * rstd[:, None]
+        y = x_hat * w[None, :]
+        if HAS_BIAS:
+            y += b[None, :]
+        if HAS_Z and NORM_BEFORE_GATE:
+            if ACTIVATION == 0:
+                y *= z * tl.sigmoid(z)
+            else:
+                y *= tl.sigmoid(z)
+        y_ptrs = Y + rows[:, None] * stride_y_row + cols[None, :]
+        tl.store(y_ptrs, y, mask=row_mask[:, None] & col_mask[None, :])
+
+
 def layer_norm_fwd_npu(
     x,
     weight,
@@ -145,7 +241,42 @@ def layer_norm_fwd_npu(
     if bias is not None:
         assert bias.stride(-1) == 1
         assert bias.shape == (N,)
-    # allocate output
+    activation_id = _activation_id(activation)
+    runtime_p = None
+    ub_bytes = None
+    wide_rms_mode: WideRmsMode | None = None
+    if ngroups == 1 and getattr(getattr(x, "device", None), "type", None) == "npu":
+        runtime_p = get_vectorcore_num()
+        if (
+            runtime_p == WIDE_FT_VECTOR_CORES
+            and WIDE_FT_MIN_N_GROUP <= group_size <= WIDE_FT_MAX_N_GROUP
+            and is_rms_norm
+            and activation_id == _ACTIVATION_SWISH
+            and bias is None
+            and out is None
+            and z is not None
+            and x.stride(0) == z.stride(0) == N
+            and x.dtype == weight.dtype == z.dtype
+        ):
+            if x.dtype == torch.bfloat16 and norm_before_gate:
+                wide_rms_mode = "bf16_post_gate"
+            elif (
+                x.dtype == torch.float16
+                and not norm_before_gate
+                and WIDE_FP16_BLOCK_N // 2 < group_size <= WIDE_FP16_BLOCK_N
+            ):
+                wide_rms_mode = "fp16_pre_gate"
+        if 128 < group_size <= BASE16_MAX_N_GROUP or wide_rms_mode is not None:
+            ub_bytes = get_ub_size_bytes()
+    spec = _select_layernorm_launch(
+        M,
+        group_size,
+        ngroups,
+        runtime_p,
+        ub_bytes=ub_bytes,
+        wide_rms_mode=wide_rms_mode,
+    )
+
     if out is not None:
         assert out.shape == x.shape
     else:
@@ -154,35 +285,65 @@ def layer_norm_fwd_npu(
     mean = torch.empty((ngroups * M,), dtype=torch.float32, device=x.device) if not is_rms_norm else None
     rstd = torch.empty((ngroups * M,), dtype=torch.float32, device=x.device)
 
-    MAX_FUSED_SIZE = 65536 // x.element_size()
-    BLOCK_N = min(MAX_FUSED_SIZE, triton.next_power_of_2(group_size))
-    if group_size > BLOCK_N:
-        raise RuntimeError(f"layer_norm_fwd_npu: Feature dim too large, got {group_size}, max supported is {BLOCK_N}.")
+    # BASE selections reuse the upstream kernel and feature-dimension guard.
+    if spec.impl == "FT_BASE":
+        max_fused_size = 65536 // x.element_size()
+        block_n = min(max_fused_size, triton.next_power_of_2(group_size))
+        if group_size > block_n:
+            raise RuntimeError(
+                f"layer_norm_fwd_npu: Feature dim too large, got {group_size}, max supported is {block_n}."
+            )
+        grid = (triton.cdiv(M, spec.block_m), ngroups)
+        _layer_norm_fwd_1pass_kernel_npu[grid](
+            x,
+            out,
+            weight,
+            bias,
+            z,
+            mean,
+            rstd,
+            x.stride(0),
+            out.stride(0),
+            z.stride(0) if z is not None else 0,
+            M,
+            group_size,
+            eps,
+            BLOCK_M=spec.block_m,
+            BLOCK_N=block_n,
+            NORM_BEFORE_GATE=norm_before_gate,
+            IS_RMS_NORM=is_rms_norm,
+            ACTIVATION=activation_id,
+        )
+        return out, mean, rstd
 
-    # Choose BLOCK_M: e.g., 16, 32, 64 — depends on NPU vector core capacity
-    BLOCK_M = 64  # Tune this based on your NPU's register/shared memory
+    block_n = min(65536 // x.element_size(), triton.next_power_of_2(group_size))
 
-    # Now grid is (num blocks over M, num groups)
-    grid = (triton.cdiv(M, BLOCK_M), ngroups)
-    _layer_norm_fwd_1pass_kernel_npu[grid](
-        x,
-        out,
-        weight,
-        bias,
-        z,
-        mean,
-        rstd,
-        x.stride(0),
-        out.stride(0),
-        z.stride(0) if z is not None else 0,
-        M,
-        group_size,
-        eps,
-        BLOCK_M=BLOCK_M,
-        BLOCK_N=BLOCK_N,
-        NORM_BEFORE_GATE=norm_before_gate,
-        IS_RMS_NORM=is_rms_norm,
-        ACTIVATION=_activation_id(activation),
-        # Remove multibuffer if not needed
-    )
-    return out, mean, rstd
+    if spec.impl == "FT_PERSIST_HOIST":
+        if ngroups != 1:
+            raise DispatchConfigError("FT_PERSIST_HOIST requires ngroups == 1")
+        num_m_blocks = triton.cdiv(M, spec.block_m)
+        grid = (min(runtime_p, num_m_blocks),)
+        _layer_norm_fwd_persistent_hoist_kernel_npu[grid](
+            x,
+            out,
+            weight,
+            bias,
+            z,
+            mean,
+            rstd,
+            x.stride(0),
+            out.stride(0),
+            z.stride(0) if z is not None else 0,
+            M,
+            group_size,
+            eps,
+            num_m_blocks,
+            BLOCK_M=spec.block_m,
+            BLOCK_N=block_n,
+            NORM_BEFORE_GATE=norm_before_gate,
+            IS_RMS_NORM=is_rms_norm,
+            ACTIVATION=activation_id,
+        )
+        return out, mean, rstd
+
+    raise DispatchConfigError(f"impl {spec.impl} is unsupported or unmaterialized")
