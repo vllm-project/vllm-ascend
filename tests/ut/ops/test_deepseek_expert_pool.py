@@ -49,7 +49,7 @@ def test_batch_helpers_import_without_loading_routing_or_pool(monkeypatch):
     spec.loader.exec_module(module)
     runner = SimpleNamespace(model=None)
     module.prepare_batch(runner, None)
-    assert module.can_dispatch_graph(None, 6)
+    module.prepare_graph_capture(SimpleNamespace(model_runner=runner), lambda: False)
     module.prepare_inputs(None, None)
     module.prepare_capture(None, None)
     assert callable(module.expert_offload_weights)

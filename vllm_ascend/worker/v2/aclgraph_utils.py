@@ -123,34 +123,6 @@ class ModelAclGraphManager(AscendGraphManagerMixin, ModelCudaGraphManager):
         if super().needs_capture():
             set_graph_params(self.capture_sizes)
 
-    def dispatch(
-        self,
-        num_reqs: int,
-        num_tokens: int,
-        uniform_token_count: int | None,
-        num_active_loras: int,
-        max_query_len: int | None = None,
-        num_ubatches: int = 1,
-    ) -> BatchExecutionDescriptor:
-        # Pool graphs capture pure verification routing. Check the current
-        # batch before selecting one, including prefill promoted to decode.
-        if not expert_offload.can_dispatch_graph(getattr(self.model_runner, "model", None), uniform_token_count):
-            return BatchExecutionDescriptor(
-                cg_mode=CUDAGraphMode.NONE,
-                num_tokens=num_tokens,
-                num_reqs=num_reqs,
-                num_active_loras=num_active_loras,
-                num_ubatches=num_ubatches,
-            )
-        return super().dispatch(
-            num_reqs,
-            num_tokens,
-            uniform_token_count,
-            num_active_loras,
-            max_query_len=max_query_len,
-            num_ubatches=num_ubatches,
-        )
-
     def run_fullgraph(self, desc: BatchExecutionDescriptor) -> torch.Tensor | tuple[torch.Tensor, list[torch.Tensor]]:
         """Override run_fullgraph to update full graph params in run_fullgraph."""
         num_tokens = desc.num_tokens

@@ -115,11 +115,6 @@ def prepare_batch(runner: NPUModelRunner, batch_state) -> None:
         manager.prepare_batch(batch_state)
 
 
-def can_dispatch_graph(model: torch.nn.Module | None, uniform_token_count: int | None) -> bool:
-    manager = get_manager(model)
-    return manager is None or manager.can_dispatch_graph(uniform_token_count)
-
-
 def prepare_inputs(model: torch.nn.Module | None, input_batch) -> None:
     if (manager := get_manager(model)) is not None:
         manager.prepare_inputs(input_batch)

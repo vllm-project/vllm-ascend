@@ -8,8 +8,10 @@ from itertools import takewhile
 from typing import TYPE_CHECKING, cast
 
 import torch
+from vllm.config.compilation import CUDAGraphMode
 from vllm.forward_context import get_forward_context
 from vllm.logger import logger
+from vllm.v1.worker.gpu.cudagraph_utils import BatchExecutionDescriptor
 
 from .expert_offload_config import validate_expert_offload_layer
 from .expert_offload_utils import ExpertMapBuffer, ExpertWeightView, PreparedExpertTensor
@@ -362,6 +364,35 @@ class ExpertOffloadManager:
     def can_dispatch_graph(self, uniform_token_count: int | None) -> bool:
         return self.dspark_expert_pool is None or uniform_token_count in (None, 1) or self.verify_graph_eligible
 
+    def dispatch_graph(
+        self,
+        dispatch_fn,
+        num_reqs: int,
+        num_tokens: int,
+        uniform_token_count: int | None,
+        num_active_loras: int,
+        max_query_len: int | None = None,
+        num_ubatches: int = 1,
+    ) -> BatchExecutionDescriptor:
+        # Pool graphs capture pure verification routing. Recheck the current
+        # batch before selecting one, including prefill promoted to decode.
+        if not self.can_dispatch_graph(uniform_token_count):
+            return BatchExecutionDescriptor(
+                cg_mode=CUDAGraphMode.NONE,
+                num_tokens=num_tokens,
+                num_reqs=num_reqs,
+                num_active_loras=num_active_loras,
+                num_ubatches=num_ubatches,
+            )
+        return dispatch_fn(
+            num_reqs,
+            num_tokens,
+            uniform_token_count,
+            num_active_loras,
+            max_query_len=max_query_len,
+            num_ubatches=num_ubatches,
+        )
+
     def prepare_inputs(self, input_batch) -> None:
         if self.dspark_expert_pool is not None:
             self.dspark_expert_pool.prepare(input_batch)
@@ -399,6 +430,12 @@ class ExpertOffloadManager:
         )
 
     def prepare_graph_capture(self, graph_manager, needs_capture) -> None:
+        if self.dspark_expert_pool is not None:
+            dispatch_fn = graph_manager.dispatch
+            # Keep the policy local to this target graph manager. Repeated
+            # initialization must not add another check to every dispatch.
+            if not isinstance(dispatch_fn, partial) or dispatch_fn.func != self.dispatch_graph:
+                graph_manager.dispatch = partial(self.dispatch_graph, dispatch_fn)
         # Capture and dispatch must use the same padded descriptor capacity.
         graph_manager._capture_descs = {
             mode: [desc for desc in descs if self._supports_graph_descriptor(desc)]

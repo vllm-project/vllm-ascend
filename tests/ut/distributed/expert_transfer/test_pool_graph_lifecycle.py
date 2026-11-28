@@ -2,6 +2,7 @@
 """Offload graph admission and role staging through existing worker hooks."""
 
 from types import SimpleNamespace
+from typing import cast
 
 import numpy as np
 import pytest
@@ -11,11 +12,12 @@ from vllm.v1.worker.gpu.cudagraph_utils import BatchExecutionDescriptor, ModelCu
 
 from vllm_ascend.distributed.expert_transfer import expert_offload_utils as expert_offload
 from vllm_ascend.distributed.expert_transfer.dspark_expert_pool import DSparkExpertPool
-from vllm_ascend.distributed.expert_transfer.expert_offload_manager import ExpertOffloadManager
+from vllm_ascend.distributed.expert_transfer.expert_offload_manager import ExpertOffloadManager, LayerOffloadBinding
 
 
 def make_manager():
     manager = ExpertOffloadManager()
+    manager.bindings = {"layer": cast(LayerOffloadBinding, SimpleNamespace(top_k=6, num_slots=84))}
     manager.dspark_expert_pool = DSparkExpertPool(
         torch.device("cpu"), 12, 2, 2, num_speculative_tokens=5, num_device_experts=84
     )
@@ -33,27 +35,18 @@ def make_state(rows, drafts, prefilling):
     )
 
 
-def make_graph(load_hook_class, model, *, width=6):
-    graph_class = load_hook_class(
-        "vllm_ascend/worker/v2/aclgraph_utils.py",
-        "ModelAclGraphManager",
-        {"dispatch"},
-        ModelCudaGraphManager,
-        {
-            "expert_offload": expert_offload,
-            "BatchExecutionDescriptor": BatchExecutionDescriptor,
-            "CUDAGraphMode": CUDAGraphMode,
-        },
-    )
-    graph = object.__new__(graph_class)
+def make_graph(model, *, width=6):
+    graph = object.__new__(ModelCudaGraphManager)
     graph.model_runner = SimpleNamespace(model=model)
     captured = BatchExecutionDescriptor(
         cg_mode=CUDAGraphMode.FULL, num_tokens=2 * width, num_reqs=2, uniform_token_count=width
     )
     graph._graphs_captured = True
     graph._lora_dispatch_map = {}
+    graph._capture_descs = {CUDAGraphMode.FULL: [captured]}
     graph._decode_descs = {(width, 0, 1): [captured] * 3}
     graph._candidates = {(n, 0): [captured] for n in range(1, 2 * width + 1)}
+    expert_offload.prepare_graph_capture(graph, lambda: False)
     return graph
 
 
@@ -69,12 +62,10 @@ def make_graph(load_hook_class, model, *, width=6):
         ([1, 6], [0, 5], [False, False], None, False),
     ],
 )
-def test_graph_manager_rejects_incompatible_pool_layout_before_replay(
-    load_hook_class, rows, drafts, prefilling, width, want_full
-):
+def test_graph_manager_rejects_incompatible_pool_layout_before_replay(rows, drafts, prefilling, width, want_full):
     manager, model = make_manager()
     manager.prepare_batch(make_state(rows, drafts, prefilling))
-    graph = make_graph(load_hook_class, model)
+    graph = make_graph(model)
     actual = graph.dispatch(len(rows), sum(rows), width, 0)
     assert actual.cg_mode == (CUDAGraphMode.FULL if want_full else CUDAGraphMode.NONE)
     assert actual.num_tokens == (12 if want_full else sum(rows))
@@ -83,7 +74,7 @@ def test_graph_manager_rejects_incompatible_pool_layout_before_replay(
 
 
 @pytest.mark.parametrize("owner", ["absent", "native_offload", "dummy_pool"])
-def test_pool_admission_preserves_unrelated_and_dummy_graphs(load_hook_class, owner):
+def test_pool_admission_preserves_unrelated_and_dummy_graphs(owner):
     manager, model = make_manager()
     if owner == "absent":
         del model._expert_offload_manager
@@ -93,15 +84,101 @@ def test_pool_admission_preserves_unrelated_and_dummy_graphs(load_hook_class, ow
     else:
         manager.prepare_batch(make_state([6], [5], [True]))
         manager.prepare_batch(None)
-    graph = make_graph(load_hook_class, model)
+    graph = make_graph(model)
     assert graph.dispatch(1, 6, 6, 0).cg_mode == CUDAGraphMode.FULL
 
 
-def test_pool_admission_preserves_single_token_native_graphs(load_hook_class):
+def test_pool_admission_preserves_single_token_native_graphs():
     manager, model = make_manager()
     manager.prepare_batch(make_state([1], None, [False]))
-    graph = make_graph(load_hook_class, model, width=1)
+    graph = make_graph(model, width=1)
     assert graph.dispatch(1, 1, 1, 0).cg_mode == CUDAGraphMode.FULL
+
+
+def test_pool_admission_refreshes_for_each_step_on_the_same_graph():
+    manager, model = make_manager()
+    graph = make_graph(model)
+    for state, expected in (
+        (make_state([6], [5], [False]), CUDAGraphMode.FULL),
+        (make_state([6], [5], [True]), CUDAGraphMode.NONE),
+        (make_state([6], [5], [False]), CUDAGraphMode.FULL),
+        (make_state([6], [2], [False]), CUDAGraphMode.NONE),
+        (None, CUDAGraphMode.FULL),
+    ):
+        manager.prepare_batch(state)
+        assert graph.dispatch(1, 6, 6, 0).cg_mode == expected
+
+
+def test_pool_dispatch_installs_once_and_stays_local_to_its_graph():
+    manager, model = make_manager()
+    manager.prepare_batch(make_state([6], [5], [True]))
+    graph = make_graph(model)
+    dispatch = graph.dispatch
+    expert_offload.prepare_graph_capture(graph, lambda: False)
+    assert graph.dispatch is dispatch
+    assert graph.dispatch(1, 6, 6, 0).cg_mode == CUDAGraphMode.NONE
+
+    native_graph = make_graph(torch.nn.Module())
+    assert native_graph.dispatch(1, 6, 6, 0).cg_mode == CUDAGraphMode.FULL
+
+
+def test_pool_dispatch_passes_through_after_pool_is_removed():
+    manager, model = make_manager()
+    manager.prepare_batch(make_state([6], [5], [True]))
+    graph = make_graph(model)
+    assert graph.dispatch(1, 6, 6, 0).cg_mode == CUDAGraphMode.NONE
+    manager.dspark_expert_pool = None
+    assert graph.dispatch(1, 6, 6, 0).cg_mode == CUDAGraphMode.FULL
+
+
+def test_pool_dispatch_passes_through_after_offload_shutdown(native_runtime):
+    manager, model = make_manager()
+    manager.prepare_batch(make_state([6], [5], [True]))
+    graph = make_graph(model)
+    assert graph.dispatch(1, 6, 6, 0).cg_mode == CUDAGraphMode.NONE
+    expert_offload.shutdown(SimpleNamespace(model=model))
+    assert not hasattr(model, "_expert_offload_manager")
+    assert manager.dspark_expert_pool is None
+    assert graph.dispatch(1, 6, 6, 0).cg_mode == CUDAGraphMode.FULL
+
+
+@pytest.mark.parametrize("eligible", [False, True])
+def test_pool_dispatch_preserves_optional_arguments_and_eager_shape(eligible):
+    manager, model = make_manager()
+    manager.prepare_batch(make_state([6], [5], [not eligible]))
+    graph = make_graph(model)
+    actual = graph.dispatch(
+        num_reqs=1,
+        num_tokens=6,
+        uniform_token_count=6,
+        num_active_loras=3,
+        max_query_len=6,
+        num_ubatches=2,
+    )
+    assert actual.cg_mode == CUDAGraphMode.NONE
+    assert (actual.num_reqs, actual.num_tokens, actual.num_active_loras, actual.num_ubatches) == (1, 6, 3, 2)
+
+
+@pytest.mark.parametrize("max_query_len,want_full", [(6, True), (7, False)])
+def test_pool_dispatch_forwards_lora_query_bound_and_microbatches(max_query_len, want_full):
+    manager, model = make_manager()
+    manager.prepare_batch(make_state([6], [5], [False]))
+    graph = make_graph(model)
+    captured = BatchExecutionDescriptor(
+        cg_mode=CUDAGraphMode.FULL,
+        num_tokens=12,
+        num_reqs=2,
+        uniform_token_count=6,
+        max_query_len=6,
+        num_active_loras=3,
+        num_ubatches=2,
+    )
+    graph._decode_descs = {(6, 3, 2): [captured] * 3}
+    graph._candidates = {(6, 3): [captured]}
+    actual = graph.dispatch(1, 6, 6, 3, max_query_len=max_query_len, num_ubatches=2)
+    assert actual.cg_mode == (CUDAGraphMode.FULL if want_full else CUDAGraphMode.NONE)
+    assert actual.num_active_loras == 3
+    assert actual.num_ubatches == 2
 
 
 def test_existing_batch_hook_resets_stale_pool_for_real_and_dummy_steps():
