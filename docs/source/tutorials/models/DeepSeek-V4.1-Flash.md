@@ -2441,7 +2441,7 @@ Select the tab for the target hardware.
 
     The Decode node must be able to reach `http://<PREFILL_IP>:1999/v1/metaserver`
     for the layerwise transfer callback. The layerwise proxy requires a reachable
-    `--host` address and does not accept `--workers`.
+    `--host` address.
 
     Send a long prompt to populate the pool, then reuse its prefix with a
     different suffix. Check all Prefill ranks for increased
