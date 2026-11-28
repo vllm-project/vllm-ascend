@@ -789,6 +789,7 @@ def test_large_ple_uses_one_dense_bank_without_expanding_shared_slots(monkeypatc
 
 def test_public_qwen4_grouping_and_pool_charge_match_physical_backing() -> None:
     specs = _ungrouped_qwen_specs()
+    original_specs = dict(specs)
     original_groups = [KVCacheGroupSpec([name], spec) for name, spec in specs.items()]
     calls = []
 
@@ -798,7 +799,21 @@ def test_public_qwen4_grouping_and_pool_charge_match_physical_backing() -> None:
 
     config = object()
     groups = get_qwen4_exp_kv_cache_groups(config, specs, upstream)
-    assert calls == [(config, specs)]
+    assert specs == original_specs
+    assert list(specs) == list(original_specs)
+    assert calls == [
+        (
+            config,
+            {
+                name: (
+                    replace(spec, page_size_padded=33280)
+                    if isinstance(spec, (CircularBufferSpec, MLAAttentionSpec))
+                    else spec
+                )
+                for name, spec in original_specs.items()
+            },
+        )
+    ]
     assert groups is not None
     assert len(groups) == 6
     assert sorted(name for group in groups for name in group.layer_names) == sorted(specs)
@@ -1040,3 +1055,122 @@ def test_whole_page_sharing_uses_one_tp4_page_for_qsa_or_complete_gdn():
     gdn_ssm[1].zero_()
     assert torch.count_nonzero(qsa[1].flatten()[: 798 * 1024 // 2]) == 0
     assert torch.count_nonzero(qsa[[0, 2]]) == 0
+
+
+def test_qwen4_exp_collector_aligned_planner_characterization() -> None:
+    """Pin Qwen4-Exp groups and tensor descriptors on collector-aligned specs."""
+    specs = _ungrouped_qwen_specs()
+    main_page = max(
+        spec.page_size_bytes
+        for name, spec in specs.items()
+        if name.endswith(".attn") and isinstance(spec, FullAttentionSpec)
+    )
+    specs = {
+        name: replace(spec, page_size_padded=main_page) if isinstance(spec, MambaSpec) else spec
+        for name, spec in specs.items()
+    }
+    aligned = {
+        name: (
+            replace(spec, page_size_padded=main_page)
+            if isinstance(spec, (FullAttentionSpec, CircularBufferSpec, MLAAttentionSpec))
+            and spec.page_size_bytes < main_page
+            else spec
+        )
+        for name, spec in specs.items()
+    }
+
+    vllm_config = SimpleNamespace(
+        model_config=SimpleNamespace(
+            max_model_len=135168,
+            hf_config=SimpleNamespace(model_type="qwen4_exp"),
+            supports_kv_cache_grouping=False,
+        ),
+        parallel_config=SimpleNamespace(decode_context_parallel_size=1),
+        scheduler_config=SimpleNamespace(disable_hybrid_kv_cache_manager=False),
+        cache_config=SimpleNamespace(
+            mamba_cache_mode="align",
+            num_gpu_blocks_override=5,
+            prefix_cache_retention_interval=None,
+            get_resolved_kv_cache_layout=lambda: SimpleNamespace(
+                is_layer_compact=True, is_block_compact=True, is_block_outermost=False
+            ),
+        ),
+        max_in_flight_tokens=4096,
+        attention_config=SimpleNamespace(hisparse_config=None),
+    )
+    builder = AscendKVCacheConfigBuilder()
+    groups = builder.get_kv_cache_groups(vllm_config, aligned)
+    plan = builder.get_kv_cache_config_from_groups(vllm_config, groups, num_blocks=5)
+
+    assert len(groups) == 6
+    assert [(len(g.layer_names), g.kv_cache_spec.block_size, g.kv_cache_spec.page_size_bytes) for g in groups] == [
+        (26, 256, 26 * main_page),
+        (13, 8, 13 * main_page),
+        (12, 128, 12 * main_page),
+        (12, 128, 12 * main_page),
+        (12, 128, 12 * main_page),
+        (1, 128, main_page),
+    ]
+    layout = build_qwen4_kv_cache_layout(groups, num_blocks=5)
+    assert layout is not None
+    expected_backing = layout.slot_count * layout.slot_backing_size
+    assert len(plan.kv_cache_tensors) == 7
+    assert all(t.size == expected_backing for t in plan.kv_cache_tensors[:-1])
+    assert plan.kv_cache_tensors[-1].layers == ["model.ple"]
+    assert plan.kv_cache_tensors[-1].size == 5 * 1280
+    assert plan.kv_cache_tensors[-1].layer_stride == 5 * 1280
+    assert plan.kv_cache_tensors[-1].block_stride == 1280
+
+
+def test_qwen4_exp_planner_is_identical_and_pure_across_raw_and_aligned_specs() -> None:
+    base_specs = _ungrouped_qwen_specs()
+    main_page = max(
+        spec.page_size_bytes
+        for name, spec in base_specs.items()
+        if name.endswith(".attn") and isinstance(spec, FullAttentionSpec)
+    )
+    raw_specs = {
+        name: replace(spec, page_size_padded=main_page) if isinstance(spec, MambaSpec) else spec
+        for name, spec in base_specs.items()
+    }
+    aligned_specs = {
+        name: (
+            replace(spec, page_size_padded=main_page)
+            if isinstance(spec, (FullAttentionSpec, CircularBufferSpec, MLAAttentionSpec))
+            and spec.page_size_bytes < main_page
+            else spec
+        )
+        for name, spec in raw_specs.items()
+    }
+    raw_snapshot = dict(raw_specs)
+    aligned_snapshot = dict(aligned_specs)
+
+    vllm_config = SimpleNamespace(
+        model_config=SimpleNamespace(
+            max_model_len=135168,
+            hf_config=SimpleNamespace(model_type="qwen4_exp"),
+            supports_kv_cache_grouping=False,
+        ),
+        parallel_config=SimpleNamespace(decode_context_parallel_size=1),
+        scheduler_config=SimpleNamespace(disable_hybrid_kv_cache_manager=False),
+        cache_config=SimpleNamespace(
+            mamba_cache_mode="align",
+            num_gpu_blocks_override=5,
+            prefix_cache_retention_interval=None,
+            get_resolved_kv_cache_layout=lambda: SimpleNamespace(
+                is_layer_compact=True, is_block_compact=True, is_block_outermost=False
+            ),
+        ),
+        max_in_flight_tokens=4096,
+        attention_config=SimpleNamespace(hisparse_config=None),
+    )
+    builder = AscendKVCacheConfigBuilder()
+    raw_groups = builder.get_kv_cache_groups(vllm_config, raw_specs)
+    aligned_groups = builder.get_kv_cache_groups(vllm_config, aligned_specs)
+    assert raw_specs == raw_snapshot
+    assert aligned_specs == aligned_snapshot
+    assert raw_groups == aligned_groups
+
+    raw_plan = builder.get_kv_cache_config_from_groups(vllm_config, raw_groups, num_blocks=5)
+    aligned_plan = builder.get_kv_cache_config_from_groups(vllm_config, aligned_groups, num_blocks=5)
+    assert raw_plan.kv_cache_tensors == aligned_plan.kv_cache_tensors

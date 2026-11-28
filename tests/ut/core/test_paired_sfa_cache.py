@@ -322,3 +322,54 @@ def test_dspark_c8_draft_uses_dense_fp8_regions_without_changing_target_groups()
     assert all(tensor.block_stride == draft_page_bytes for tensor in draft_tensors)
     assert [tensor.offset for tensor in draft_tensors] == sorted(tensor.offset for tensor in draft_tensors)
     assert draft_tensors[-1].offset + draft_tensors[-1].layer_stride == plan.kv_cache_tensors[0].size
+
+
+def test_paired_sfa_builder_characterization():
+    specs, config = make_specs(), make_config()
+    config.attention_config = SimpleNamespace(hisparse_config=None)
+    builder = AscendKVCacheConfigBuilder()
+    groups = builder.get_kv_cache_groups(config, specs)
+    plan = builder.get_kv_cache_config_from_groups(config, groups, num_blocks=4)
+
+    assert [len(g.layer_names) for g in groups] == [48, 23, 23, 23]
+    assert [(t.size, t.block_stride, t.layer_stride, t.offset) for t in plan.kv_cache_tensors] == [
+        (4 * 29048832, 1007616, 4 * 1007616, 0),
+        (4 * 29048832, 1007616, 4 * 1007616, 0),
+        (4 * 29048832, 1007616, 4 * 1007616, 0),
+        (4 * 29048832, 1007616, 4 * 1007616, 0),
+        (4 * 29048832, 202752, 4 * 202752, 24 * 4 * 1007616),
+    ]
+
+
+def test_paired_sfa_dspark_planner_is_pure_and_preserves_input_dict():
+    config = make_config()
+    config.model_config.max_model_len = 8192
+    config.parallel_config = SimpleNamespace(decode_context_parallel_size=1)
+    config.attention_config = SimpleNamespace(hisparse_config=None)
+    target = make_specs()
+    draft = {
+        "model.layers.93.attn": AscendMLAAttentionSpec(
+            block_size=1536,
+            num_kv_heads=1,
+            head_size=576,
+            dtype=torch.bfloat16,
+            is_draft=True,
+            non_causal_multi_token_decode=True,
+        )
+    }
+    raw_specs = {**draft, **dict(reversed(target.items()))}
+    raw_keys = list(raw_specs.keys())
+    raw_copy = dict(raw_specs)
+
+    builder = AscendKVCacheConfigBuilder()
+    raw_groups = builder.get_kv_cache_groups(config, raw_specs)
+    assert raw_specs == raw_copy
+    assert list(raw_specs.keys()) == raw_keys
+
+    reordered = {**target, **draft}
+    reordered_groups = builder.get_kv_cache_groups(config, reordered)
+    assert raw_groups == reordered_groups
+
+    raw_plan = builder.get_kv_cache_config_from_groups(config, raw_groups, num_blocks=2)
+    reordered_plan = builder.get_kv_cache_config_from_groups(config, reordered_groups, num_blocks=2)
+    assert raw_plan.kv_cache_tensors == reordered_plan.kv_cache_tensors
