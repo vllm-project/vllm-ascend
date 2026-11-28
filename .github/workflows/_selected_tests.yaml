@@ -231,6 +231,18 @@ jobs:
                   if count != 1:
                       raise ValueError(f"Expected one {package} requirement in {filename}, found {count}")
               path.write_text(text)
+
+          cmake = Path("CMakeLists.txt")
+          original = cmake.read_text()
+          version_check = (
+              '# check torch version is 2.10.0\n'
+              'if(NOT ${TORCH_VERSION} VERSION_EQUAL "2.10.0")\n'
+              '  message(FATAL_ERROR "Expected PyTorch version 2.10.0, but found ${TORCH_VERSION}")\n'
+              'endif()'
+          )
+          if original.count(version_check) != 1:
+              raise ValueError("Expected one PyTorch 2.10 version check in CMakeLists.txt")
+          cmake.write_text(original.replace(version_check, version_check.replace("2.10.0", "2.14.0")))
           PY
 
       - name: Get csrc hash
