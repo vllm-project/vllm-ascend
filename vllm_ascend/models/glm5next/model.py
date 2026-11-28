@@ -619,9 +619,12 @@ class Glm5NextModel(nn.Module, EagleModelMixin):
             # Sparse MLA tiles top-k in 128 columns; padded slots remain masked.
             sparse_topk_block_n = 128
             buffer_width = ((buffer_width + sparse_topk_block_n - 1) // sparse_topk_block_n) * sparse_topk_block_n
-            topk_indices_buffer = torch.empty(
-                vllm_config.scheduler_config.max_num_batched_tokens,
-                buffer_width,
+            # Align to 128 for Sparse MLA, but keep padding columns as -1 so
+            # MTP skip_topk reuse never feeds uninitialized indices into QSFA
+            # after TP indexer row sharding.
+            topk_indices_buffer = torch.full(
+                (vllm_config.scheduler_config.max_num_batched_tokens, buffer_width),
+                -1,
                 dtype=torch.int32,
                 device=self.device,
             )

@@ -92,9 +92,12 @@ class Glm5NextMultiTokenPredictorLayer(nn.Module):
         buffer_width = topk_tokens + (kpool - 1 if kpool > 1 else 0)
         sparse_topk_block_n = 128
         buffer_width = ((buffer_width + sparse_topk_block_n - 1) // sparse_topk_block_n) * sparse_topk_block_n
-        topk_indices_buffer = torch.empty(
-            vllm_config.scheduler_config.max_num_batched_tokens,
-            buffer_width,
+        # Align to 128 for Sparse MLA, but keep padding columns as -1 so MTP
+        # skip_topk reuse (compact_topk_indices) never feeds uninitialized
+        # indices into QSFA after TP indexer row sharding.
+        topk_indices_buffer = torch.full(
+            (vllm_config.scheduler_config.max_num_batched_tokens, buffer_width),
+            -1,
             dtype=torch.int32,
             device=current_platform.device_type,
         )
