@@ -4,7 +4,7 @@
 #include <tuple>
 #include <unordered_map>
 
-#include "NPUBridge.h"
+#include "../../aclnn_torch_adapter/NPUBridge.h"
 #include "torch_npu/csrc/aten/NPUNativeFunctions.h"
 #include "torch_npu/csrc/aten/CustomFunctions.h"
 #include "torch_npu/csrc/core/npu/NPUFormat.h"
