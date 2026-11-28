@@ -170,13 +170,6 @@ jobs:
           } >> "$GITHUB_OUTPUT"
           echo "vLLM target: ${target} (base_ref=${BASE_REF}, test ref=${primary_ref}, lint ref=${main_commit})"
 
-          # =========== Copy problem matchers =====================
-          echo "::group::Copy problem matchers"
-          for matcher in actionlint markdownlint mypy; do
-            cp ".github/workflows/matchers/$matcher.json" "$RUNNER_TEMP/$matcher.json"
-          done
-          echo "::endgroup::"
-
           # =========== Calculate pre-commit cache key ============
           echo "::group::Calculate pre-commit cache key"
           PRE_COMMIT_HASH=$(sha256sum .pre-commit-config.yaml | awk '{print $1}')
