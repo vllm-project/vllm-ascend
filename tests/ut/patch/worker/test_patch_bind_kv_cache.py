@@ -49,24 +49,65 @@ def test_bind_kv_cache_preserves_materialized_attention_tuple() -> None:
     assert layer.kv_cache is allocated
 
 
+def test_bind_kv_cache_to_layers_unpacks_raw_mamba_pages() -> None:
+    layer_name = "model.layers.1.linear_attn"
+    layer = _TestMambaLayer()
+    state_alignment = 16
+    layer.state_alignment = state_alignment
+    slab = torch.zeros(192, dtype=torch.int8)
+    pages = slab.as_strided((3, 1, 1, 32), (64, 32, 32, 1), storage_offset=16)
+    caches = {layer_name: pages}
+
+    patch_bind_kv_cache.bind_kv_cache_to_layers(caches, {layer_name: layer})
+
+    assert isinstance(layer.kv_cache, tuple)
+    conv_state, temporal_state = layer.kv_cache
+    assert conv_state.shape == (3, 2, 3) and conv_state.dtype == torch.bfloat16
+    assert temporal_state.shape == (3, 4) and temporal_state.dtype == torch.float32
+    conv_state[1].fill_(2)
+    temporal_state[2].fill_(3)
+    expected = torch.zeros_like(slab)
+    expected[80:92].view(torch.bfloat16).fill_(2)
+    temporal_start = pages.storage_offset() + 2 * pages.stride(0) + state_alignment
+    expected[temporal_start : temporal_start + 16].view(torch.float32).fill_(3)
+    torch.testing.assert_close(slab, expected)
+    assert caches[layer_name] is pages
+
+
+@pytest.mark.parametrize(
+    ("dtype", "shape"),
+    [(torch.float32, (3, 1, 1, 32)), (torch.int8, (3, 32)), (torch.int8, (3, 2, 1, 32))],
+)
+def test_bind_kv_cache_to_layers_preserves_noncanonical_mamba_tensor(dtype, shape) -> None:
+    layer_name = "model.layers.1.linear_attn"
+    layer = _TestMambaLayer()
+    allocated = torch.empty(shape, dtype=dtype)
+
+    patch_bind_kv_cache.bind_kv_cache_to_layers({layer_name: allocated}, {layer_name: layer})
+
+    assert layer.kv_cache is allocated
+
+
 @pytest.mark.parametrize("container_type", [list, tuple])
+@pytest.mark.parametrize("runner_binding", [False, True])
 def test_bind_kv_cache_accepts_materialized_mamba_states(
     container_type,
+    runner_binding,
 ) -> None:
     layer_name = "model.layers.1.linear_attn"
     layer = _TestMambaLayer()
     conv_state = torch.zeros(5, 2, 3, dtype=torch.bfloat16)
     temporal_state = torch.zeros(5, 4, dtype=torch.float32)
     allocated = container_type((conv_state, temporal_state))
-    runner_caches: list[object] = []
+    caches = {layer_name: allocated}
+    context = {layer_name: layer}
+    if runner_binding:
+        runner_caches: list[object] = []
+        patch_bind_kv_cache.bind_kv_cache(caches, context, runner_caches)
+        assert runner_caches == [allocated]
+    else:
+        patch_bind_kv_cache.bind_kv_cache_to_layers(caches, context)
 
-    patch_bind_kv_cache.bind_kv_cache(
-        {layer_name: allocated},
-        {layer_name: layer},
-        runner_caches,
-    )
-
-    assert runner_caches == [allocated]
     assert layer.kv_cache is allocated
     assert layer.kv_cache[0].is_contiguous()
     assert layer.kv_cache[1].is_contiguous()

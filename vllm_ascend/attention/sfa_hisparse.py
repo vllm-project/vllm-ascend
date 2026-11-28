@@ -12,7 +12,11 @@ from vllm.config.compilation import CUDAGraphMode
 from vllm.distributed import get_pcp_group
 from vllm.forward_context import get_forward_context
 from vllm.logger import logger
-from vllm.v1.attention.backends.mla.index_group import HiSparseMLAIndexGroup, SparseMLAIndexGroupBuilder
+from vllm.v1.attention.backends.mla.index_group import (
+    HiSparseMLAIndexGroup,
+    SparseMLAIndexGroupBuilder,
+    get_sparse_mla_index_group_max_rows,
+)
 from vllm.v1.attention.ops.metadata import compute_token_to_req_indices
 from vllm.v1.hisparse.runtime import HiSparsePrefillStagingPlan
 from vllm.v1.hisparse.runtime import build_hisparse_prefill_staging_plan as build_core_prefill_plan
@@ -230,7 +234,10 @@ class AscendHiSparseImpl(AscendSFAImpl):
         if builder is None:
             if self.topk_indices_buffer is None:
                 raise ValueError("Ascend HiSparse requires a model sparse-index group")
-            builder = SparseMLAIndexGroupBuilder(self.topk_indices_buffer)
+            builder = SparseMLAIndexGroupBuilder(
+                self.topk_indices_buffer,
+                max_decode_rows=get_sparse_mla_index_group_max_rows(self.vllm_config),
+            )
         if self.enable_sparse_sfa_c8:
             row_width = C8_ROW_BYTES
         else:

@@ -20,6 +20,7 @@ from vllm.v1.kv_cache_interface import (
     MambaSpec,
     MLAAttentionSpec,
     SlidingWindowSpec,
+    SparseCacheRole,
     UniformTypeKVCacheSpecs,
     compute_layer_kv_cache_shape_bytes,
 )
@@ -1239,6 +1240,99 @@ def test_draft_layer_specs_keep_ownership_and_sequence_capacity(monkeypatch, is_
     assert spec.dcp_sharded is (not is_draft_layer)
     expected_blocks = 8 if is_draft_layer else 4
     assert spec.max_num_blocks_per_req(vllm_config, 1024) == expected_blocks
+
+
+@pytest.mark.parametrize(
+    "config",
+    [SimpleNamespace(), SimpleNamespace(attention_config=None), SimpleNamespace(attention_config=SimpleNamespace())],
+    ids=["missing-attention-config", "none-attention-config", "missing-hisparse-config"],
+)
+def test_get_kv_cache_spec_without_hisparse_config(monkeypatch, config):
+    monkeypatch.setattr(attn_utils, "get_layers_from_vllm_config", lambda *_: {})
+
+    assert attn_utils.get_kv_cache_spec(config) == {}
+
+
+@pytest.mark.parametrize(
+    ("hisparse_enabled", "supported_width", "has_state_padding"),
+    [(False, True, True), (True, True, True), (True, False, True), (True, True, False)],
+)
+def test_hybrid_sfa_cache_specs_follow_hisparse_geometry(
+    monkeypatch, hisparse_enabled, supported_width, has_state_padding
+):
+    from vllm.v1.hisparse import binding as upstream_binding
+
+    block_size = attention_utils.SFA_QSFA_TILE_SIZE
+    row_bytes = attention_utils.get_sfa_qsfa_packed_head_dim(512, 64, block_size)
+    main = MLAAttentionSpec(block_size=block_size, num_kv_heads=1, head_size=576, dtype=torch.float8_e4m3fn)
+    unpacked = replace(main, head_size=row_bytes)
+    indexer = AscendSFAIndexerCacheSpec(
+        block_size=block_size,
+        num_kv_heads=1,
+        head_size=128,
+        dtype=torch.float8_e4m3fn,
+        cache_role=SparseCacheRole.INDEXER,
+        cache_sparse_li_c8=True,
+        scale_dim=1,
+        scale_dtype=torch.float32,
+    )
+    state = MambaSpec(block_size=block_size, shapes=((32,),), dtypes=(torch.float32,), page_size_padded=256)
+    main_layer = MagicMock(spec=MLAAttention)
+    main_layer.kv_sharing_target_layer_name = None
+    main_layer.is_draft_layer = False
+    main_layer.get_kv_cache_spec.return_value = main
+    main_layer.impl = SimpleNamespace(
+        enable_sparse_sfa_c8=True,
+        sfa_qsfa_packed_kv_head_dim=row_bytes if supported_width else main.head_size,
+        c8_cache_dtype=torch.float8_e4m3fn,
+    )
+    main_layer.hisparse_cache = SimpleNamespace(runtime=SimpleNamespace(is_group_leader=True))
+    unpacked_layer = MagicMock(spec=MLAAttention)
+    unpacked_layer.kv_sharing_target_layer_name = None
+    unpacked_layer.is_draft_layer = False
+    unpacked_layer.get_kv_cache_spec.return_value = unpacked
+    unpacked_layer.impl = SimpleNamespace(enable_sparse_sfa_c8=False)
+    unpacked_layer.hisparse_cache = SimpleNamespace(runtime=SimpleNamespace(is_group_leader=False))
+    layers = {
+        "main": main_layer,
+        "unpacked": unpacked_layer,
+        "indexer": SimpleNamespace(is_draft_layer=False, get_kv_cache_spec=lambda _: indexer, get_attn_backend=object),
+        "state": SimpleNamespace(is_draft_layer=False, get_kv_cache_spec=lambda _: state),
+    }
+    resolved = MagicMock(side_effect=lambda _, specs, __: {**specs, "state": replace(specs["state"], block_size=64)})
+    monkeypatch.setattr(upstream_binding, "resolve_hisparse_specs", resolved)
+    monkeypatch.setattr(attn_utils, "get_layers_from_vllm_config", lambda *_: layers)
+    monkeypatch.setattr(attn_utils, "customize_attention_spec", lambda _, spec: spec)
+    monkeypatch.setattr(attn_utils, "get_ascend_config", lambda: SimpleNamespace(enable_sparse_sfa_c8=True))
+    cache_config = SimpleNamespace()
+    if has_state_padding:
+        cache_config.mamba_page_size_padded = state.page_size_padded
+    config = SimpleNamespace(
+        attention_config=SimpleNamespace(hisparse_config=object() if hisparse_enabled else None),
+        cache_config=cache_config,
+    )
+
+    if not supported_width:
+        with pytest.raises(ValueError, match="Ascend HiSparse C8 layer main requires"):
+            attn_utils.get_kv_cache_spec(config)
+        resolved.assert_not_called()
+        return
+
+    specs = attn_utils.get_kv_cache_spec(config)
+
+    if hisparse_enabled:
+        resolved.assert_called_once()
+        assert specs["main"].head_size == row_bytes
+        assert specs["main"].state_content_size_bytes == row_bytes
+        assert specs["main"].get_block_stride_alignment() == block_size * row_bytes
+        assert specs["unpacked"] == unpacked
+        assert specs["indexer"].block_size == block_size
+        assert specs["state"].block_size == 64
+        expected_padding = None if has_state_padding else state.page_size_padded
+        assert specs["state"].page_size_padded == expected_padding
+    else:
+        resolved.assert_not_called()
+        assert specs == {"main": main, "unpacked": unpacked, "indexer": indexer, "state": state}
 
 
 @pytest.mark.parametrize(

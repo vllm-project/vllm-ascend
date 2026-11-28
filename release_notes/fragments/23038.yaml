@@ -1,0 +1,9 @@
+pr: 23038
+entries:
+  - category: feature
+    hardware: [A3, A5]
+    model: Kimi-K3.1-Pro
+    text: >-
+      Added experimental HiSparse support for Kimi K3.1 on Ascend A3 and A5
+      with Model Runner V2. Enable it with `hisparse_config` and
+      `HiSparseConnector`, using INT8 C8 KV on A3 or FP8 C8 KV on A5.
