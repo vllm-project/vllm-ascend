@@ -322,6 +322,7 @@ class AscendW4A8MXFPDynamicFusedMoEMethod(AscendMoEScheme):
         g, n, k = layer.w13_weight_scale.shape
         layer.w13_weight_scale.data = layer.w13_weight_scale.data.reshape(g, n, k // 2, 2)
         g, n, k = layer.w2_weight_scale.shape
+        layer._mxfp4_swiglu_padding = 0
         if k % 2 != 0:
             # A TP shard can leave intermediate_size_per_partition // group_size odd
             # (e.g. moe_intermediate_size=2304, group_size=32, tp_size=8 -> 9 groups).
@@ -331,6 +332,12 @@ class AscendW4A8MXFPDynamicFusedMoEMethod(AscendMoEScheme):
                 layer.w2_weight_scale.data, (0, 1), mode="constant", value=0
             )
             k += 1
+            activation = getattr(layer, "activation", MoEActivation.SILU)
+            if self.group_size == 32 and activation in (MoEActivation.SILU, "silu"):
+                # SwiGLU needs 128-aligned gate/up columns, and GMM2 needs
+                # the same extra 32 reduction channels in its packed weight.
+                layer._mxfp4_swiglu_padding = self.group_size
+                layer.w2_weight.data = torch.nn.functional.pad(layer.w2_weight.data, (0, self.group_size // 2))
         layer.w2_weight_scale.data = layer.w2_weight_scale.data.reshape(g, n, k // 2, 2)
 
         if self.use_expert_weight_list:
@@ -397,6 +404,8 @@ class AscendW4A8MXFPDynamicFusedMoEMethod(AscendMoEScheme):
         layer.w13_weight_scale.data = layer.w13_weight_scale.data.transpose(-3, -2).reshape(
             orig_shapes["w13_weight_scale"]
         )
+        if layer._mxfp4_swiglu_padding:
+            layer.w2_weight.data = layer.w2_weight.data[..., : orig_shapes["w2_weight"][-1]].contiguous()
         orig_w2_scale_shape = orig_shapes["w2_weight_scale"]
         w2_scale = layer.w2_weight_scale.data.transpose(-3, -2).reshape(*orig_w2_scale_shape[:-1], -1)
         # process_weights_after_loading may have appended one zero scale group to
@@ -482,6 +491,13 @@ class AscendW4A8MXFPDynamicFusedMoEMethod(AscendMoEScheme):
                 dst_type=SITU_MX_DST_TYPE_E4M3FN,
             )
             return hidden_states, maybe_normalize_mxfp_scale_layout(swiglu_out_scale)
+
+        padding = getattr(layer, "_mxfp4_swiglu_padding", 0)
+        if padding:
+            # Pad the halves independently to preserve the gate/up pairing.
+            gate, up = hidden_states.chunk(2, dim=-1)
+            zeros = hidden_states.new_zeros((*hidden_states.shape[:-1], padding))
+            hidden_states = torch.cat((gate, zeros, up, zeros), dim=-1)
 
         # The `group_index` input for the `npu_swiglu_group_quant` operator
         # currently only supports the `count` type. In the current version, the
