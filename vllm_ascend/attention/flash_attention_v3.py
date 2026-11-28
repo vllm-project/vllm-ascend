@@ -55,6 +55,7 @@ class AscendFlashAttentionBackend(AttentionBackend):
     # FA3 writes K/V inside forward, before reading the paged cache.
     forward_includes_kv_cache_update = True
     supported_dtypes = [torch.float16, torch.bfloat16]
+    # FA3 reads FP16/BF16 KV caches on both target and draft models. C8 is unsupported.
     supported_kv_cache_dtypes = ["auto", "float16", "bfloat16"]
 
     @staticmethod

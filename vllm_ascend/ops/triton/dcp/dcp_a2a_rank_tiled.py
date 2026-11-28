@@ -92,6 +92,8 @@ def _fused_dcp_lse_combine_rank_tiled_static_kernel(
     HEAD_DIM: tl.constexpr,
     BLOCK_R: tl.constexpr,
     BLOCK_D: tl.constexpr,
+    local_output_mask_ptr=None,
+    HAS_LOCAL_OUTPUT_MASK: tl.constexpr = False,
 ):
     """Reduce ranks together while retaining the four-lane LSE wire format.
 
@@ -124,6 +126,8 @@ def _fused_dcp_lse_combine_rank_tiled_static_kernel(
         valid = rank_mask & (exponent_code != 0.0) & (lse == lse) & (lse != float("inf")) & (lse != -float("inf"))
         local_lse = tl.load(local_lse_ptr + token * local_lse_stride_t + head * local_lse_stride_h).to(tl.float32)
         local_valid = (local_lse == local_lse) & (local_lse != float("inf")) & (local_lse != -float("inf"))
+        if HAS_LOCAL_OUTPUT_MASK:
+            local_valid = local_valid & ~tl.load(local_output_mask_ptr + token).to(tl.int1)
         maximum = tl.maximum(
             tl.max(tl.where(valid, lse, -float("inf")), 0),
             tl.where(local_valid, local_lse, -float("inf")),

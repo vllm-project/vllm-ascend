@@ -27,16 +27,12 @@ def map_kernel(monkeypatch):
 
 
 def test_factory_registers_eplb_map_in_active_window(map_kernel):
-    config = SimpleNamespace(use_v2_model_runner=True)
-    registry = make_registry(config)
+    registry = make_registry()
     router = Mock()
     factory = Mock(return_value=SimpleNamespace(router=router))
-    ascend = SimpleNamespace(eplb_config=SimpleNamespace(dynamic_eplb=False, expert_map_path=None))
     with (
         patch.object(owner, "_original_FusedMoE", factory),
         patch.object(owner, "_adapt_eplb_router"),
-        patch.object(owner, "get_ascend_config", return_value=ascend),
-        patch.object(owner, "get_current_vllm_config", return_value=config),
         patch.object(owner, "vllm_version_is", return_value=True),
     ):
         owner._ascend_FusedMoE(128, 8, router=router, enable_eplb=True)

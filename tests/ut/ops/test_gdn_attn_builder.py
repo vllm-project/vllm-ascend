@@ -1,6 +1,6 @@
 # SPDX-License-Identifier: Apache-2.0
 
-from dataclasses import dataclass
+from dataclasses import dataclass, is_dataclass
 from types import SimpleNamespace
 from unittest.mock import Mock, patch, sentinel
 
@@ -49,6 +49,7 @@ from vllm_ascend.ops.triton.fla.utils import (
 from vllm_ascend.ops.triton.fla.utils import (
     prepare_update_chunk_offsets as runtime_prepare_update_chunk_offsets,
 )
+from vllm_ascend.ops.triton.mamba import cached_decode as cached_decode_module
 
 
 @pytest.mark.parametrize("builder_cls", [AscendGDNAttentionMetadataBuilder, AscendGDNHostMetadataBuilder])
@@ -105,6 +106,469 @@ def test_stable_argsort_preserves_integer_precision():
     values = torch.tensor([2**40 + 1, 2**40, 2**40 + 1], dtype=torch.int64)
     indices = ascend_gdn_attn_builder._stable_argsort_for_npu(values)
     assert indices.tolist() == [1, 0, 2]
+
+
+def _assert_reused_gdn_metadata_matches(actual, expected):
+    if isinstance(expected, torch.Tensor):
+        torch.testing.assert_close(actual, expected)
+    elif is_dataclass(expected):
+        for name, value in vars(expected).items():
+            _assert_reused_gdn_metadata_matches(getattr(actual, name), value)
+    else:
+        assert actual == expected
+
+
+@pytest.mark.parametrize("builder_cls", [AscendGDNAttentionMetadataBuilder, AscendGDNHostMetadataBuilder])
+@pytest.mark.parametrize("mamba_cache_mode", ["none", "align"])
+@pytest.mark.parametrize(
+    ("seq_lens", "query_lens", "draft_tokens", "full_graph"),
+    [
+        ([50, 35], [1, 1], None, False),
+        ([9, 70], [9, 6], None, False),
+        ([32, 12], [1, 12], None, False),
+        ([24, 48], [4, 4], [3, 3], False),
+        ([24, 48, 8], [4, 7, 1], [3, -1, -1], False),
+        ([24, 48], [1, 1], [0, 0], False),
+        ([24, 48, 0, 0], [4, 4, 0, 0], [3, 3, -1, -1], True),
+        ([24, 48, 0, 0], [1, 1, 0, 0], [0, 0, -1, -1], True),
+    ],
+)
+def test_rebind_gdn_group_matches_full_build(
+    builder_cls, mamba_cache_mode, seq_lens, query_lens, draft_tokens, full_graph
+):
+    device = torch.device("cpu")
+    common = create_common_attn_metadata(BatchSpec(seq_lens, query_lens), 16, device)
+    common.block_table_tensor = torch.arange(len(seq_lens) * 16, dtype=torch.int32).view(-1, 16)
+    other_table = common.block_table_tensor + 1000
+    other_common = common.replace(block_table_tensor=other_table)
+    builders = [
+        _make_builder(
+            device=device,
+            num_heads=32,
+            num_speculative_tokens=3 if draft_tokens is not None else 0,
+            builder_cls=builder_cls,
+            mamba_cache_mode=mamba_cache_mode,
+            num_speculative_blocks=3 if draft_tokens is not None else 0,
+            cudagraph_mode=CUDAGraphMode.FULL_DECODE_ONLY if full_graph else CUDAGraphMode.NONE,
+        )
+        for _ in range(3)
+    ]
+    kwargs = dict(
+        num_decode_draft_tokens_cpu=None if draft_tokens is None else torch.tensor(draft_tokens, dtype=torch.int32),
+        num_accepted_tokens=None if draft_tokens is None else torch.ones(len(seq_lens), dtype=torch.int32),
+        num_actual_reqs=2 if full_graph else len(seq_lens),
+    )
+    source = builders[0].build(0, common, **kwargs)
+    expected = builders[2].build(0, other_common, **kwargs)
+    source_states = {
+        name: getattr(source, name).clone()
+        for name in ("spec_state_indices_tensor", "non_spec_state_indices_tensor")
+        if getattr(source, name) is not None
+    }
+    with (
+        patch.object(builders[1], "build", side_effect=AssertionError("Must reuse request metadata")),
+        patch.object(builders[1], "_copy_sequence_indices_to_device", side_effect=AssertionError("Must reuse indices")),
+        patch.object(
+            ascend_gdn_attn_builder, "_build_actual_seq_lengths", side_effect=AssertionError("Must reuse lengths")
+        ),
+    ):
+        actual = builders[1].update_block_table(source, other_table, common.slot_mapping)
+    _assert_reused_gdn_metadata_matches(actual, expected)
+    assert actual is not source
+    for name, states in source_states.items():
+        torch.testing.assert_close(getattr(source, name), states)
+    for name in ("spec_token_indx", "non_spec_token_indx", "spec_query_start_loc", "num_accepted_tokens"):
+        value = getattr(actual, name)
+        assert value is getattr(source, name)
+    for name in ("spec_decode_metadata", "non_spec_decode_metadata"):
+        descriptor = getattr(actual, name)
+        if descriptor is not None:
+            lengths = descriptor.actual_seq_lengths
+            assert lengths is getattr(source, name).actual_seq_lengths
+
+
+@pytest.mark.parametrize("builder_cls", [AscendGDNAttentionMetadataBuilder, AscendGDNHostMetadataBuilder])
+@pytest.mark.parametrize("mamba_cache_mode", ["none", "align"])
+@pytest.mark.parametrize("adaptive", [False, True])
+def test_batched_update_preserves_spec_descriptor_policy(builder_cls, mamba_cache_mode, adaptive):
+    device = torch.device("cpu")
+    builder_kwargs = dict(
+        device=device,
+        num_heads=32,
+        num_speculative_tokens=3,
+        num_speculative_blocks=3,
+        builder_cls=builder_cls,
+        mamba_cache_mode=mamba_cache_mode,
+        cudagraph_mode=CUDAGraphMode.FULL_DECODE_ONLY,
+        enable_adaptive_verification=adaptive,
+    )
+    source_builder, reuser, reference = (_make_builder(**builder_kwargs) for _ in range(3))
+    common = create_common_attn_metadata(BatchSpec([24, 48], [4, 4]), 16, device)
+    common.block_table_tensor = torch.arange(32, dtype=torch.int32).view(2, 16) + 1
+    other_table = common.block_table_tensor + 1000
+    other_common = common.replace(block_table_tensor=other_table)
+    accepted = torch.ones(2, dtype=torch.int32)
+    drafts = torch.full((2,), 3, dtype=torch.int32)
+
+    source = source_builder.build(0, common, accepted, drafts)
+    expected = reference.build(0, other_common, accepted, drafts)
+    updates: list = []
+    actual = reuser.update_block_table(source, other_table, graph_state_updates=updates)
+    reuser.graph_state_updater.apply(updates)
+
+    _assert_reused_gdn_metadata_matches(actual, expected)
+    assert actual.spec_decode_metadata.use_upstream_conv == expected.spec_decode_metadata.use_upstream_conv
+    assert actual.spec_decode_metadata.use_upstream_recurrent == expected.spec_decode_metadata.use_upstream_recurrent
+    if expected.spec_decode_metadata.actual_seq_lengths is None:
+        assert actual.spec_decode_metadata.actual_seq_lengths is None
+
+
+def test_materialize_cached_spec_decode_preserves_descriptor_policy(monkeypatch):
+    builder = _make_builder(
+        device=torch.device("cpu"),
+        num_heads=32,
+        num_speculative_tokens=3,
+        num_speculative_blocks=3,
+        enable_adaptive_verification=True,
+        cudagraph_mode=CUDAGraphMode.FULL_DECODE_ONLY,
+    )
+    common = create_common_attn_metadata(BatchSpec([24, 48], [4, 4]), 16, torch.device("cpu"))
+    common.block_table_tensor = torch.arange(32, dtype=torch.int32).view(2, 16) + 1
+    accepted = torch.ones(2, dtype=torch.int32)
+    drafts = torch.full((2,), 3, dtype=torch.int32)
+    template = builder.build(0, common, accepted, drafts)
+    assert template.spec_decode_metadata.use_upstream_conv
+    assert template.spec_decode_metadata.use_upstream_recurrent
+    assert template.spec_decode_metadata.actual_seq_lengths is None
+
+    monkeypatch.setattr(cached_decode_module, "materialize_cached_gdn_decode", lambda *args, **kwargs: None)
+    builder._materialize_cached_spec_decode(template, graph_request_count=2)
+
+    spec = template.spec_decode_metadata
+    assert spec.use_upstream_conv and spec.use_upstream_recurrent
+    assert spec.actual_seq_lengths is None
+    assert spec.spec_causal_conv1d.query_start_loc.data_ptr() == builder.spec_query_start_loc.data_ptr()
+    assert spec.spec_causal_conv1d.cache_indices.data_ptr() == builder.spec_state_indices_tensor.data_ptr()
+
+
+@pytest.mark.parametrize("builder_cls", [AscendGDNAttentionMetadataBuilder, AscendGDNHostMetadataBuilder])
+@pytest.mark.parametrize("num_spec", [0, 3])
+@pytest.mark.parametrize("precomputed", [False, True])
+def test_empty_align_batch_skips_gather_on_build_and_update(builder_cls, num_spec, precomputed):
+    device = torch.device("cpu")
+    empty = torch.empty(0, dtype=torch.int32)
+    query = torch.zeros(1, dtype=torch.int32)
+    table = torch.empty((0, 16), dtype=torch.int32)
+    common = AscendCommonAttentionMetadata(
+        query_start_loc=query,
+        query_start_loc_cpu=query,
+        seq_lens=empty,
+        _seq_lens_cpu=empty,
+        seq_lens_cpu=empty,
+        seq_lens_cpu_upper_bound=empty,
+        _num_computed_tokens_cpu=empty,
+        num_computed_tokens_cpu=empty,
+        num_reqs=0,
+        num_actual_tokens=0,
+        max_query_len=0,
+        max_seq_len=0,
+        block_table_tensor=table,
+        slot_mapping=torch.empty(0, dtype=torch.int64),
+        is_prefilling=torch.empty(0, dtype=torch.bool),
+    )
+    owner, other = [
+        _make_builder(
+            device=device,
+            num_heads=32,
+            num_speculative_tokens=num_spec,
+            num_speculative_blocks=num_spec,
+            builder_cls=builder_cls,
+            mamba_cache_mode="align",
+        )
+        for _ in range(2)
+    ]
+    if precomputed:
+        for builder in (owner, other):
+            builder.mamba_aligned_state_indices = torch.empty((0, num_spec + 1), dtype=torch.int32)
+    kwargs = dict(
+        num_decode_draft_tokens_cpu=empty if num_spec else None,
+        num_accepted_tokens=empty if num_spec else None,
+        num_actual_reqs=0,
+    )
+    # The upstream helper accepts empty tensors; V2 should avoid launching its
+    # arithmetic/gather operations when the output is already known to be empty.
+    expected_table = ascend_gdn_attn_builder.mamba_get_block_table_tensor(table, empty, owner.kv_cache_spec, "align")
+    assert expected_table.shape == (0, num_spec + 1)
+    with patch.object(
+        ascend_gdn_attn_builder, "mamba_get_block_table_tensor", side_effect=AssertionError("Skip empty gather")
+    ):
+        source = owner.build(0, common, **kwargs)
+        updated = other.update_block_table(source, table, common.slot_mapping)
+    _assert_reused_gdn_metadata_matches(updated, source)
+    assert updated is not source
+    assert updated.non_spec_state_indices_tensor.shape == (0,)
+    assert updated.non_spec_query_start_loc is source.non_spec_query_start_loc
+    assert updated.non_spec_decode_metadata is None
+    assert updated.non_spec_prefill_metadata is None
+
+
+@pytest.mark.parametrize("mamba_cache_mode", ["none", "align"])
+def test_batched_spec_group_reuses_view_with_current_table(mamba_cache_mode):
+    draft_count = 3
+    owner, other, reference = [
+        _make_builder(
+            device=torch.device("cpu"),
+            num_heads=32,
+            num_speculative_tokens=3,
+            num_speculative_blocks=3,
+            mamba_cache_mode=mamba_cache_mode,
+            cudagraph_mode=CUDAGraphMode.FULL_DECODE_ONLY,
+        )
+        for _ in range(3)
+    ]
+    width = draft_count + 1
+    previous_view = None
+    for step, (count, graph_rows) in enumerate([(2, 4), (1, 4), (2, 3), (1, 3), (3, 4)]):
+        common = create_common_attn_metadata(
+            BatchSpec([32] * count + [0] * (graph_rows - count), [width] * count + [0] * (graph_rows - count)),
+            16,
+            torch.device("cpu"),
+        )
+        common.block_table_tensor = torch.arange(graph_rows * 16, dtype=torch.int32).view(graph_rows, 16)
+        drafts = torch.tensor([draft_count] * count + [-1] * (graph_rows - count), dtype=torch.int32)
+        accepted = torch.full((graph_rows,), step % width + 1, dtype=torch.int32)
+        source = owner.build(0, common, accepted, drafts, num_actual_reqs=count)
+        table = common.block_table_tensor + 1000 * (step + 1)
+        if mamba_cache_mode == "align":
+            # vLLM #58737 asserts block_table rows match seq_lens rows; the
+            # unpadded batch keeps padded rows, so pass only real request rows.
+            other.mamba_aligned_state_indices = ascend_gdn_attn_builder.mamba_get_block_table_tensor(
+                table[: source.gdn_seq_lens.shape[0]], source.gdn_seq_lens, other.kv_cache_spec, "align"
+            )
+        expected = reference.update_block_table(source, table)
+        other.spec_state_indices_tensor.fill_(-99)
+        updates: list = []
+        with torch.profiler.profile(activities=[torch.profiler.ProfilerActivity.CPU]) as profile:
+            actual = other.update_block_table(source, table, graph_state_updates=updates)
+        # Cached destinations and full source tables need no per-group slices.
+        if previous_view is not None and previous_view.size(0) == graph_rows:
+            assert actual.spec_state_indices_tensor is previous_view
+            assert not any(event.key == "aten::slice" for event in profile.key_averages())
+        previous_view = actual.spec_state_indices_tensor
+        assert updates[0][0] is (other.mamba_aligned_state_indices if mamba_cache_mode == "align" else table)
+        owner.graph_state_updater.apply(updates)
+        _assert_reused_gdn_metadata_matches(actual, expected)
+        assert actual.spec_decode_metadata.spec_causal_conv1d.cache_indices is actual.spec_state_indices_tensor
+        assert actual.spec_decode_metadata.actual_seq_lengths is source.spec_decode_metadata.actual_seq_lengths
+        assert actual.spec_decode_metadata is not source.spec_decode_metadata
+        assert torch.all(actual.spec_state_indices_tensor[count:] == owner._SPEC_GRAPH_PAD_SLOT_ID)
+
+
+@pytest.mark.parametrize("draft_count", [None, 0, 3])
+@pytest.mark.parametrize("mamba_cache_mode", ["none", "align"])
+def test_batched_gdn_graph_updates_match_individual_group_updates(draft_count, mamba_cache_mode):
+    builders = [
+        _make_builder(
+            device=torch.device("cpu"),
+            num_heads=32,
+            num_speculative_tokens=3,
+            num_speculative_blocks=3,
+            mamba_cache_mode=mamba_cache_mode,
+            cudagraph_mode=CUDAGraphMode.FULL_DECODE_ONLY,
+        )
+        for _ in range(25)
+    ]
+    owner, reference, *others = builders
+    addresses = [(b.spec_state_indices_tensor.data_ptr(), b.non_spec_state_indices_tensor.data_ptr()) for b in others]
+    width = 1 if draft_count is None else draft_count + 1
+    for step, count in enumerate([4, 2, 1, 0, 4]):
+        common = create_common_attn_metadata(
+            BatchSpec([32] * count + [0] * (4 - count), [width] * count + [0] * (4 - count)),
+            16,
+            torch.device("cpu"),
+        )
+        common.block_table_tensor = torch.arange(64, dtype=torch.int32).view(4, 16) + step * 10000
+        drafts = None if draft_count is None else torch.tensor([draft_count] * count + [-1] * (4 - count))
+        accepted = torch.full((4,), 2, dtype=torch.int32) if drafts is not None else None
+        source = owner.build(0, common, accepted, drafts, num_actual_reqs=count)
+        updates: list = []
+        actual: list = []
+        for i, other in enumerate(others):
+            other.spec_state_indices_tensor.fill_(-99)
+            other.non_spec_state_indices_tensor.fill_(-99)
+            actual.append(
+                other.update_block_table(source, common.block_table_tensor + (i + 1) * 100, graph_state_updates=updates)
+            )
+            assert torch.all(other.spec_state_indices_tensor == -99)
+            assert torch.all(other.non_spec_state_indices_tensor == -99)
+        assert len(updates) == 23
+        owner.graph_state_updater.apply(updates)
+        for i, (other, metadata) in enumerate(zip(others, actual)):
+            # Separate storage prevents the reference from overwriting and
+            # concealing an incorrect batched write.
+            expected = reference.update_block_table(source, common.block_table_tensor + (i + 1) * 100)
+            _assert_reused_gdn_metadata_matches(metadata, expected)
+            if count == 0 or draft_count is None:
+                assert torch.all(other.spec_state_indices_tensor[:4] == PAD_SLOT_ID)
+        assert addresses == [
+            (b.spec_state_indices_tensor.data_ptr(), b.non_spec_state_indices_tensor.data_ptr()) for b in others
+        ]
+
+
+@pytest.mark.parametrize("builder_cls", [AscendGDNAttentionMetadataBuilder, AscendGDNHostMetadataBuilder])
+@pytest.mark.parametrize("mamba_cache_mode", ["none", "align"])
+@pytest.mark.parametrize("spec", [False, True])
+def test_shared_gdn_graph_inputs_refresh_without_repeated_public_staging(builder_cls, mamba_cache_mode, spec):
+    device = torch.device("cpu")
+    builders = [
+        _make_builder(
+            device=device,
+            num_heads=32,
+            num_speculative_tokens=3,
+            num_speculative_blocks=3,
+            builder_cls=builder_cls,
+            mamba_cache_mode=mamba_cache_mode,
+            cudagraph_mode=CUDAGraphMode.FULL_DECODE_ONLY,
+        )
+        for _ in range(2)
+    ]
+    owner, other = builders
+    width = 4 if spec else 1
+    captured = None
+    for step, count in enumerate([4, 2, 1, 4, 0]):
+        common = create_common_attn_metadata(
+            BatchSpec([32] * count + [0] * (4 - count), [width] * count + [0] * (4 - count)), 16, device
+        )
+        common.block_table_tensor = torch.arange(64, dtype=torch.int32).view(4, 16) + step * 200
+        drafts = torch.tensor([3 if spec else -1] * count + [-1] * (4 - count), dtype=torch.int32)
+        source = owner.build(0, common, torch.full((4,), step + 1, dtype=torch.int32), drafts, num_actual_reqs=count)
+        with (
+            patch.object(
+                other, "_pad_spec_decode_metadata", side_effect=AssertionError("Common inputs already staged")
+            ),
+            patch.object(other, "_pad_decode_metadata", side_effect=AssertionError("Common inputs already staged")),
+            patch.object(
+                ascend_gdn_attn_builder, "_build_actual_seq_lengths", side_effect=AssertionError("Lengths shared")
+            ),
+        ):
+            metadata = other.update_block_table(source, common.block_table_tensor + 1000)
+        if count == 0:
+            assert torch.all(other.spec_state_indices_tensor[:4] == PAD_SLOT_ID)
+            assert torch.all(owner.spec_query_start_loc[:5] == 0)
+            assert torch.all(owner.num_accepted_tokens[:4] == 0)
+            assert torch.all(owner.spec_actual_seq_lengths[:5] == 0)
+            continue
+        kind = "spec_decode_metadata" if spec else "non_spec_decode_metadata"
+        descriptor = getattr(metadata, kind)
+        conv = descriptor.spec_causal_conv1d if spec else descriptor.causal_conv1d
+        expected_query = [i * width for i in range(count + 1)] + [count * width] * (4 - count)
+        assert conv.query_start_loc.tolist() == expected_query
+        assert descriptor.actual_seq_lengths is getattr(source, kind).actual_seq_lengths
+        assert descriptor.actual_seq_lengths.tolist() == [0] + [width] * count + [0] * (4 - count)
+        if spec:
+            assert metadata.num_accepted_tokens is source.num_accepted_tokens
+            assert metadata.num_accepted_tokens.tolist() == [step + 1] * count + [1] * (4 - count)
+        own_states = metadata.spec_state_indices_tensor if spec else metadata.non_spec_state_indices_tensor
+        source_states = source.spec_state_indices_tensor if spec else source.non_spec_state_indices_tensor
+        torch.testing.assert_close(own_states[:count], source_states[:count] + 1000)
+        assert torch.all(own_states[count:] == NULL_BLOCK_ID)
+        pointers = (
+            conv.query_start_loc.data_ptr(),
+            conv.cache_indices.data_ptr(),
+            descriptor.actual_seq_lengths.data_ptr(),
+        )
+        if captured is None:
+            captured = pointers
+        else:
+            assert pointers == captured
+
+
+def test_rebound_gdn_graph_keeps_addresses_and_clears_inactive_state():
+    device = torch.device("cpu")
+    builders = [
+        _make_builder(
+            device=device,
+            num_heads=32,
+            num_speculative_tokens=3,
+            num_speculative_blocks=3,
+            cudagraph_mode=CUDAGraphMode.FULL_DECODE_ONLY,
+        )
+        for _ in range(2)
+    ]
+    common = create_common_attn_metadata(BatchSpec([24, 48, 0, 0], [4, 4, 0, 0]), 16, device)
+    common.block_table_tensor = torch.arange(16, dtype=torch.int32).view(4, 4)
+    drafts = torch.tensor([3, 3, -1, -1], dtype=torch.int32)
+    accepted = torch.ones(4, dtype=torch.int32)
+    source = builders[0].build(0, common, accepted, drafts, num_actual_reqs=2)
+    captured = builders[1].update_block_table(source, common.block_table_tensor + 100)
+    state_ptr = captured.spec_state_indices_tensor.data_ptr()
+    query_ptr = captured.spec_query_start_loc.data_ptr()
+    accepted_ptr = captured.num_accepted_tokens.data_ptr()
+    lengths_ptr = captured.spec_decode_metadata.actual_seq_lengths.data_ptr()
+    assert query_ptr == source.spec_query_start_loc.data_ptr()
+    assert accepted_ptr == source.num_accepted_tokens.data_ptr()
+
+    replay = create_common_attn_metadata(BatchSpec([64, 0, 0, 0], [4, 0, 0, 0]), 16, device)
+    replay.block_table_tensor = common.block_table_tensor + 200
+    source = builders[0].build(0, replay, accepted, torch.tensor([3, -1, -1, -1]), num_actual_reqs=1)
+    rebound = builders[1].update_block_table(source, replay.block_table_tensor + 100, replay.slot_mapping)
+    assert rebound.spec_state_indices_tensor.data_ptr() == state_ptr
+    assert rebound.spec_query_start_loc.data_ptr() == query_ptr
+    assert rebound.num_accepted_tokens.data_ptr() == accepted_ptr
+    assert rebound.spec_decode_metadata.actual_seq_lengths.data_ptr() == lengths_ptr
+    torch.testing.assert_close(captured.spec_query_start_loc, torch.tensor([0, 4, 4, 4, 4], dtype=torch.int32))
+    torch.testing.assert_close(
+        captured.spec_decode_metadata.actual_seq_lengths, torch.tensor([0, 4, 0, 0, 0], dtype=torch.int32)
+    )
+    assert torch.all(rebound.spec_state_indices_tensor[1:] == NULL_BLOCK_ID)
+    torch.testing.assert_close(rebound.spec_state_indices_tensor[0], replay.block_table_tensor[0] + 100)
+
+    decode = create_common_attn_metadata(BatchSpec([64, 0, 0, 0], [1, 0, 0, 0]), 16, device)
+    decode.block_table_tensor = replay.block_table_tensor
+    source = builders[0].build(0, decode, accepted, torch.full((4,), -1, dtype=torch.int32), num_actual_reqs=1)
+    builders[1].update_block_table(source, decode.block_table_tensor + 100, decode.slot_mapping)
+    assert torch.all(builders[1].spec_state_indices_tensor[:4] == PAD_SLOT_ID)
+    assert torch.all(captured.spec_query_start_loc == 0)
+    assert torch.all(captured.spec_decode_metadata.actual_seq_lengths == 0)
+
+
+@pytest.mark.parametrize("builder_cls", [AscendGDNAttentionMetadataBuilder, AscendGDNHostMetadataBuilder])
+@pytest.mark.parametrize("pcp_size", [1, 2])
+def test_gdn_block_table_reuse_requires_non_pcp_builder(builder_cls, pcp_size):
+    config = _make_vllm_config(num_speculative_tokens=3)
+    config.parallel_config.prefill_context_parallel_size = pcp_size
+    spec = MambaSpec(block_size=16, shapes=((1,), (1,)), dtypes=(torch.float32,), num_speculative_blocks=3)
+    builder = builder_cls(spec, ["layer0"], config, torch.device("cpu"))
+    assert builder.supports_update_block_table is (pcp_size == 1)
+
+
+@pytest.mark.parametrize("builder_cls", [AscendGDNAttentionMetadataBuilder, AscendGDNHostMetadataBuilder])
+@pytest.mark.parametrize("full_graph", [False, True])
+def test_zero_draft_static_decode_uses_non_spec_route(builder_cls, full_graph):
+    config = _make_vllm_config(
+        num_speculative_tokens=3,
+        cudagraph_mode=CUDAGraphMode.FULL_DECODE_ONLY if full_graph else CUDAGraphMode.NONE,
+    )
+    spec = MambaSpec(block_size=16, shapes=((1,), (1,)), dtypes=(torch.float32,), num_speculative_blocks=3)
+    builder = builder_cls(spec, ["layer0"], config, torch.device("cpu"))
+    common = create_common_attn_metadata(BatchSpec([24, 48], [1, 1]), 16, torch.device("cpu"))
+    common.block_table_tensor = torch.arange(8, dtype=torch.int32).view(2, 4) + 100
+    metadata = builder.build(0, common, torch.tensor([3, 2], dtype=torch.int32), torch.zeros(2, dtype=torch.int32))
+    assert metadata.num_spec_decodes == 0
+    assert metadata.spec_decode_metadata is None
+    assert metadata.non_spec_decode_metadata is not None
+
+
+def test_mixed_prefill_sentinels_do_not_cancel_live_drafts():
+    config = _make_vllm_config(num_speculative_tokens=3)
+    spec = MambaSpec(block_size=16, shapes=((1,), (1,)), dtypes=(torch.float32,), num_speculative_blocks=3)
+    builder = AscendGDNAttentionMetadataBuilder(spec, ["layer0"], config, torch.device("cpu"))
+    common = create_common_attn_metadata(BatchSpec([24, 8], [2, 8]), 16, torch.device("cpu"))
+    common.block_table_tensor = torch.arange(8, dtype=torch.int32).view(2, 4)
+    metadata = builder.build(0, common, torch.tensor([2, 1]), torch.tensor([1, -1]))
+    assert metadata.num_spec_decodes == 1
+    assert metadata.num_prefills == 1
+    assert metadata.num_accepted_tokens.tolist() == [2]
 
 
 @pytest.fixture(autouse=True)
@@ -207,7 +671,7 @@ def _make_vllm_config(
             use_eagle_block_drop=lambda: False,
         )
 
-    model_config = SimpleNamespace(max_model_len=max_model_len, hf_text_config=SimpleNamespace())
+    model_config = SimpleNamespace(max_model_len=max_model_len, hf_text_config=SimpleNamespace(), dtype=torch.float32)
     model_config.get_num_attention_heads = lambda parallel_config: num_heads
 
     return SimpleNamespace(
@@ -218,7 +682,6 @@ def _make_vllm_config(
         ),
         speculative_config=speculative_config,
         num_hash_lookahead_tokens=0,
-        use_v2_model_runner=False,
         scheduler_config=SimpleNamespace(
             max_num_seqs=max_num_seqs,
             max_num_batched_tokens=max_num_batched_tokens,
@@ -239,7 +702,6 @@ def test_kpool_capture_uses_global_gdn_capacity(pcp_size, num_spec):
     config = _make_vllm_config(
         max_num_seqs=32, num_speculative_tokens=num_spec, cudagraph_mode=CUDAGraphMode.FULL_DECODE_ONLY
     )
-    config.use_v2_model_runner = True
     config.cache_config.use_kda_recoverssm = True
     config.model_config.hf_text_config.index_kpool = 4
     config.parallel_config.prefill_context_parallel_size = pcp_size
@@ -278,7 +740,6 @@ def test_kpool_capture_uses_global_gdn_capacity(pcp_size, num_spec):
 @pytest.mark.parametrize("capture_limit", [4, None])
 def test_generic_gdn_keeps_local_capture_capacity(capture_limit):
     config = _make_vllm_config(cudagraph_mode=CUDAGraphMode.FULL_DECODE_ONLY)
-    config.use_v2_model_runner = True
     config.parallel_config.prefill_context_parallel_size = 8
     config.compilation_config.max_cudagraph_capture_size = capture_limit
     spec = MambaSpec(block_size=16, shapes=((1,), (1,)), dtypes=(torch.float32,))
@@ -287,10 +748,9 @@ def test_generic_gdn_keeps_local_capture_capacity(capture_limit):
     assert builder.decode_cudagraph_max_bs == (16 if capture_limit is None else capture_limit)
 
 
-@pytest.mark.parametrize("excluded", ["mrv1", "pcp1", "dcp", "eager", "unbounded"])
+@pytest.mark.parametrize("excluded", ["pcp1", "dcp", "eager", "unbounded"])
 def test_glm_global_capture_capacity_respects_configuration(excluded):
     config = _make_vllm_config(cudagraph_mode=CUDAGraphMode.FULL_DECODE_ONLY)
-    config.use_v2_model_runner = excluded != "mrv1"
     config.cache_config.use_kda_recoverssm = True
     config.model_config.hf_text_config.index_kpool = 4
     config.parallel_config.prefill_context_parallel_size = 1 if excluded == "pcp1" else 8
@@ -312,7 +772,6 @@ def test_glm_pcp2_mtp5_capture_exceeds_local_limit(builder_cls):
     config = _make_vllm_config(
         max_num_seqs=128, num_speculative_tokens=5, cudagraph_mode=CUDAGraphMode.FULL_DECODE_ONLY
     )
-    config.use_v2_model_runner = True
     config.cache_config.use_kda_recoverssm = True
     config.parallel_config.prefill_context_parallel_size = 2
     config.compilation_config.max_cudagraph_capture_size = 256
@@ -337,7 +796,6 @@ def test_glm_pcp2_mtp5_capture_exceeds_local_limit(builder_cls):
 
 def test_kimi_recoverssm_does_not_inherit_glm_pcp_buffers():
     config = _make_vllm_config(cudagraph_mode=CUDAGraphMode.FULL_DECODE_ONLY)
-    config.use_v2_model_runner = True
     config.cache_config.use_kda_recoverssm = True
     config.parallel_config.prefill_context_parallel_size = 2
     config.compilation_config.max_cudagraph_capture_size = 4
@@ -378,6 +836,194 @@ def _make_builder(
         num_speculative_blocks=num_speculative_blocks,
     )
     return builder_cls(spec, ["layer0"], vllm_config, device)
+
+
+@pytest.mark.parametrize("builder_cls", [AscendGDNAttentionMetadataBuilder, AscendGDNHostMetadataBuilder])
+@pytest.mark.parametrize("mamba_cache_mode", ["none", "align"])
+@pytest.mark.parametrize("adaptive", [False, True])
+def test_decode_layout_reuse_refreshes_offsets_lengths_and_physical_states(builder_cls, mamba_cache_mode, adaptive):
+    draft_count = 3
+    kwargs = dict(
+        device=torch.device("cpu"),
+        num_heads=32,
+        num_speculative_tokens=3,
+        num_speculative_blocks=3,
+        builder_cls=builder_cls,
+        mamba_cache_mode=mamba_cache_mode,
+        cudagraph_mode=CUDAGraphMode.FULL_DECODE_ONLY,
+        enable_adaptive_verification=adaptive,
+    )
+    builder = _make_builder(**kwargs)
+    reference = _make_builder(**kwargs)
+    reference.supports_update_block_table = False
+    drafts = torch.full((2,), draft_count, dtype=torch.int32)
+    for step in range(3):
+        common = create_common_attn_metadata(
+            BatchSpec([64 + step * 16, 96 + step * 16], [draft_count + 1] * 2), 16, kwargs["device"]
+        )
+        common.is_prefilling.zero_()
+        # Request ordering and cache contents change even with a fixed layout.
+        common.block_table_tensor = torch.arange(32, dtype=torch.int32).view(2, 16).flip(0) + step * 100
+        accepted = torch.tensor([1 + step, 3 - step], dtype=torch.int32)
+        if step:
+            builder.spec_sequence_masks.fill_(False)
+            builder.spec_token_indx.fill_(-1)
+            builder.spec_query_start_loc.fill_(-1)
+            builder.spec_actual_seq_lengths.fill_(-1)
+            builder.num_accepted_tokens.fill_(-1)
+            builder.spec_state_indices_tensor.fill_(-1)
+        actual = builder.build(0, common, accepted, drafts)
+        expected = reference.build(0, common, accepted, drafts)
+        _assert_reused_gdn_metadata_matches(actual, expected)
+        if step == 0:
+            query_ptr = actual.spec_query_start_loc.data_ptr()
+            template = builder._decode_layout_metadata
+        else:
+            # A hit restores the stored layout sources instead of rebuilding them.
+            assert builder._decode_layout_metadata is template
+        assert actual.spec_query_start_loc.data_ptr() == query_ptr
+
+    # A different query layout must rebuild the static graph inputs.
+    changed = create_common_attn_metadata(BatchSpec([112, 144], [1, 4]), 16, kwargs["device"])
+    changed.block_table_tensor = common.block_table_tensor
+    changed.is_prefilling.zero_()
+    actual = builder.build(0, changed, accepted, drafts)
+    expected = reference.build(0, changed, accepted, drafts)
+    _assert_reused_gdn_metadata_matches(actual, expected)
+    assert builder._decode_layout_metadata is not None
+    assert builder._decode_layout_metadata is not template
+    template = builder._decode_layout_metadata
+
+    # Prefill overwrites graph inputs. Returning to decode cannot reuse them.
+    prefill = create_common_attn_metadata(BatchSpec([16, 16], [16, 16]), 16, kwargs["device"])
+    prefill.block_table_tensor = common.block_table_tensor
+    builder.build(0, prefill)
+    assert builder._decode_layout_metadata is None
+    actual = builder.build(0, common, accepted, drafts)
+    expected = reference.build(0, common, accepted, drafts)
+    _assert_reused_gdn_metadata_matches(actual, expected)
+    assert builder._decode_layout_metadata is not None
+    assert builder._decode_layout_metadata is not template
+
+
+def test_host_layout_cache_hit_keeps_conv_buffers_bound():
+    """A cache hit must keep the host builder's convolution contract.
+
+    ``AscendGDNHostMetadataBuilder._finalize_metadata`` binds the shared output
+    buffer and rewrites the convolution indices into the dedicated contiguous
+    buffer. The cache-hit path rebuilds those descriptors, so it must finalize
+    again; otherwise GLM5Next layers read the recurrent-state view and lose the
+    shared output buffer.
+    """
+    builder = _make_builder(
+        device=torch.device("cpu"),
+        num_heads=32,
+        num_speculative_tokens=3,
+        num_speculative_blocks=3,
+        builder_cls=AscendGDNHostMetadataBuilder,
+        mamba_cache_mode="none",
+        cudagraph_mode=CUDAGraphMode.FULL_DECODE_ONLY,
+    )
+    # Mirror the two buffers the opted-in GLM5Next layers allocate.
+    builder._spec_conv_indices = torch.empty(builder.spec_sequence_masks.numel(), dtype=torch.int32)
+    builder._non_spec_conv_indices = torch.empty_like(builder._spec_conv_indices)
+    builder._conv_output_buffer = torch.zeros((64, 12), dtype=torch.float32)
+
+    drafts = torch.full((2,), 3, dtype=torch.int32)
+    accepted = torch.ones(2, dtype=torch.int32)
+    for step in range(2):
+        common = create_common_attn_metadata(
+            BatchSpec([64 + step * 16, 96 + step * 16], [4, 4]), 16, torch.device("cpu")
+        )
+        common.is_prefilling.zero_()
+        # Same layout, different physical blocks: step 1 is a cache hit.
+        common.block_table_tensor = torch.arange(32, dtype=torch.int32).view(2, 16).flip(0) + step * 100
+        # Stale contents must be overwritten: poison both buffers first and
+        # check the values, not only the bindings.
+        builder._conv_output_buffer.fill_(7)
+        builder._spec_conv_indices.fill_(-1)
+        expected_blocks = common.block_table_tensor[:, 0].tolist()
+
+        metadata = builder.build(0, common, accepted, drafts)
+
+        assert metadata.spec_decode_metadata is not None
+        conv = metadata.spec_decode_metadata.spec_causal_conv1d
+        assert conv.output_buffer is builder._conv_output_buffer
+        assert conv.cache_indices.ndim == 1
+        assert conv.cache_indices.data_ptr() == builder._spec_conv_indices.data_ptr()
+        # Values, not just pointers: the dedicated index buffer holds the
+        # current physical blocks and the shared output buffer was cleared.
+        assert builder._spec_conv_indices[: len(expected_blocks)].tolist() == expected_blocks
+        assert conv.cache_indices[: len(expected_blocks)].tolist() == expected_blocks
+        assert torch.count_nonzero(builder._conv_output_buffer) == 0
+
+
+def test_host_update_block_table_refreshes_conv_bindings_after_queued_writes():
+    builder = _make_builder(
+        device=torch.device("cpu"),
+        num_heads=32,
+        num_speculative_tokens=3,
+        num_speculative_blocks=3,
+        builder_cls=AscendGDNHostMetadataBuilder,
+        mamba_cache_mode="none",
+        cudagraph_mode=CUDAGraphMode.FULL_DECODE_ONLY,
+    )
+    builder.compilation_config.static_forward_context = {
+        "layer0": SimpleNamespace(
+            use_contiguous_conv_indices=True, use_shared_conv_output=True, local_projection_size=8
+        )
+    }
+    common = create_common_attn_metadata(BatchSpec([24, 48], [4, 4]), 16, torch.device("cpu"))
+    common.block_table_tensor = torch.arange(32, dtype=torch.int32).view(2, 16) + 1
+    accepted = torch.ones(2, dtype=torch.int32)
+    drafts = torch.full((2,), 3, dtype=torch.int32)
+    source = builder.build(0, common, accepted, drafts)
+    assert builder._conv_output_buffer is not None
+    assert builder._spec_conv_indices is not None
+
+    new_table = common.block_table_tensor + 1000
+    builder._conv_output_buffer.fill_(7)
+    builder._spec_conv_indices.fill_(-1)
+    updates: list = []
+    updated = builder.update_block_table(source, new_table, graph_state_updates=updates)
+    # The refresh is queued; execute the batched writes and the finalizer.
+    builder.graph_state_updater.apply(updates)
+
+    conv = updated.spec_decode_metadata.spec_causal_conv1d
+    assert conv.output_buffer is builder._conv_output_buffer
+    assert conv.cache_indices.data_ptr() == builder._spec_conv_indices.data_ptr()
+    assert builder._spec_conv_indices[:2].tolist() == new_table[:2, 0].tolist()
+    assert torch.count_nonzero(builder._conv_output_buffer) == 0
+    assert updated.spec_decode_metadata.use_upstream_conv == source.spec_decode_metadata.use_upstream_conv
+    assert updated.spec_decode_metadata.use_upstream_recurrent == source.spec_decode_metadata.use_upstream_recurrent
+
+
+def test_decode_layout_reuse_respects_padding_changes():
+    builder = _make_builder(
+        device=torch.device("cpu"),
+        num_heads=32,
+        num_speculative_tokens=3,
+        num_speculative_blocks=3,
+        cudagraph_mode=CUDAGraphMode.FULL_DECODE_ONLY,
+    )
+    template = None
+    previous_count = None
+    for count in [2, 2, 1, 1, 2]:
+        common = create_common_attn_metadata(BatchSpec([64, 64], [4, 4]), 16, torch.device("cpu"))
+        common.is_prefilling.zero_()
+        common.seq_lens_cpu_upper_bound[count:] = 0
+        drafts = torch.tensor([3] * count + [-1] * (2 - count), dtype=torch.int32)
+        accepted = torch.tensor([count, count], dtype=torch.int32)
+        metadata = builder.build(0, common, accepted, drafts, num_actual_reqs=count)
+        assert metadata.num_accepted_tokens.tolist() == [count] * count + [1] * (2 - count)
+        assert metadata.spec_query_start_loc.tolist() == [min(i, count) * 4 for i in range(3)]
+        assert builder._decode_layout_metadata is not None
+        if count != previous_count:
+            assert builder._decode_layout_metadata is not template
+            template = builder._decode_layout_metadata
+        else:
+            assert builder._decode_layout_metadata is template
+        previous_count = count
 
 
 def _build_attn_metadata(
@@ -686,6 +1332,33 @@ def test_host_builder_materializes_device_chunks_for_checkpoint_enabled_prefill(
     builder.checkpoint_builder.build.assert_called_once_with(common, [0])
 
 
+def test_checkpoint_offsets_follow_each_groups_reserved_page(monkeypatch):
+    _patch_missing_runtime_cdiv(monkeypatch)
+    config = _make_vllm_config(mamba_cache_mode="align")
+    config.cache_config.hash_block_size = 16
+    config.cache_config.cache_hit_alignment_tokens = 128
+    config.compilation_config.static_forward_context = {
+        name: SimpleNamespace(_ascend_internal_checkpoint_enabled=True) for name in ("g0", "g1")
+    }
+    spec = MambaSpec(
+        block_size=128,
+        shapes=((1,), (1,)),
+        dtypes=(torch.float32,),
+        num_prefill_checkpoint_blocks=1,
+        prefill_checkpoint_alignment=16,
+    )
+    offsets = []
+    for name, page in (("g0", NULL_BLOCK_ID), ("g1", 42)):
+        builder = AscendGDNHostMetadataBuilder(spec, [name], config, torch.device("cpu"))
+        assert not builder.supports_update_block_table
+        common = create_common_attn_metadata(BatchSpec([160], [160]), 128, torch.device("cpu"))
+        common.block_table_tensor = torch.tensor([[page, 77]], dtype=torch.int32)
+        checkpoint = builder.build(0, common).checkpoint
+        assert checkpoint.state_indices.tolist() == [page]
+        offsets.extend(checkpoint.checkpoint_offsets.tolist())
+    assert offsets == [0, 128]
+
+
 def test_sequence_index_buffers_cover_spec_decode_when_cudagraph_disabled():
     builder = _make_builder(
         device=torch.device("cpu"),
@@ -980,7 +1653,6 @@ def test_adaptive_gdn_real_initialization_gate(monkeypatch, backend_cls, host_me
     monkeypatch.setattr(AscendGatedDeltaNetAttention, "_supports_host_metadata_prefill", lambda: host_metadata)
     builder_cls = backend_cls.get_builder_cls()
     config = _make_vllm_config(num_speculative_tokens=num_steps, enable_adaptive_verification=True)
-    config.use_v2_model_runner = True
     group = AttentionGroup(
         backend=backend_cls,
         layer_names=["layer0"],
@@ -1988,7 +2660,7 @@ def test_long_fixed_drafts_use_strided_recurrent_route(monkeypatch, builder_cls,
     monkeypatch.setattr(
         ascend_gdn_attn_builder, "get_current_hardware_profile", lambda: get_hardware_profile(device_type)
     )
-    expected_fused = device_type == AscendDeviceType.A2 and num_speculative_tokens >= 8
+    expected_fused = False
     builder = _make_builder(
         device=torch.device("cpu"),
         num_heads=32,

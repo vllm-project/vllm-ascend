@@ -26,6 +26,7 @@ import torch_npu
 
 from tests.ut.base import TestBase
 from vllm_ascend import ascend_forward_context, utils
+from vllm_ascend.ascend_config import FinegrainedTPConfig
 from vllm_ascend.device.hardware import AscendDeviceType
 from vllm_ascend.device.hardware_profile import get_hardware_profile
 from vllm_ascend.ops.fused_moe.moe_comm_method import MoECommType
@@ -249,6 +250,18 @@ class TestUtils(TestBase):
             additional_config={},
         )
         self.assertFalse(utils.enable_sp(no_sequence_parallel_config))
+
+    def test_pad_num_tokens_aligns_tp_shared_rows(self):
+        config = SimpleNamespace(parallel_config=SimpleNamespace(tensor_parallel_size=4))
+        with mock.patch("vllm_ascend.utils.enable_sp", return_value=True):
+            self.assertEqual(utils.pad_num_tokens(5, config), 8)
+            self.assertEqual(utils.pad_num_tokens(8, config), 8)
+        with mock.patch("vllm_ascend.utils.enable_sp", return_value=False):
+            self.assertEqual(utils.pad_num_tokens(5, config), 5)
+            self.assertEqual(utils.pad_num_tokens(5, config, True), 8)
+        config.parallel_config.tensor_parallel_size = 1
+        with mock.patch("vllm_ascend.utils.enable_sp", return_value=True):
+            self.assertEqual(utils.pad_num_tokens(5, config), 5)
 
     def test_pad_sequence_parallel_tokens_pads_unconditionally(self):
         with mock.patch("vllm.distributed.get_tensor_model_parallel_world_size", return_value=4):
@@ -962,9 +975,9 @@ def test_finegrained_tp_enable_requires_weight_sharding(knob, enable_fn, size, e
         assert getattr(utils, enable_fn)() is enabled
 
 
-@pytest.mark.parametrize("input_proj_tp_size", [1, 2, 4])
+@pytest.mark.parametrize("qkv_size,shared_size", [(1, 1), (2, 1), (4, 1), (1, 8)])
 @pytest.mark.parametrize("is_draft", [False, True])
-def test_qkv_iproj_tp_keeps_dp_coordination(monkeypatch, input_proj_tp_size, is_draft):
+def test_projection_tp_dp_coordination_for_moe_target_and_draft(monkeypatch, qkv_size, shared_size, is_draft):
     config = SimpleNamespace(
         kv_transfer_config=SimpleNamespace(is_kv_consumer=True),
         scheduler_config=SimpleNamespace(max_num_batched_tokens=128),
@@ -973,7 +986,9 @@ def test_qkv_iproj_tp_keeps_dp_coordination(monkeypatch, input_proj_tp_size, is_
     ascend = SimpleNamespace(
         get_mc2_comm_alg=lambda: "fullmesh",
         scheduler_config=SimpleNamespace(recompute_scheduler_enable=True),
-        finegrained_tp_config=SimpleNamespace(qkv_iproj_tensor_parallel_size=input_proj_tp_size),
+        finegrained_tp_config=FinegrainedTPConfig(
+            qkv_iproj_tensor_parallel_size=qkv_size, shared_expert_tensor_parallel_size=shared_size
+        ),
     )
     monkeypatch.setattr(utils, "get_ascend_config", lambda: ascend)
     monkeypatch.setattr(utils, "is_mega_moe_supported", lambda: False)
@@ -982,16 +997,46 @@ def test_qkv_iproj_tp_keeps_dp_coordination(monkeypatch, input_proj_tp_size, is_
     monkeypatch.setattr(utils, "get_potential_max_tokens", lambda: 128)
     monkeypatch.setattr(ascend_forward_context, "use_cann_megamoe", lambda _: False)
     monkeypatch.setattr(ascend_forward_context, "select_moe_comm_method", lambda *_: MoECommType.MC2)
-    assert utils.should_skip_allreduce_across_dp_group(config, is_draft_model=is_draft) is (input_proj_tp_size == 1)
+    expect_skip = qkv_size == 1 and (is_draft or shared_size == 1)
+    assert utils.should_skip_allreduce_across_dp_group(config, is_draft_model=is_draft) is expect_skip
 
 
-@pytest.mark.parametrize("v2", [False, True])
 @pytest.mark.parametrize("lmhead", [False, True])
 @pytest.mark.parametrize("dcp", [1, 2])
-def test_requires_lmhead_dp_sync_is_scoped_to_v2_reduced_padding(monkeypatch, v2, lmhead, dcp):
+def test_requires_lmhead_dp_sync_is_scoped_to_v2_reduced_padding(monkeypatch, lmhead, dcp):
     config = SimpleNamespace(
-        use_v2_model_runner=v2,
         parallel_config=SimpleNamespace(decode_context_parallel_size=dcp),
     )
     monkeypatch.setattr(utils, "lmhead_tp_enable", lambda: lmhead)
-    assert utils.requires_lmhead_dp_sync(config) is (v2 and lmhead and dcp == 1)
+    assert utils.requires_lmhead_dp_sync(config) is (lmhead and dcp == 1)
+
+
+def test_is_hif8_c8_kv_quant_tolerates_missing_cache_config():
+    # The check runs in partially constructed contexts (SimpleNamespace mocks,
+    # config-derivation passes before cache_config is attached): a missing
+    # cache_config means the hif8 KV cache dtype is not enabled, not a crash.
+    assert not utils.is_hif8_c8_kv_quant(SimpleNamespace())
+    assert not utils.is_hif8_c8_kv_quant(SimpleNamespace(cache_config=None))
+
+
+@pytest.mark.parametrize("cache_dtype", ["auto", "fp8", "mxfp8", "C8"])
+def test_is_hif8_c8_kv_quant_selects_only_the_hif8_dtype(cache_dtype):
+    config = SimpleNamespace(cache_config=SimpleNamespace(cache_dtype=cache_dtype))
+    assert not utils.is_hif8_c8_kv_quant(config)
+
+
+def test_is_hif8_c8_kv_quant_accepts_the_hif8_dtype():
+    config = SimpleNamespace(cache_config=SimpleNamespace(cache_dtype=utils.HIF8_C8_KV_CACHE_DTYPE))
+    assert utils.is_hif8_c8_kv_quant(config)
+
+
+@pytest.mark.parametrize("knob", ["qkv_iproj", "gproj", "oproj", "mlp", "shared_expert"])
+@pytest.mark.parametrize("draft", [False, True])
+def test_projection_dp_sync_does_not_change_dense_drafter(monkeypatch, knob, draft):
+    config = SimpleNamespace(finegrained_tp_config=FinegrainedTPConfig(**{f"{knob}_tensor_parallel_size": 8}))
+    config.get_mc2_comm_alg = lambda: "fullmesh"
+    monkeypatch.setattr(utils, "get_ascend_config", lambda: config)
+    monkeypatch.setattr(utils, "is_mega_moe_supported", lambda: False)
+    monkeypatch.setattr(utils, "is_moe_model", lambda _: True)
+    monkeypatch.setattr(utils, "is_drafter_moe_model", lambda _: False)
+    assert utils.should_skip_allreduce_across_dp_group(SimpleNamespace(), is_draft_model=draft) is draft

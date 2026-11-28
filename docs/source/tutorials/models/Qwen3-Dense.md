@@ -119,7 +119,7 @@ Start the docker image on each node.
 
     docker run --rm \
     -e ASCEND_VISIBLE_DEVICES=0-7 \
-    --name vllm-ascend \
+    --name vllm-ascend-env \
     --shm-size=10g \
     -v /root/.cache:/root/.cache \
     -p 8080:8080 \
@@ -132,8 +132,8 @@ Installation Verification:
 After starting the container, run the following command to verify the installation:
 
 ```bash
-# The A2/A3 tabs name the container vllm-ascend-env; the Atlas 300I Duo tab names it vllm-ascend.
-docker ps | grep vllm-ascend
+# The A2/A3 and Atlas 300I Duo tabs name the container vllm-ascend-env.
+docker ps | grep vllm-ascend-env
 ```
 
 Expected result: The container is listed with status Up. You can also verify the vllm-ascend version inside the container:
@@ -399,7 +399,7 @@ models = [
 ais_bench --models vllm_api_general_chat --datasets aime2025_gen_0_shot_chat_prompt --debug
 ```
 
-> The --models parameter value corresponds to the abbr field in the configuration file above. Adjust max_out_len, batch_size, and dataset tasks based on your scenario.
+> The `--models` parameter value corresponds to the config file name (for example, `vllm_api_general_chat` for `vllm_api_general_chat.py`). Adjust `max_out_len`, `batch_size`, and dataset tasks based on your scenario.
 
 ## 8 Performance Evaluation
 

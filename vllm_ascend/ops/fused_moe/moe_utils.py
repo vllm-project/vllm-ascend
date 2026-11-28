@@ -332,9 +332,14 @@ def get_moe_num_logical_experts(
     return int(num_experts - global_redundant_expert_num - num_shared_experts)
 
 
-def _custom_gmm_swiglu_enabled(fusion, dynamic_eplb, activation=None):
+def _custom_gmm_swiglu_enabled(fusion, use_expert_weight_list, activation=None):
     activation_name = getattr(activation, "value", activation)
-    return fusion and dynamic_eplb and activation_name not in ("situ", "swigluoai_uninterleave") and enable_custom_op()
+    return (
+        fusion
+        and use_expert_weight_list
+        and activation_name not in ("situ", "swigluoai_uninterleave")
+        and enable_custom_op()
+    )
 
 
 def cumsum_group_list(

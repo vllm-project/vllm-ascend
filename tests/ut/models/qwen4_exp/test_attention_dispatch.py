@@ -1,0 +1,250 @@
+# SPDX-License-Identifier: Apache-2.0
+"""QSA request planning and dispatch coverage without requiring a native NPU."""
+
+import ast
+from dataclasses import dataclass, replace
+from pathlib import Path
+from types import SimpleNamespace
+from typing import Any
+
+import pytest
+import torch
+
+MODEL_DIR = Path(__file__).resolve().parents[4] / "vllm_ascend/models/qwen4_exp"
+
+
+def _load_source(filename, namespace):
+    source = MODEL_DIR / filename
+    module = ast.parse(source.read_text())
+    module.body = [node for node in module.body if not isinstance(node, (ast.Import, ast.ImportFrom))]
+    exec(compile(module, str(source), "exec"), namespace)
+
+
+@pytest.fixture
+def implementation():
+    namespace = {"torch": torch, "dataclass": dataclass, "replace": replace, "__name__": __name__}
+    _load_source("attention_dispatch.py", namespace)
+    return namespace
+
+
+def run_stub_batch(implementation, phases, query_lengths, kv_lengths):
+    starts = [0]
+    for length in query_lengths:
+        starts.append(starts[-1] + length)
+    total = starts[-1]
+    q = torch.arange(total, dtype=torch.float32).reshape(total, 1, 1)
+    out = torch.zeros_like(q)
+    calls = []
+
+    def gbsa(q, k, v, idx, table, requests, positions, lengths, out):
+        calls.append(("gbsa", q.flatten().tolist()))
+        out.fill_(7)
+        return out
+
+    def union(q, k, v, idx, table, requests, positions, lengths, out, *, request_index, prepared):
+        assert torch.all(requests == request_index)
+        calls.append(("union", q.flatten().tolist()))
+        out.fill_(7)
+        return out
+
+    def union_batch(q, k, v, idx, table, requests, positions, lengths, out, *, query_starts, request_indices, prepared):
+        assert query_starts[0] == 0 and query_starts[-1] == q.shape[0]
+        for start, end, request in zip(query_starts, query_starts[1:], request_indices):
+            assert torch.all(requests[start:end] == request)
+        calls.append(("union_batch", q.flatten().tolist()))
+        out.fill_(7)
+        return out
+
+    implementation.update(
+        qsa_gbsa_attention=gbsa,
+        qsa_union_gbsa_attention=union,
+        qsa_union_gbsa_attention_batch=union_batch,
+    )
+    plan = implementation["build_qsa_request_plan"](torch.tensor(starts), total, torch.tensor(phases))
+    plan = implementation["prepare_qsa_union_batches"](
+        plan,
+        torch.arange(total, dtype=torch.int32),
+        torch.tensor(kv_lengths),
+        torch.zeros(len(phases), 256),
+    )
+    requests = torch.repeat_interleave(torch.arange(len(phases)), torch.tensor(query_lengths))
+    implementation["dispatch_qsa_attention"](
+        q,
+        q,
+        q,
+        torch.zeros(total, 7),
+        torch.zeros(len(phases), 256),
+        requests,
+        torch.arange(total),
+        torch.tensor(kv_lengths),
+        out,
+        plan,
+    )
+    torch.testing.assert_close(out, torch.full_like(out, 7))
+    return calls
+
+
+def test_prefill_uses_union_for_first_crossing_and_cached_chunks(implementation):
+    calls = run_stub_batch(implementation, [True, True, True], [2, 4, 1], [2, 24578, 24577])
+    assert calls == [("union_batch", list(range(7)))]
+
+
+def test_pure_decode_is_one_gbsa_call_including_mtp(implementation):
+    calls = run_stub_batch(implementation, [False, False, False], [1, 4, 8], [1, 8192, 32768])
+    assert calls == [("gbsa", list(range(13)))]
+
+
+def test_eight_prefill_requests_share_one_union_launch(implementation):
+    query_lengths = [1, 7, 8, 9, 15, 16, 17, 19]
+    calls = run_stub_batch(implementation, [True] * 8, query_lengths, [32768] * 8)
+    assert calls == [("union_batch", list(range(sum(query_lengths))))]
+
+
+def test_empty_requests_preserve_original_page_table_indices(implementation):
+    calls = run_stub_batch(implementation, [True, True, True], [5, 0, 7], [32768, 0, 65536])
+    assert calls == [("union_batch", list(range(12)))]
+
+
+def test_union_batches_do_not_include_decode_rows(implementation):
+    calls = run_stub_batch(
+        implementation,
+        [True, True, False, True, True, True],
+        [5, 7, 1, 9, 4, 8],
+        [32768, 65536, 131072, 32768, 4096, 65536],
+    )
+    assert calls == [
+        ("union_batch", list(range(12))),
+        ("union_batch", list(range(13, 34))),
+        ("gbsa", [12]),
+    ]
+
+
+def test_union_group_row_map_pads_each_request_independently(implementation):
+    actual = implementation["build_qsa_union_group_row_map"]((0, 5, 12, 20))
+    assert actual == (
+        (0, 1, 2, 3, 4, -1, -1, -1),
+        (5, 6, 7, 8, 9, 10, 11, -1),
+        (12, 13, 14, 15, 16, 17, 18, 19),
+    )
+
+
+def test_prepare_union_batches_reuses_views_and_gathers_request_gaps(implementation):
+    plan = implementation["build_qsa_request_plan"](
+        torch.tensor([0, 5, 5, 12]),
+        12,
+        torch.tensor([True, True, True]),
+    )
+    visible = torch.arange(12, dtype=torch.int32)
+    seq_lens = torch.tensor([32768, 0, 65536], dtype=torch.int32)
+    table = torch.arange(12, dtype=torch.int32).reshape(3, 4)
+    prepared_plan = implementation["prepare_qsa_union_batches"](plan, visible, seq_lens, table)
+    prepared = prepared_plan.prepared_union_batches[0]
+    assert prepared.visible_lengths.data_ptr() == visible.data_ptr()
+    assert prepared.cu_q.tolist() == [0, 5, 12]
+    assert prepared.seq_lens.tolist() == [32768, 65536]
+    assert prepared.block_table.tolist() == [table[0].tolist(), table[2].tolist()]
+    assert prepared.group_row_map.tolist() == [
+        [0, 1, 2, 3, 4, -1, -1, -1],
+        [5, 6, 7, 8, 9, 10, 11, -1],
+    ]
+    assert prepared.max_query_length == 7
+
+
+def test_mixed_batch_runs_prefill_first_then_contiguous_decode_spans(implementation):
+    calls = run_stub_batch(
+        implementation,
+        [False, True, True, False, False, True, False],
+        [1, 2, 1, 1, 4, 1, 1],
+        [4096, 24576, 24577, 16384, 12, 1, 8192],
+    )
+    assert calls == [
+        ("union_batch", [1, 2, 3]),
+        ("union", [9]),
+        ("gbsa", [0]),
+        ("gbsa", [4, 5, 6, 7, 8]),
+        ("gbsa", [10]),
+    ]
+
+
+def test_decode_sentinel_bypasses_request_planner(implementation):
+    calls = []
+
+    def gbsa(*args):
+        calls.append(args)
+        return args[-1]
+
+    implementation["qsa_gbsa_attention"] = gbsa
+    q = torch.zeros(4, 3, 8)
+    implementation["dispatch_qsa_attention"](
+        q, q, q, torch.zeros(4, 7), torch.zeros(1, 1), torch.zeros(4), torch.arange(4), torch.tensor([4]), q, None
+    )
+    assert len(calls) == 1 and calls[0][0] is q
+
+
+def test_padding_requests_are_ignored(implementation):
+    plan = implementation["build_qsa_request_plan"](torch.tensor([0, 1, 3, 8]), 3, torch.tensor([False, True, False]))
+    assert [(r.query_start, r.query_end, r.is_prefill) for r in plan] == [(0, 1, False), (1, 3, True)]
+
+
+def test_phase_metadata_required_to_cover_requests(implementation):
+    with pytest.raises(ValueError, match="every request"):
+        implementation["build_qsa_request_plan"](torch.tensor([0, 1, 2]), 2, torch.tensor([False]))
+
+
+def load_builder():
+    source = MODEL_DIR / "qsa.py"
+    builder = next(
+        n
+        for n in ast.parse(source.read_text(encoding="utf-8")).body
+        if isinstance(n, ast.ClassDef) and n.name == "AscendQSAMetadataBuilder"
+    )
+
+    class Base:
+        def build(self, *args, **kwargs):
+            return SimpleNamespace(block_table="kept")
+
+    plans = []
+
+    def plan(*args):
+        plans.append(args)
+        return ("prefill-plan",)
+
+    namespace: dict[str, Any] = dict(
+        Any=Any,
+        upstream_qsa=SimpleNamespace(Qwen4ExpQSAMetadataBuilder=Base),
+        AttentionCGSupport=SimpleNamespace(UNIFORM_BATCH="uniform"),
+        CommonAttentionMetadata=object,
+        build_qsa_request_plan=plan,
+    )
+    exec(compile(ast.Module(body=[builder], type_ignores=[]), str(source), "exec"), namespace)
+    return namespace["AscendQSAMetadataBuilder"](), plans
+
+
+def test_metadata_builder_keeps_decode_capture_on_gbsa():
+    builder, plans = load_builder()
+    assert builder._cudagraph_support == "uniform"
+    common = SimpleNamespace(is_prefilling=torch.tensor([False]))
+    assert builder.build(0, common).qsa_request_plan is None
+    # Capture dummy inputs can look like prefills; the decode capture contract
+    # must not freeze the prefill request plan into the graph.
+    common.is_prefilling = torch.tensor([True])
+    assert builder.build_for_cudagraph_capture(common).qsa_request_plan is None
+    assert plans == []
+
+
+def test_metadata_builder_uses_phase_flags_for_prefill():
+    builder, plans = load_builder()
+    common = SimpleNamespace(
+        is_prefilling=torch.tensor([True]),
+        query_start_loc_cpu=torch.tensor([0, 4096]),
+        num_actual_tokens=4096,
+    )
+    meta = builder.build(0, common)
+    assert meta.block_table == "kept" and meta.qsa_request_plan == ("prefill-plan",)
+    assert plans[0][-1] is common.is_prefilling
+
+
+def test_metadata_builder_rejects_unknown_phase_instead_of_guessing():
+    builder, _ = load_builder()
+    with pytest.raises(ValueError, match="is_prefilling"):
+        builder.build(0, SimpleNamespace(is_prefilling=None))

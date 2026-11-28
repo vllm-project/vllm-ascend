@@ -33,14 +33,14 @@
 #include "aclnn_torch_adapter/op_api_common.h"
 #include "moe/add_rms_norm_bias/add_rms_norm_bias_torch_adpt.h"
 #include "moe/rms_norm_cast/rms_norm_cast_torch_adpt.h"
+#include "attention/qsa_union_inputs/qsa_union_inputs_torch_adpt.h"
 #ifdef VLLM_ENABLE_ATB_AND_DIRECT_KERNELS
 #include "mla_preprocess/mla_preprocess_torch_adpt.h"
 #endif
 #include "mc2/dispatch_ffn_combine/dispatch_ffn_combine_torch_adpt.h"
 #include "gmm/grouped_matmul_swiglu_quant_weight_nz_tensor_list/grouped_matmul_swiglu_quant_torch_adpt.h"
 #include "gmm/grouped_matmul_swiglu_quant_v2/grouped_matmul_swiglu_quant_v2_torch_adpt.h"
-#include "attention/sparse_flash_attention/sparse_flash_attention_torch_adpt.h"
-#include "aclnn_torch_adapter/gbsa_torch_adpt.h"
+#include "attention/sparse_flash_attention_vllm/sparse_flash_attention_vllm_torch_adpt.h"
 #include "attention/sparse_flash_mla/sparse_flash_mla_torch_adpt.h"
 #include "attention/kv_compress_epilog_v2/kv_compress_epilog_v2_torch_adpt.h"
 #include "attention/quant_lightning_indexer_v2/quant_lightning_indexer_v2_torch_adpt.h"
@@ -81,6 +81,39 @@
 #include <vector>
 
 namespace vllm_ascend {
+
+constexpr int64_t GBSA_METADATA_SIZE = 1024;
+at::Tensor npu_generic_block_sparse_attention_metadata(
+    const at::Tensor &sparse_block_idx, const at::Tensor &sparse_block_count,
+    int64_t num_heads_q, int64_t num_heads_kv, int64_t head_dim,
+    at::IntArrayRef block_shape,
+    const c10::optional<at::Tensor> &cu_seqlens_q,
+    const c10::optional<at::Tensor> &cu_seqlens_kv,
+    const c10::optional<at::Tensor> &seqused_q,
+    const c10::optional<at::Tensor> &seqused_kv,
+    int64_t max_seqlen_q, int64_t max_seqlen_kv,
+    c10::string_view layout_q, c10::string_view layout_kv,
+    int64_t layout_sparse_pattern, int64_t mask_mode, int64_t quant_mode,
+    int64_t softmax_precision, int64_t win_left, int64_t win_right,
+    int64_t residual_block_mode, bool is_consistent_topk)
+{
+    auto output = at::empty(
+        {GBSA_METADATA_SIZE}, sparse_block_idx.options().dtype(at::kInt));
+    std::string layout_q_str(layout_q);
+    std::string layout_kv_str(layout_kv);
+    char *layout_q_ptr = const_cast<char *>(layout_q_str.c_str());
+    char *layout_kv_ptr = const_cast<char *>(layout_kv_str.c_str());
+
+    EXEC_NPU_CMD(aclnnGenericBlockSparseAttentionMetadata,
+                 sparse_block_idx, sparse_block_count, cu_seqlens_q,
+                 cu_seqlens_kv, seqused_q, seqused_kv, max_seqlen_q,
+                 max_seqlen_kv, num_heads_q, num_heads_kv, head_dim,
+                 block_shape, layout_q_ptr, layout_kv_ptr,
+                 layout_sparse_pattern, mask_mode, quant_mode,
+                 softmax_precision, win_left, win_right,
+                 residual_block_mode, is_consistent_topk, output);
+    return output;
+}
 
 c10::optional<at::Tensor> get_npu_view_from_cpu_tensor(const at::Tensor& cpu_tensor)
 {
@@ -1359,15 +1392,41 @@ std::tuple<at::Tensor, at::Tensor> npu_quant_lightning_indexer_v2_compat_npu(
     int64_t max_seqlen_q, c10::string_view layout_q, c10::string_view layout_k,
     int64_t mask_mode, int64_t cmp_ratio, int64_t return_value,
     bool enable_dcp, int64_t cp_world, int64_t cp_rank, int64_t cp_interleave,
-    const c10::optional<at::Tensor> &causal_seqlens_kv_global)
+    const c10::optional<at::Tensor> &causal_seqlens_kv_global, bool initialize_outputs)
 {
-    auto outputs = qli_v2::QuantLightningIndexerCandidate(
-        query, key, weights, query_dequant_scale, key_dequant_scale, topk, quant_mode,
-        c10::nullopt, cu_seqlens_q, cu_seqlens_k, seqused_q, seqused_k, cmp_residual_k,
-        block_table, output_idx_offset, metadata, max_seqlen_q, layout_q, layout_k,
-        mask_mode, cmp_ratio, 3, 2048, 8, enable_dcp, cp_world, cp_rank, cp_interleave,
-        causal_seqlens_kv_global, c10::nullopt, return_value);
-    return {std::get<0>(outputs), std::get<1>(outputs)};
+    TORCH_CHECK(query.numel() > 0, "Tensor query is empty.");
+    TORCH_CHECK(key.numel() > 0, "Tensor key is empty.");
+
+    std::string query_layout_str(layout_q);
+    std::string key_layout_str(layout_k);
+    auto [sparse_indices_out, sparse_values_out] = qli_v2::ConstructQuantLightningIndexerOutputTensor(
+        query, key, topk, query_layout_str, key_layout_str, return_value);
+
+    // When initialization is skipped, the consumer masks padding and rows with no local history.
+    if (enable_dcp && initialize_outputs) {
+        sparse_indices_out.fill_(-1);
+        sparse_values_out.fill_(-std::numeric_limits<float>::infinity());
+    }
+
+    constexpr int64_t candidate_mode = 3;
+    constexpr int64_t candidate_topk_blocks = 2048;
+    constexpr int64_t candidate_block_size = 8;
+    const c10::optional<at::Tensor> no_candidate_input = c10::nullopt;
+    at::Tensor candidate_topk_index_out = at::empty({0}, query.options().dtype(at::kInt));
+    at::Tensor candidate_block_length_out = at::empty({0}, query.options().dtype(at::kInt));
+    char *query_layout_ptr = query_layout_str.data();
+    char *key_layout_ptr = key_layout_str.data();
+    int64_t key_stride0 = key.stride(0);
+    int64_t key_scale_stride0 = key_dequant_scale.stride(0);
+
+    EXEC_NPU_CMD(aclnnVllmAscendQuantLightningIndexerV2, query, key, weights, query_dequant_scale, key_dequant_scale,
+        cu_seqlens_q, cu_seqlens_k, seqused_q, seqused_k, cmp_residual_k, block_table, output_idx_offset,
+        metadata, no_candidate_input, no_candidate_input, causal_seqlens_kv_global, topk, quant_mode,
+        max_seqlen_q, query_layout_ptr, key_layout_ptr, mask_mode, cmp_ratio, return_value, candidate_mode,
+        candidate_topk_blocks, candidate_block_size, key_stride0, key_scale_stride0, enable_dcp, cp_world, cp_rank,
+        cp_interleave, sparse_indices_out, sparse_values_out, candidate_topk_index_out, candidate_block_length_out);
+
+    return {sparse_indices_out, sparse_values_out};
 }
 
 std::tuple<at::Tensor, at::Tensor> construct_output_tensor(const at::Tensor &q, std::string layout,
@@ -3196,20 +3255,6 @@ TORCH_LIBRARY_EXPAND(CONCAT(_C, _ascend), ops)
              &vllm_ascend::npu_generic_block_sparse_attention_metadata);
 
     ops.def(
-        "npu_generic_block_sparse_attention(Tensor q, Tensor k, Tensor v, Tensor sparse_block_idx, "
-        "Tensor sparse_block_count, int[] block_shape, *, Tensor? metadata=None, Tensor? attn_mask=None, "
-        "Tensor? q_dequant_scale=None, Tensor? k_dequant_scale=None, Tensor? v_dequant_scale=None, "
-        "Tensor? p_quant_scale=None, Tensor? cu_seqlens_q=None, Tensor? cu_seqlens_kv=None, "
-        "Tensor? seqused_q=None, Tensor? seqused_kv=None, Tensor? block_table=None, str layout_q='TND', "
-        "str layout_kv='PA_BBND', int layout_sparse_pattern=4, float softmax_scale=0.0, int mask_mode=1, "
-        "int quant_mode=0, float dst_type_max=0.0, int softmax_precision=1, int win_left=-1, "
-        "int win_right=-1, bool return_softmax_lse=False, int residual_block_mode=0, "
-        "bool is_consistent_topk=False, ScalarType? attention_out_dtype=None) -> (Tensor, Tensor)"
-    );
-    ops.impl("npu_generic_block_sparse_attention", torch::kPrivateUse1,
-             &vllm_ascend::npu_generic_block_sparse_attention);
-
-    ops.def(
         "npu_quant_sparse_lightning_indexer_metadata(int num_heads_q, int num_heads_k, int head_dim, int topk, "
         "int quant_mode, *, Tensor candidate_block_length, Tensor? cu_seqlens_q=None, Tensor? cu_seqlens_k=None, "
         "Tensor? seqused_q=None, Tensor? seqused_k=None, Tensor? cmp_residual_k=None, int batch_size=0, "
@@ -3332,6 +3377,14 @@ TORCH_LIBRARY_EXPAND(CONCAT(_C, _ascend), ops)
     );
     ops.impl("npu_rms_norm_cast", torch::kPrivateUse1, &vllm_ascend::npu_rms_norm_cast);
 
+    ops.def(
+        "qsa_union_inputs(Tensor compact_indices, Tensor visible_lengths, "
+        "Tensor group_row_map) -> (Tensor union_idx, Tensor union_count, "
+        "Tensor exact_mask)"
+    );
+    ops.impl("qsa_union_inputs", torch::kPrivateUse1,
+             &vllm_ascend::npu_qsa_union_inputs);
+
     ops.def("npu_sign_bits_pack(Tensor input, int size) -> Tensor");
     ops.impl("npu_sign_bits_pack", torch::kPrivateUse1, &vllm_ascend::npu_sign_bits_pack);
 
@@ -3430,7 +3483,7 @@ TORCH_LIBRARY_EXPAND(CONCAT(_C, _ascend), ops)
             "str layout_q=\"TND\", str layout_k=\"PA_BBND\", "
             "int mask_mode=3, int cmp_ratio=4, int return_value=0, "
             "bool enable_dcp=False, int cp_world=1, int cp_rank=0, int cp_kv_cache_interleave_size=1, "
-            "Tensor? causal_seqlens_kv_global=None"
+            "Tensor? causal_seqlens_kv_global=None, bool initialize_outputs=True"
         ") -> (Tensor sparse_indices, Tensor sparse_values)"
         );
     ops.impl("npu_quant_lightning_indexer_v2", torch::kPrivateUse1,

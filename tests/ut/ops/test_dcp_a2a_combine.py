@@ -71,12 +71,12 @@ def test_rank_tiled_bounded_work_dispatch(monkeypatch, device_type, ranks, dim, 
     monkeypatch.setattr(dcp_a2a, "_A3_STATIC_SIGNATURES", frozenset())
     monkeypatch.setattr(dcp_a2a, "init_device_properties_triton", lambda: None)
     monkeypatch.setattr(dcp_a2a, "get_vectorcore_num", lambda: 48)
-    tiled, static, scalar, batched = Mock(), Mock(), Mock(), Mock()
+    tiled, static, scalar, head_scatter = Mock(), Mock(), Mock(), Mock()
     for name, launch in [
         ("rank_tiled", tiled),
         ("rank_tiled_static", static),
         ("", scalar),
-        ("batched", batched),
+        ("head_scatter", head_scatter),
     ]:
         suffix = "_" + name if name else ""
         kernel = Mock()
@@ -96,13 +96,13 @@ def test_rank_tiled_bounded_work_dispatch(monkeypatch, device_type, ranks, dim, 
         output = dcp_a2a.fused_dcp_lse_combine(recv, dim, 1, local_output=local, local_lse=lse)
     assert output.shape == local.shape
     # The parallel rank tile is A5-only (A3 lowers a runtime rank-row stride to
-    # scalar-rate transfers) and runs before the batched path.
+    # scalar-rate transfers) and runs before the row-weighted path.
     expected_tiled = eligible and device_type == AscendDeviceType.A5
-    expected_batched = not expected_tiled and dim <= 512 and tokens * heads >= 4 * 48 and stride == 1
+    expected_head_scatter = not expected_tiled and dim <= 512 and stride == 1
     assert tiled.call_count == int(expected_tiled)
     assert static.call_count == 0
-    assert batched.call_count == int(expected_batched)
-    assert tiled.call_count + static.call_count + scalar.call_count + batched.call_count == 1
+    assert head_scatter.call_count == int(expected_head_scatter)
+    assert tiled.call_count + static.call_count + scalar.call_count + head_scatter.call_count == 1
     if expected_tiled:
         assert tiled.call_args.kwargs["BLOCK_R"] * tiled.call_args.kwargs["BLOCK_D"] <= 8192
         assert tiled.call_args.kwargs["BLOCK_D"] <= 512
@@ -134,43 +134,58 @@ def test_a3_static_bucket_dispatch(monkeypatch, device_type, warmed, ranks, toke
     monkeypatch.setattr(dcp_a2a, "_UNWARMED_LOGGED", set())
     # The warmed key includes the local strides, which participate in the
     # Triton cache key.
-    full_key = (4, tokens, 512, ranks, 4 * 512, 512, 1, 4, 1)
+    full_key = (4, tokens, 512, ranks, 4 * 512, 512, 1, 4, 1, False)
     monkeypatch.setattr(dcp_a2a, "_A3_STATIC_SIGNATURES", frozenset({full_key}) if warmed else frozenset())
-    tiled, static, scalar, batched = Mock(), Mock(), Mock(), Mock()
+    tiled, static, scalar, head_scatter = Mock(), Mock(), Mock(), Mock()
     for name, launch in [
         ("rank_tiled", tiled),
         ("rank_tiled_static", static),
         ("", scalar),
-        ("batched", batched),
+        ("head_scatter", head_scatter),
     ]:
         suffix = "_" + name if name else ""
         kernel = Mock()
         kernel.__getitem__ = Mock(return_value=launch)
         monkeypatch.setattr(dcp_a2a, f"_fused_dcp_lse_combine{suffix}_kernel", kernel)
-    with FakeTensorMode():
+    with FakeTensorMode() as fake_mode:
         recv = torch.empty(ranks, 4, tokens, 516, dtype=torch.bfloat16, device="npu:0")
         local = torch.empty_strided((tokens, 4, 512), (4 * 512, 512, 1), dtype=torch.bfloat16, device="npu:0")
         lse = torch.empty(tokens, 4, 1, dtype=torch.float32, device="npu:0")
         dcp_a2a.fused_dcp_lse_combine(recv, 512, 1, local_output=local, local_lse=lse)
     # A3 uses the static twin only for a warmed signature; A5 keeps the
-    # dynamic kernel; A2 keeps the scalar path.
+    # dynamic kernel; A2 uses the row-weighted path.
     min_rows = max((2 * 48 + ranks - 1) // ranks, ranks)
     expected_static = warmed and device_type == AscendDeviceType.A3 and tokens * 4 >= min_rows
     expected_dynamic = device_type == AscendDeviceType.A5 and tokens * 4 >= min_rows and 8 <= ranks <= 16
     assert static.call_count == int(expected_static)
     assert tiled.call_count == int(expected_dynamic)
-    assert tiled.call_count + static.call_count + scalar.call_count + batched.call_count == 1
+    assert head_scatter.call_count == int(not expected_static and not expected_dynamic)
+    assert tiled.call_count + static.call_count + scalar.call_count + head_scatter.call_count == 1
     if expected_static:
         assert static.call_args.kwargs["NUM_TOKENS"] == tokens
         assert static.call_args.kwargs["NUM_HEADS"] == 4
         assert static.call_args.kwargs["BLOCK_D"] == 512
 
+        # Warming the unmasked launch alone must not enable a masked specialization.
+        with fake_mode:
+            mask = torch.empty(tokens, dtype=torch.bool, device="npu:0")
+            dcp_a2a.fused_dcp_lse_combine(recv, 512, 1, local_output=local, local_lse=lse, local_output_mask=mask)
+        assert static.call_count == 1
+        assert head_scatter.call_count == 1
+        assert head_scatter.call_args.kwargs["HAS_LOCAL_OUTPUT_MASK"] is True
+        masked_key = (*full_key[:-1], True)
+        monkeypatch.setattr(dcp_a2a, "_A3_STATIC_SIGNATURES", frozenset({full_key, masked_key}))
+        with fake_mode:
+            dcp_a2a.fused_dcp_lse_combine(recv, 512, 1, local_output=local, local_lse=lse, local_output_mask=mask)
+        assert static.call_count == 2
+        assert static.call_args.kwargs["local_output_mask_ptr"] is mask
+
 
 def test_a3_static_warmup_accumulates(monkeypatch):
     monkeypatch.setattr(dcp_a2a, "_A3_STATIC_SIGNATURES", frozenset())
     monkeypatch.setattr(dcp_a2a, "_A3_RECORDED", set())
-    first = (4, 16, 512, 16, 2048, 512, 1, 4, 1)
-    second = (4, 32, 512, 16, 2048, 512, 1, 4, 1)
+    first = (4, 16, 512, 16, 2048, 512, 1, 4, 1, False)
+    second = (4, 32, 512, 16, 2048, 512, 1, 4, 1, False)
     dcp_a2a.begin_a3_static_warmup({(4, 16, 512, 16)})
     dcp_a2a._A3_RECORDED.add(first)
     dcp_a2a.end_a3_static_warmup()
@@ -191,14 +206,14 @@ def test_return_lse_keeps_scalar_path(monkeypatch, device_type):
     monkeypatch.setattr(dcp_a2a, "get_vectorcore_num", lambda: 48)
     monkeypatch.setattr(dcp_a2a, "_A3_WARMING", False)
     monkeypatch.setattr(dcp_a2a, "_UNWARMED_LOGGED", set())
-    key = (4, 16, 512, 16, 2048, 512, 1, 4, 1)
+    key = (4, 16, 512, 16, 2048, 512, 1, 4, 1, False)
     monkeypatch.setattr(dcp_a2a, "_A3_STATIC_SIGNATURES", frozenset({key}))
-    tiled, static, scalar, batched = Mock(), Mock(), Mock(), Mock()
+    tiled, static, scalar, head_scatter = Mock(), Mock(), Mock(), Mock()
     for name, launch in [
         ("rank_tiled", tiled),
         ("rank_tiled_static", static),
         ("", scalar),
-        ("batched", batched),
+        ("head_scatter", head_scatter),
     ]:
         suffix = "_" + name if name else ""
         kernel = Mock()
@@ -217,4 +232,57 @@ def test_return_lse_keeps_scalar_path(monkeypatch, device_type):
     # Neither rank-tiled kernel writes the LSE lane, so return_lse keeps the
     # scalar kernel on every device.
     assert scalar.call_count == 1
-    assert tiled.call_count + static.call_count + batched.call_count == 0
+    assert tiled.call_count + static.call_count + head_scatter.call_count == 0
+
+
+@pytest.mark.parametrize(
+    "tokens,heads,dim,world,has_local,head_major",
+    [
+        (5, 1, 512, 8, True, False),
+        (41, 7, 128, 3, True, False),
+        (20, 8, 64, 4, False, False),
+        (41, 12, 512, 8, True, True),
+    ],
+)
+def test_combine_launch_supports_generic_rows(tokens, heads, dim, world, has_local, head_major):
+    recv = torch.empty(world, heads, tokens, dim + 4, dtype=torch.bfloat16, device="meta")
+    output = torch.empty(tokens, heads, dim, dtype=torch.bfloat16, device="meta")
+    local = (output.transpose(0, 1).contiguous().transpose(0, 1) if head_major else output) if has_local else None
+    local_lse = torch.empty(tokens, heads, 1, device="meta") if has_local else None
+    launch = Mock()
+    dcp_a2a._launch_fused_dcp_lse_combine(recv, output, dim, 1, False, local, local_lse, 40, launch)
+    launch.assert_called_once()
+    kernel, grid, *args = launch.call_args.args
+    assert kernel is dcp_a2a._fused_dcp_lse_combine_head_scatter_kernel
+    assert grid == (min(tokens * heads, 40),)
+    assert args[4:7] == list(local.stride() if has_local else (0, 0, 0))
+
+
+@pytest.mark.parametrize(
+    "dtype,scatter_dim,dim,return_lse,feature_stride",
+    [
+        (torch.float32, 1, 256, False, 1),
+        (torch.float16, 1, 256, False, 1),
+        (torch.bfloat16, 0, 256, False, 1),
+        (torch.bfloat16, 1, 513, False, 1),
+        (torch.bfloat16, 1, 256, False, 2),
+        (torch.float32, 1, 256, True, 1),
+    ],
+)
+def test_combine_launch_preserves_scalar_modes(dtype, scatter_dim, dim, return_lse, feature_stride):
+    tokens, heads = 41, 8
+    packed_dim = dim + (1 if dtype == torch.float32 else 4)
+    shape = (2, heads, tokens, packed_dim) if scatter_dim else (2, tokens, heads, packed_dim)
+    recv = torch.empty(shape, dtype=dtype, device="meta")
+    output = torch.empty(tokens, heads, dim + int(return_lse), dtype=dtype, device="meta")
+    local = torch.empty_strided(
+        (tokens, heads, dim),
+        (heads * dim * feature_stride, dim * feature_stride, feature_stride),
+        dtype=dtype,
+        device="meta",
+    )
+    local_lse = torch.empty(tokens, heads, 1, device="meta")
+    launch = Mock()
+    dcp_a2a._launch_fused_dcp_lse_combine(recv, output, dim, scatter_dim, return_lse, local, local_lse, 40, launch)
+    launch.assert_called_once()
+    assert launch.call_args.args[0] is dcp_a2a._fused_dcp_lse_combine_kernel

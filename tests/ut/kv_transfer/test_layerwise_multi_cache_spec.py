@@ -40,9 +40,13 @@ def test_deepseek_v4_native_groups_keep_every_cache_entry(components):
             )
     config = KVCacheConfig(num_blocks=1, kv_cache_tensors=tensors, kv_cache_groups=groups)
     vllm_config = SimpleNamespace(
-        model_config=SimpleNamespace(hf_text_config=SimpleNamespace(model_type="deepseek_v4")),
+        model_config=SimpleNamespace(
+            hf_text_config=SimpleNamespace(model_type="deepseek_v4"),
+            get_total_num_hidden_layers=lambda: 4,
+        ),
         kv_transfer_config=SimpleNamespace(
             kv_connector="AscendStoreConnector",
+            kv_role="kv_producer",
             kv_connector_extra_config={"use_layerwise": True, "layerwise_num_shared_buffers": 1},
         ),
     )

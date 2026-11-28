@@ -28,6 +28,14 @@
 
 # What's Patched and how it works:
 # --------------------------------
+# * platform/patch_dp_supervisor.py:
+#   Target: vllm.entrypoints.launchers.dp_supervisor._build_device_ids.
+#   Why: Multi-port external load balancing assigns too few devices to each
+#        local DP rank when prefill context parallelism is enabled.
+#   How: Size each child's device slice using TP * PP * PCP.
+#   Related PR: https://github.com/vllm-project/vllm/pull/69664
+#   Future plan: Remove once both the release and verified-main pins include the fix.
+# --------------------------------
 # * vllm_ascend/hisparse/host_pool.py (HiSparse backend initialization):
 #   Target: vllm.v1.hisparse.runtime.allocate_pinned_host_pool.
 #   Why: AIV mapping alone does not enable DMA to pageable Host storage.
@@ -305,6 +313,8 @@
 #       worker pickle IPC), read the PD role back in the coordinator, and
 #       skip the EAGLE drop in both lookup entry points on a pure producer.
 #       The EAGLE-group fallback marks FullAttention groups only.
+#       Checkpoint writes apply the role-gated drop to all Mamba managers,
+#       including unmarked target groups, matching the scheduler boundary.
 #    Related PR (if no, explain why):
 #       No upstream PR; producer-side drop exemption for hybrid PD.
 #    Future Plan:
@@ -398,101 +408,9 @@
 #          hybrid prefix cache lookup for DCP.
 #       2. Remove this patch once upstream accept 46892 pr or fixed the bug by other pr.
 #
-# ** 15. File: platform/patch_mla_prefill_backend.py**
-# ~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~
-#   REMOVED: upstream vLLM v0.32.0 exposes the official
-#   `Platform.get_mla_prefill_backend_cls` hook, implemented on `NPUPlatform`
-#   (vllm_ascend/platform.py) returning the no-op `AscendMLAPrefillBackend`
-#   from `vllm_ascend/attention/mla_prefill.py`.
-#
-# ** 16. File: platform/patch_multiproc_executor.py**
-# ~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~
-#   1. `vllm.v1.executor.multiproc_executor.MultiprocExecutor`
-#    Why:
-#       vLLM create child process with daemon=True, which doesn't work with EPLB case, since EPLB will create
-#       a new process which is not allowed by daemon=True.
-#    How：
-#       Set daemon=False in MultiprocExecutor.
-#    Related PR (if no, explain why):
-#       Find a way to support daemon=False in vLLM
-#    Future Plan:
-#       Remove this patch when vLLM fix the issue.
-#
 # ** 17. File: platform/patch_pp_mtp.py**
 # ~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~
-#   1. `vllm.v1.outputs.ModelRunnerOutput`
-#    Why:
-#       PP + MTP mixed deployment needs the model runner to return the draft
-#       tokens produced for the same scheduler output. Upstream output objects
-#       do not carry `spec_token_ids` on all supported vLLM revisions.
-#    How：
-#       Add a backward-compatible `spec_token_ids` field to `ModelRunnerOutput`
-#       and `EMPTY_MODEL_RUNNER_OUTPUT` when the field is missing.
-#    Related PR (if no, explain why):
-#       Backport of local vLLM PP+MTP branch changes.
-#    Future Plan:
-#       Remove this patch once the supported vLLM version carries PP-safe
-#       speculative token metadata in `ModelRunnerOutput`.
-#
-#   2. `vllm.v1.engine.core.EngineCore.post_step`
-#      (the patch function lives here; it is applied from
-#      `patch_engine_core._apply_patch`, together with the other
-#      engine-core-level patches)
-#    Why:
-#       With PP batch queue, synchronous scheduling can schedule the next batch
-#       before the previous model output is consumed. Calling `post_step` in that
-#       window updates `request.spec_token_ids` from live request state that may
-#       already belong to the newer schedule step.
-#    How：
-#       In PP + MTP + batch queue + sync scheduling, skip `post_step` after model
-#       execution and let scheduler output processing perform the spec token
-#       writeback from the corresponding `ModelRunnerOutput`.
-#    Related PR (if no, explain why):
-#       Backport of local vLLM PP+MTP branch changes.
-#    Future Plan:
-#       Remove this patch when upstream makes spec token writeback output-owned
-#       for PP batch queue.
-#
-#   3. `vllm.v1.core.sched.scheduler.Scheduler._update_after_schedule`
-#      `vllm.v1.core.sched.scheduler.Scheduler.update_from_output`
-#    Why:
-#       PP async scheduling must not schedule the same decode request again
-#       before the previous output has written sampled/spec tokens back. Without
-#       this request-level in-flight fence, the next step may use stale sampled
-#       tokens and produce incorrect target-model output. Intermediate prefill
-#       chunks do not depend on sampled/spec writeback and should remain
-#       schedulable to keep the PP pipeline filled.
-#    How：
-#       After scheduling, set a temporary decode fence for final prefill/decode
-#       chunks in PP IPC mode. Release the fence in `update_from_output` after
-#       the matching output is processed. For PP + MTP, also filter zero-token
-#       placeholder requests before delegating to upstream scheduler accounting,
-#       then write `request.spec_token_ids` from `model_runner_output.spec_token_ids`.
-#    Related PR (if no, explain why):
-#       Backport of local vLLM PP+MTP branch changes.
-#    Future Plan:
-#       Remove this patch once upstream supports request-level PP async fences
-#       and output-owned spec token writeback.
-#
-#   4. `vllm.v1.core.sched.scheduler.Scheduler._make_cached_request_data`
-#    Why:
-#       Upstream PP async scheduling relies on direct PP-rank GPU broadcast for
-#       sampled-token handoff and omits `new_token_ids` from cached request data.
-#       vLLM Ascend routes PP sampled-token handoff through scheduler IPC, so
-#       non-last PP ranks need the previous sampled token in both sync and async
-#       scheduling. This also avoids copying draft tokens as confirmed tokens in
-#       PP + MTP mixed deployment.
-#    How：
-#       Temporarily build cached request data with sync-PP semantics in PP IPC
-#       mode, then fill the last confirmed output token for requests whose
-#       clamped upstream slice is empty.
-#    Related PR (if no, explain why):
-#       Backport of local vLLM PP+MTP branch changes.
-#    Future Plan:
-#       Remove this patch once upstream provides a scheduler-owned PP sampled
-#       token handoff path that works for both sync and async scheduling.
-#
-#   5. `vllm.config.model.ModelConfig.verify_with_parallel_config`
+#   1. `vllm.config.model.ModelConfig.verify_with_parallel_config`
 #    Why:
 #       Local Eagle/MTP drafters are loaded on the last PP stage rather than
 #       partitioned across all PP ranks. Upstream `ModelConfig.verify_with_parallel_config`
@@ -512,36 +430,29 @@
 #       separate hook that can be overridden per-model-type.
 #
 # ** 18. File: platform/patch_speculative_config.py**
-# Native MiniMax Flash draft extension:
-#   Targets: SpeculativeConfig.__post_init__ and draft HF configuration loading.
-#   Why: native DSpark exports use a standalone architecture and carry their
-#        own dspark/config.json, while upstream normalizes unknown drafts to
-#        DSparkDraftModel.
-#   How: preserve DSparkMiniMaxDraftModel before Pydantic validation and
-#        normalize the checkpoint's dspark/config.json without changing the
-#        target or checkpoint. The adapter, its checkpoint contract and weight
-#        loading live in models/minimax_m3/minimax_m3_dspark.py; it inherits
-#        DSpark drafting and changes only Flash norms, MLP and loading.
-#   Related PR:
-#        https://github.com/vllm-project/vllm/pull/64111
-#   Future Plan: remove the architecture guard and config/weight normalization
-#        once upstream loads native MiniMax Flash drafts. Retain only required
-#        Ascend quantized projection handling behind the upstream extension points.
 # ~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~
 #   1. `vllm.config.speculative.SpeculativeConfig.hf_config_override`
 #    Why:
-#       Upstream v0.32.0 remaps most MTP draft model_types/architectures
-#       natively. The remaining Ascend deltas are legacy checkpoint
-#       normalization upstream does not cover: Kimi K2.5 DFlash YaRN amplitude,
-#       un-converted Qwen3 DSpark drafts, and the VL glm5_next_text wrapper.
+#       Upstream v0.34.0 remaps most MTP/DSpark draft model_types/architectures
+#       natively (including MiniMax DSpark subfolder discovery and architecture
+#       preservation in vllm#64111). The remaining Ascend deltas are legacy
+#       checkpoint normalizations upstream does not cover (Kimi K2.5 DFlash
+#       YaRN amplitude, un-converted Qwen3 DSpark drafts, and the VL
+#       glm5_next_text wrapper) plus MiniMax DSpark's Ascend config
+#       normalization and weight-header-derived quantization metadata.
 #    How：
-#       Call upstream `hf_config_override` first, then apply the legacy
-#       normalizations on top.
+#       Route MiniMax DSpark drafts through `draft_hf_override`; otherwise call
+#       upstream `hf_config_override` first and apply the legacy normalizations
+#       on top.
 #    Related PR (if no, explain why):
-#       No, Ascend-specific legacy checkpoint compatibility.
+#       https://github.com/vllm-project/vllm/pull/64111 handles native MiniMax
+#       DSpark recognition and default checkpoint selection. No upstream PR
+#       covers the remaining legacy compatibility or Ascend weight-header
+#       quantization metadata.
 #    Future Plan:
 #       Remove these normalizations once the checkpoints ship converted
-#       configs and upstream handles glm5_next_text MTP remapping.
+#       configs, upstream handles glm5_next_text MTP remapping, and Ascend can
+#       derive MiniMax metadata through a loader extension point.
 #
 #   2. `vllm.config.speculative.SpeculativeConfig.__post_init__`
 #    Why:
@@ -560,26 +471,6 @@
 #       Remove this normalization once upstream performs multimodal conversion
 #       before DSpark draft selection, or otherwise guarantees that rebuilding
 #       `model_arch_config` preserves the selected draft architecture.
-#
-#   3. `vllm.config.model.ModelConfig.verify_with_parallel_config`
-#    Why:
-#       The pinned vLLM revision propagates `enable_expert_parallel` to the
-#       draft parallel config (upstream #55914) but no longer disables it for
-#       dense drafts (upstream #56930 is not on this revision). Non-MoE draft
-#       models (e.g. Kimi K3 DSpark, VWN eagle3) then fail the
-#       `_verify_with_expert_parallelism` check in
-#       `ModelConfig.verify_with_parallel_config` and cannot start.
-#    How:
-#       Monkey-patch `verify_with_parallel_config` to skip the expert-parallel
-#       check when `runner_type == "draft"` and the model is not MoE. The target
-#       model EP check and MoE draft models are unaffected.
-#    Related PR (if no, explain why):
-#       https://github.com/vllm-project/vllm/pull/55914
-#       https://github.com/vllm-project/vllm/pull/56930
-#    Future Plan:
-#       Remove this patch once the pinned vLLM revision disables expert
-#       parallelism for non-MoE draft models (upstream #56930) or exposes a
-#       backend-safe draft parallel config selection.
 #
 # ** 19. File: platform/patch_structured_output.py**
 # ~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~
@@ -639,50 +530,21 @@
 #       Remove this patch once `torch.accelerator` correctly routes to the NPU
 #       backend for these memory APIs.
 #
-# ** 22. File: platform/patch_tool_choice_none_content.py**
+# ** 22. File: platform/patch_torch_utils.py**
 # ~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~
-#   1. `vllm.entrypoints.openai.chat_completion.protocol.ChatCompletionResponse`
-#      `vllm.entrypoints.openai.chat_completion.protocol.ChatCompletionStreamResponse`
+#   1. `vllm.utils.torch_utils.get_accelerator_view_from_cpu_tensor`
 #    Why:
-#       vLLM v0.23.0 can serialize empty `tool_calls: []` fields for content-only
-#       OpenAI chat responses / streaming deltas, while OpenAI-compatible SDKs
-#       expect those empty fields to be omitted so clients see `tool_calls=None`.
-#    How：
-#       Wrap `model_dump` / `model_dump_json` for chat response payloads and drop
-#       empty `tool_calls` lists from `message` / `delta` objects.
-#    Related PR (if no, explain why):
-#       https://github.com/vllm-project/vllm/pull/44105
-#    Future Plan:
-#       Remove this patch once the supported vLLM version contains PR #44105.
-#
-# ** 23. File: platform/patch_use_v2_model_runner.py**
-# ~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~
-#   1. `vllm.config.vllm.VllmConfig.use_v2_model_runner`
-#    Why:
-#       Ascend always uses the V2 runner; Model Runner V1 has been removed, so
-#       nothing selects a runner at runtime any more.
+#       The upstream UVA helper supports CUDA, ROCm, and XPU, but not NPU.
+#       Qwen4Exp Engram imports that common helper for its host-resident table.
 #    How:
-#       Call apply_v2_model_runner_config_patch() to install a
-#       use_v2_model_runner property that always selects V2. An explicit
-#       VLLM_USE_V2_MODEL_RUNNER=0 raises instead of being ignored.
-#       worker/patch_use_v2_model_runner.py reuses this platform
-#       patch so EngineCore and worker processes share the same behavior.
+#       Replace the common helper during the Ascend platform patch phase with
+#       an NPU implementation backed by `_C_ascend.get_npu_view_from_cpu_tensor`.
+#       Model code then uses the normal upstream import without a model-local
+#       rebinding.
 #    Related PR (if no, explain why):
-#       1. https://github.com/vllm-project/vllm-ascend/pull/11389
-#       2. https://github.com/vllm-project/vllm-ascend/pull/11692
+#       Pending upstream vLLM support; requested in review of vllm-ascend #20311.
 #    Future Plan:
-#       Remove this patch once upstream exposes a platform-specific default
-#       runner-selection hook.
-#
-#   2. `vllm.config.parallel.ParallelConfig._validate_parallel_config`
-#    Why:
-#       vLLM 0.28.0 rejected PCP+DP before Ascend MRV2 could validate it.
-#    How:
-#       Removed with the v0.31.0 boundary: the release-only validator override
-#       is no longer applied.
-#    Related PR: https://github.com/vllm-project/vllm/pull/54523
-#    Future Plan:
-#       Re-add only if a supported pin rejects PCP+DP.
+#       Remove this patch after the NPU branch is available upstream.
 #
 # * Worker Patch:
 # ========#
@@ -778,27 +640,6 @@
 #       Remove this patch once upstream exposes process-group reuse and teardown
 #       hooks.
 #
-# ** 4. File: worker/patch_v1/patch_eagle3_pp_aux.py**
-# ~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~
-#   1. Eagle3 target inner models (`DeepseekV2Model`, EagleModelMixin-based models)
-#      `forward`, `make_empty_intermediate_tensors`
-#    Why:
-#       In Eagle3 speculative decoding with Pipeline Parallelism (PP), auxiliary
-#       hidden states are collected from specific target model layers (e.g.,
-#       layers 2, N/2, N-3). When these layers span multiple PP stages, the last
-#       PP rank (where the drafter runs) only sees a subset of aux states, causing
-#       `combine_hidden_states` to fail with a k-axis shape mismatch.
-#    How：
-#       Wrap the inner model's `forward` and `make_empty_intermediate_tensors` to
-#       transparently pass aux hidden states through IntermediateTensors across PP
-#       stages. Each PP stage carries forward all aux states from previous stages,
-#       and the last PP rank merges them into a single list for the drafter.
-#    Related PR (if no, explain why):
-#       No, vllm-ascend-specific Eagle3 + PP aux-state propagation.
-#    Future Plan:
-#       Remove this patch once upstream Eagle3 supports collecting aux hidden
-#       states that span PP stages without cross-stage propagation.
-#
 # ** 6. File: worker/patch_fused_moe.py**
 # ~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~
 #   1. `vllm.model_executor.layers.fused_moe.FusedMoEFactory`
@@ -889,6 +730,10 @@
 #    Future Plan:
 #       Remove this patch when the upstream kernel can run on Ascend hardware.
 #
+#   3. MambaSpecDecodeGPUContext.compute_aligned_state_indices
+#      Route NPU inputs to the Ascend gather using the context's table pointers
+#      and output. Remove when the upstream method and kernel support NPU.
+#
 # ** 10. File: worker/patch_minimax_m2.py**
 # ~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~
 #   1. `vllm.model_executor.models.minimax_m2.MiniMaxM2Attention.forward`
@@ -903,10 +748,6 @@
 #    Future Plan:
 #       Remove this patch when upstream exposes a backend dispatch path for this
 #       fused attention preparation.
-#
-#
-# ** 11. File: worker/patch_mm_input_norm.py (removed) **
-# vLLM #62767 keeps the processor-derived normalization buffers nonpersistent.
 #
 # ** 12. File: worker/patch_ascend_ops.py**
 # ~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~
@@ -1053,16 +894,14 @@
 #    Future Plan:
 #       Remove when upstream forwards `embed_input_ids` from ModelWithContext.
 #
-#   5. `vllm_ascend.worker.v2.spec_decode.init_speculator`
-#      (+ the by-name rebind in `vllm_ascend.worker.v2.model_runner`)
+#   5. The plain MTP entry in the MRv2 speculator map
 #    Why:
-#       310P needs its own MTP speculator (`AscendMTPSpeculator310`).
-#    How：
-#       Replace `init_speculator` with a 310P router that returns
-#       `AscendMTPSpeculator310` for plain MTP and delegates to the original
-#       otherwise; rebind the model_runner by-name reference as well.
+#       Plain MTP on 310P needs host slot mappings and the 310P draft loop.
+#    How:
+#       Register AscendMTPSpeculator310 for the plain MTP config when the
+#       worker installs its 310P patches. The shared factory constructs it.
 #    Future Plan:
-#       Remove once the MTP speculator is selected through a device dispatch.
+#       Remove the override when the shared MTP implementation supports 310P.
 #
 # ** 18. File: worker/patch_bind_kv_cache.py**
 # ~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~
@@ -1209,6 +1048,8 @@
 #    How：
 #       override triton ops in vLLM with ascend implementation
 #       re-write apply_penalties kernel with minimum change to support large input shape.
+#       Bind compute_topk_scores in the sampler, prompt-logprob, and rejection
+#       sampler modules while preserving the upstream score interface.
 #    Test:
 #       UT added at vllm-ascend\tests\e2e\nightly\single_node\ops\singlecard_ops\triton\test_penality.py
 #    Related PR (if no, explain why):
@@ -1461,23 +1302,6 @@
 #    Future Plan:
 #       Remove the wrapper once the paired vLLM includes the upstream guard.
 #
-# ** 28. File: worker/patch_use_v2_model_runner.py**
-# ~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~
-#   1. `vllm.config.vllm.VllmConfig.use_v2_model_runner`
-#    Why:
-#       EngineCore subprocesses only load global/platform patches, while workers
-#       also import this compatibility module. The actual monkey-patch is defined
-#       in `platform/patch_use_v2_model_runner.py` (V2-only selection plus the
-#       Ascend unsupported-feature check).
-#    How：
-#       Reuse the platform patch so EngineCore and worker processes share the
-#       same `use_v2_model_runner` behavior.
-#    Related PR (if no, explain why):
-#       See platform/patch_use_v2_model_runner.py.
-#    Future Plan:
-#       Remove this module together with the platform patch once vllm-ascend
-#       fully supports the v2 model runner.
-#
 # ** 29. File: worker/patch_uva.py**
 # ~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~
 #   1. `vllm.v1.worker.gpu.buffer_utils.UvaBuffer`
@@ -1591,32 +1415,6 @@
 #    Future Plan:
 #       Remove once upstream dispatches sharded PCP decode with local counts.
 #
-# ** 33. File: platform/patch_vision.py**
-# ~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~
-#   1. `vllm.model_executor.models.vision.FusedInputNorm.forward`
-#    Why:
-#       Upstream vLLM uses PyTorch 2.13.0, which requires eps > 0 for training
-#       but allows eps >= 0 for inference. vllm-ascend bundles PyTorch 2.10.0,
-#       which does not distinguish scenarios and requires eps > 0 in all cases.
-#       So when upstream FusedInputNorm passes eps=0.0 to F.batch_norm it works
-#       fine upstream, but fails on vllm-ascend with "batch_norm eps must be
-#       positive".
-#    How：
-#       Monkey-patch FusedInputNorm.forward to use eps=1e-5 instead of 0.0.
-#       The patch is guarded with contextlib.suppress(ImportError) so it does
-#       not crash on release wheels (v0.26.0) where FusedInputNorm does not exist.
-#       Upstream PR #51734 (dc5101fb1b, Aug 10) rewrote FusedInputNorm.forward to
-#       use a broadcast multiply-add (x * weight + bias) instead of F.batch_norm,
-#       removing running_mean/running_var. That commit is included in the target
-#       16cfe728; on those versions FusedInputNorm.forward is used as-is
-#       (multiply-add).
-#    Related PR (if no, explain why):
-#       https://github.com/vllm-project/vllm/pull/50411
-#       https://github.com/vllm-project/vllm/pull/51734
-#    Future Plan:
-#       Remove this patch once vllm-ascend's bundled PyTorch >= 2.13.0
-#       (which, like upstream, allows eps >= 0 for inference).
-#
 # ** 34. File: worker/patch_worker_profiler.py **
 # ~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~
 #   1. `vllm.profiler.wrapper.validate_worker_profiler_config`
@@ -1633,6 +1431,14 @@
 #    Future Plan:
 #       Once #65565 is included in all supported vLLM versions, remove this
 #       patch and implement the NPUWorker profiler-validation hook instead.
+#
+# ** File: worker/patch_v2_static_kernel.py **
+# ~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~
+# Targets: CudaGraphManager.capture and BreakableCUDAGraphCapture._end_segment.
+# Why: upstream has no device callback for capture warmup or segment optimization.
+# How: wrap the existing warmup input factory and optimize completed graph segments.
+# Related PR: none; the device extension points are still a local design proposal.
+# Future Plan: remove when upstream exposes device warmup and segment-finalization hooks.
 #
 # ** 35. File: platform/patch_parallel_config.py**
 # ~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~

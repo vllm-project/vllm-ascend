@@ -247,12 +247,6 @@ def _flatten_recurrent_state_indices(
     return state_indices[seq_ids, slot_ids].contiguous()
 
 
-# The fla_npu AscendC recurrent GDN kernel silently returns without writing
-# output when a sequence exceeds this many tokens. Wider speculative windows
-# must use the uncapped FLA Triton recurrent kernel instead.
-_MAX_RECURRENT_GDN_TOKENS = 8
-
-
 def _split_head_first_conv_output(
     output: torch.Tensor, num_k_heads: int, num_v_heads: int
 ) -> tuple[torch.Tensor, torch.Tensor, torch.Tensor]:
@@ -826,9 +820,7 @@ class AscendGatedDeltaNetAttention(GatedDeltaNetAttention):
 
         # 2.1: Process the multi-query part
         if has_spec_decode:
-            use_upstream_recurrent = attn_metadata.spec_decode_metadata.use_upstream_recurrent or (
-                spec_state_indices_tensor.ndim == 2 and spec_state_indices_tensor.shape[1] > _MAX_RECURRENT_GDN_TOKENS
-            )
+            use_upstream_recurrent = attn_metadata.spec_decode_metadata.use_upstream_recurrent
             if use_recoverssm:
                 assert a_spec is not None
                 assert b_spec is not None
@@ -1112,4 +1104,4 @@ class AscendGatedDeltaNetAttention(GatedDeltaNetAttention):
             core_attn_out[:num_actual_tokens] = core_attn_out_spec.squeeze(0)
         else:
             core_attn_out[:num_actual_tokens] = core_attn_out_non_spec.squeeze(0)
-        maybe_save_kv_layer_to_connector("", [])
+        maybe_save_kv_layer_to_connector(self.prefix, [])

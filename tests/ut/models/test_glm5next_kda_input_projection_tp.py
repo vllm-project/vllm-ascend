@@ -79,8 +79,7 @@ class CollectiveReference:
 
 @pytest.mark.parametrize("size", [2, 4, 8])
 @pytest.mark.parametrize("output_size", [1, 2, 4, 8])
-@pytest.mark.parametrize("runner_v2", [False, True])
-def test_projection_tp_matches_dense_weights_with_ragged_and_idle_owners(monkeypatch, size, output_size, runner_v2):
+def test_projection_tp_matches_dense_weights_with_ragged_and_idle_owners(monkeypatch, size, output_size):
     """Different KDA and output groups must preserve each DP owner's recurrent state."""
     generator = torch.Generator().manual_seed(91)
     hidden_dim, heads, dim = 7, 8, 2
@@ -107,7 +106,6 @@ def test_projection_tp_matches_dense_weights_with_ragged_and_idle_owners(monkeyp
         output[0, :count].copy_(state[:count])
 
     monkeypatch.setattr(ascend_forward_context, "get_forward_context", lambda: thread.context)
-    monkeypatch.setattr(ascend_forward_context, "_USE_V2_EXTRA_KWARGS", runner_v2)
     monkeypatch.setattr(model_kda, "get_forward_context", lambda: thread.context)
     monkeypatch.setattr(linear_op, "oproj_tp_enable", lambda: output_size > 1)
     monkeypatch.setattr(linear_op, "get_otp_group", lambda: thread.output_group)
@@ -176,11 +174,7 @@ def test_projection_tp_matches_dense_weights_with_ragged_and_idle_owners(monkeyp
         for step, batches in enumerate(inputs):
             hidden = batches[rank]
             extras = {"max_tokens_across_dp": max(counts[step])}
-            thread.context = (
-                SimpleNamespace(attn_metadata={}, additional_kwargs=extras)
-                if runner_v2
-                else SimpleNamespace(attn_metadata={}, **extras)
-            )
+            thread.context = SimpleNamespace(attn_metadata={}, additional_kwargs=extras)
             thread.count, thread.state = hidden.shape[0], states[rank]
             output = torch.empty_like(hidden)
             assert model_kda.Glm5NextLinearAttention._forward(layer, hidden, output) is None

@@ -7,8 +7,14 @@ from collections.abc import Iterable, Iterator
 import torch
 from torch import nn
 from vllm.model_executor.model_loader.weight_utils import default_weight_loader
-from vllm.model_executor.models.interfaces import MultiModalEmbeddings, SupportsEagle3, SupportsMultiModal, SupportsPP
-from vllm.model_executor.models.utils import maybe_prefix
+from vllm.model_executor.models.interfaces import (
+    MultiModalEmbeddings,
+    SupportsEagle3,
+    SupportsEncoderCudaGraph,
+    SupportsMultiModal,
+    SupportsPP,
+)
+from vllm.model_executor.models.utils import is_pp_missing_parameter, maybe_prefix
 
 # Upstream #56741 normalized the V4.1 model package name from deepseek_v4_1
 # to deepseek_v41.
@@ -22,7 +28,9 @@ from vllm.models.deepseek_v41.common.mm_preprocess import (
     DeepseekV4VLMultiModalProcessor,
     DeepseekV4VLProcessingInfo,
 )
+from vllm.models.deepseek_v41.common.vl_cudagraph import DeepseekV4VLEncoderCudaGraphMixin
 from vllm.multimodal import MULTIMODAL_REGISTRY
+from vllm.v1.worker.encoder_cudagraph_defs import EncoderCudaGraphConfig
 
 from .engram.shared_pool import rollback_shared_engram
 from .engram_lifecycle import close_engram_on_init_failure
@@ -46,6 +54,8 @@ def _vision_parameter_name(name: str) -> str | None:
 )
 class AscendDeepseekV41ForCausalLM(
     nn.Module,
+    DeepseekV4VLEncoderCudaGraphMixin,
+    SupportsEncoderCudaGraph,
     SupportsMultiModal,
     SupportsPP,
     SupportsEagle3,
@@ -56,6 +66,16 @@ class AscendDeepseekV41ForCausalLM(
     requires_raw_input_tokens = True
     packed_modules_mapping = {"gate_up_proj": ["gate_proj", "up_proj"]}
     language_model_cls = AscendDeepseekV41LLMForCausalLM
+
+    def get_encoder_cudagraph_config(self) -> EncoderCudaGraphConfig:
+        # With the Ascend attention custom op enabled, forward_oot uses FIA
+        # even when the upstream backend marker is TORCH_SDPA. The upstream
+        # CUDA backend check would reject this FIA path.
+        return EncoderCudaGraphConfig(
+            modalities=["image"],
+            buffer_keys=["patches", "vit_cos", "vit_sin", "cu_seqlens", "max_seqlen", "merge_idx", "merge_mask"],
+            out_hidden_size=self.config.hidden_size,
+        )
 
     @property
     def filter_unused_checkpoint_weights(self) -> bool:
@@ -330,11 +350,9 @@ class AscendDeepseekV41ForCausalLM(
                 if vision_name is None:
                     yield name, loaded_weight
                     continue
-                # Text-only serving intentionally leaves the vision tower
-                # unconstructed, although a multimodal checkpoint still
-                # contains its tensors. Keep loading strict when the tower is
-                # enabled, but do not make disabled modalities loadable state.
-                if vision_name not in params and self.vision is None:
+                # Skip disabled vision components and towers owned by another
+                # PP stage, but keep loading strict for local enabled modules.
+                if vision_name not in params and (self.vision is None or is_pp_missing_parameter(vision_name, self)):
                     continue
                 param = params[vision_name]
                 loader = getattr(param, "weight_loader", default_weight_loader)

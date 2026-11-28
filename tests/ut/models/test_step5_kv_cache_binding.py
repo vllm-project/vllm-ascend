@@ -101,7 +101,7 @@ def _plan(num_blocks: int = 3):
             )
         ),
         groups,
-        10**9,
+        num_blocks=num_blocks,
     )
     return vllm_config, groups, config
 

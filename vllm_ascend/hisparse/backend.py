@@ -5,7 +5,8 @@
 from __future__ import annotations
 
 import importlib
-from functools import wraps
+from contextlib import contextmanager
+from contextvars import ContextVar
 from typing import TYPE_CHECKING, Any
 
 import torch
@@ -16,44 +17,20 @@ if TYPE_CHECKING:
     from vllm.v1.hisparse.runtime import HiSparseRuntime
     from vllm.v1.kv_cache_interface import KVCacheConfig
 
+    from vllm_ascend.hisparse.host_pool import MappedHostTensor
 
-def _install_worker_dma_hooks() -> None:
-    """Adapt Core until it exposes backend hooks for staging and invalidation."""
-    from vllm.distributed.kv_transfer.kv_connector.v1.hisparse.worker import HiSparseConnectorWorker
 
+def initialize_worker_dma(worker) -> None:
     from vllm_ascend.hisparse.recycled_invalidate import RecycledGroupInvalidator
 
-    original_init = HiSparseConnectorWorker._init_dma
-    if getattr(original_init, "_ascend_row_dma", False):
-        return
-
-    @wraps(original_init)
-    def init(worker):
-        original_init(worker)
-        if isinstance(worker.backend, AscendHiSparseBackend):
-            if worker.is_host_writer and worker.shared_host_region is None:
-                # Core allocates int64 staging; the bound Ascend slot producer uses int32.
-                # Cache binding is complete here and precedes graph capture.
-                staging = worker._slot_mapping_staging
-                slots = worker.cache_handles[0].slot_mapping
-                if staging is not None and not staging.num_tokens and slots.device.type == "npu":
-                    if slots.dtype == torch.int32:
-                        staging.slots = torch.empty(
-                            staging.slots.shape, dtype=slots.dtype, device="cpu", pin_memory=True
-                        )
-            worker._ascend_recycled_invalidator = RecycledGroupInvalidator.bind(worker)
-
-    init.__dict__["_ascend_row_dma"] = True
-    HiSparseConnectorWorker._init_dma = init
-    original_invalidate = HiSparseConnectorWorker.invalidate_blocks
-
-    @wraps(original_invalidate)
-    def invalidate(worker, block_ids, request_state_indices):
-        owner = getattr(worker, "_ascend_recycled_invalidator", None)
-        if owner is None or not owner.try_call(worker, block_ids, request_state_indices):
-            return original_invalidate(worker, block_ids, request_state_indices)
-
-    HiSparseConnectorWorker.invalidate_blocks = invalidate
+    if worker.is_host_writer:
+        # Core stages int64 slots; the Ascend slot producer uses int32.
+        staging = worker._slot_mapping_staging
+        slots = worker.cache_handles[0].slot_mapping
+        if staging is not None and not staging.num_tokens and slots.device.type == "npu":
+            if slots.dtype == torch.int32:
+                staging.slots = torch.empty(staging.slots.shape, dtype=slots.dtype, device="cpu", pin_memory=True)
+    worker._ascend_recycled_invalidator = RecycledGroupInvalidator.bind(worker)
 
 
 def _allocate_resolver_workspace(runtime: HiSparseRuntime):
@@ -107,7 +84,7 @@ def prepare_hisparse_workspaces(forward_context: dict[str, Any]) -> None:
 
 
 class AscendHiSparseBackend(HiSparseBackend):
-    # Keep private pools until NPU IPC events interoperate with Core's generic streams.
+    supports_shared_host_pool = True
     stats_dtype = torch.int64
     # Verified for row and page D2H on the installed A5 runtime. Use this
     # conservative bound so the driver never receives an oversized batch.
@@ -115,12 +92,30 @@ class AscendHiSparseBackend(HiSparseBackend):
 
     def __init__(self) -> None:
         self._failed_dma_batches: list[tuple[torch.Tensor, torch.Tensor, torch.Tensor]] = []
+        self._dma_restore: ContextVar[tuple[bool, MappedHostTensor | None]] = ContextVar(
+            "hisparse_dma_restore", default=(False, None)
+        )
+
+    @contextmanager
+    def host_to_device_dma(self, mapping: MappedHostTensor | None = None):
+        # Core's descriptor API shares one entry point for restore and writeback.
+        token = self._dma_restore.set((True, mapping))
+        try:
+            yield
+        finally:
+            self._dma_restore.reset(token)
 
     def check_available(self) -> None:
+        from vllm.config import get_current_vllm_config_or_none
+
+        from vllm_ascend import ascend_config
         from vllm_ascend.hisparse.cache_ops import _load_resolver
-        from vllm_ascend.hisparse.host_pool import install
+        from vllm_ascend.hisparse.host_pool import install, validate_hisparse_pd_order
         from vllm_ascend.utils import bootstrap_custom_op_env
 
+        config = get_current_vllm_config_or_none() or ascend_config._INIT_VLLM_CONFIG
+        if config is not None:
+            validate_hisparse_pd_order(config)
         install()
         if not hasattr(torch.ops._C_ascend, "swap_blocks_batch"):
             # A5 disables the global custom-op selection policy. HiSparse still
@@ -134,7 +129,6 @@ class AscendHiSparseBackend(HiSparseBackend):
             if not hasattr(torch.ops._C_ascend, "swap_blocks_batch"):
                 raise RuntimeError("Ascend HiSparse requires the Ascend swap_blocks_batch operator.")
         _load_resolver()
-        _install_worker_dma_hooks()
 
     def pin_tensor(self, tensor: torch.Tensor) -> None:
         from vllm_ascend.hisparse.host_pool import MappedHostTensor
@@ -208,9 +202,9 @@ class AscendHiSparseBackend(HiSparseBackend):
         kv_caches: dict[str, Any],
         forward_context: dict[str, Any],
     ) -> None:
-        from .binding import _bind_indexer_views, get_hisparse_indexer_specs
+        from .binding import prepare_hisparse_cache_views
 
-        _bind_indexer_views(kv_caches, get_hisparse_indexer_specs(kv_cache_config), forward_context)
+        prepare_hisparse_cache_views(kv_cache_config, kv_caches, forward_context)
 
     def is_current_stream_capturing(self) -> bool:
         return torch.npu.is_current_stream_capturing()
@@ -226,20 +220,41 @@ class AscendHiSparseBackend(HiSparseBackend):
         limit = self._D2H_BATCH_LIMIT
         count = src.size(0)
         if count > limit and any(t.ndim != 1 or t.size(0) != count or not t.is_contiguous() for t in (src, dst, sizes)):
-            raise ValueError("HiSparse D2H split requires equal-length contiguous descriptor arrays.")
-        submit = torch.ops._C_ascend.swap_blocks_batch
+            raise ValueError("HiSparse DMA split requires equal-length contiguous descriptor arrays.")
+        restoring, mapping = self._dma_restore.get()
+        direction = 0 if restoring else 1
         try:
+            if mapping is not None:
+                self._restore_mapped_pages(src, dst, sizes, mapping)
+                return
+            submit = torch.ops._C_ascend.swap_blocks_batch
             if count <= limit:
-                submit(src, dst, sizes, 1, prefer_small_async=True)
+                submit(src, dst, sizes, direction, prefer_small_async=True)
                 return
             for start in range(0, count, limit):
                 end = min(start + limit, count)
                 # Keep every chunk on Core's current DMA stream and on the batch API.
-                submit(src[start:end], dst[start:end], sizes[start:end], 1, prefer_small_async=False)
-            logger.info_once("[hisparse] Oversized D2H descriptor batch submitted in bounded chunks.", scope="process")
+                submit(src[start:end], dst[start:end], sizes[start:end], direction, prefer_small_async=False)
+            logger.info_once("[hisparse] Oversized DMA descriptor batch submitted in bounded chunks.", scope="process")
         except BaseException:
             # Core publishes its completion only after this method returns. Retain
             # the original storage in the process-cached backend on an uncertain
             # partial submit; Core shutdown drains the stream before freeing payloads.
             self._failed_dma_batches.append((src, dst, sizes))
             raise
+
+    def _restore_mapped_pages(
+        self, src: torch.Tensor, dst: torch.Tensor, sizes: torch.Tensor, mapping: MappedHostTensor
+    ) -> None:
+        from memfabric_hybrid import offload
+
+        # Followers import a device mapping. Their CPU tensors only describe the owner's offsets.
+        device = mapping.device
+        mapped_src = src.to(device=device, non_blocking=True) + (mapping.device_ptr - mapping.host_address)
+        device_dst = dst.to(device=device, non_blocking=True)
+        lengths = sizes.to(device=device, dtype=torch.int32, non_blocking=True)
+        num_descriptors = src.numel()
+        count = torch.full((1,), num_descriptors, dtype=torch.int32, device=device)
+        result = offload.sparse_copy(mapped_src, device_dst, lengths, count, device)
+        if result not in (None, 0):
+            raise RuntimeError(f"MemFabric HiSparse page restore failed: {result}")

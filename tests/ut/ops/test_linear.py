@@ -12,6 +12,7 @@ from tests.ut.base import TestBase
 from vllm_ascend import ascend_config
 from vllm_ascend.distributed import parallel_state
 from vllm_ascend.ops import linear
+from vllm_ascend.ops.head_parallel import HeadParallelMergedColumnLinear
 from vllm_ascend.ops.linear import (
     AscendDCPGroupColumnParallelLinear,
     AscendMergedColumnParallelLinear,
@@ -36,12 +37,14 @@ class BaseLinearTest(unittest.TestCase):
         self.mock_group.world_size = 2
         self.mock_group.rank_in_group = 0
 
+        self.original_groups = (parallel_state._MLP_TP, parallel_state._OTP)
         parallel_state._MLP_TP = self.mock_group
         parallel_state._OTP = self.mock_group
 
         self.mock_ascend_config = MagicMock()
         self.mock_ascend_config.finegrained_tp_config.oproj_tensor_parallel_size = 2
         self.mock_ascend_config.finegrained_tp_config.mlp_tensor_parallel_size = 2
+        self.mock_ascend_config.finegrained_tp_config.shared_expert_tensor_parallel_size = 1
 
         self.patches = [
             patch("vllm_ascend.ascend_config.get_ascend_config", return_value=self.mock_ascend_config),
@@ -63,6 +66,7 @@ class BaseLinearTest(unittest.TestCase):
         ascend_config._ASCEND_CONFIG = self._previous_ascend_config
         for p in self.patches:
             p.stop()
+        parallel_state._MLP_TP, parallel_state._OTP = self.original_groups
 
 
 class TestAscendUnquantizedLinearMethod(TestBase):
@@ -225,6 +229,37 @@ class TestShouldReshapeWoATo3d(unittest.TestCase):
 
 
 class TestAscendRowParallelLinear(BaseLinearTest):
+    @torch.inference_mode()
+    def test_try_forward_into(self):
+        with patch("vllm_ascend.ops.linear.get_parallel_op", return_value=(None, 0, 1)):
+            layer = AscendRowParallelLinear(input_size=4, output_size=8, bias=False, params_dtype=torch.bfloat16)
+
+        device = SimpleNamespace(type="npu")
+        x = MagicMock(spec=torch.Tensor, device=device, dtype=torch.bfloat16, ndim=2, shape=(2, 4))
+        out = MagicMock(spec=torch.Tensor, device=device, dtype=torch.bfloat16, ndim=2, shape=(2, 8))
+        weight = MagicMock(spec=torch.Tensor, device=device, dtype=torch.bfloat16, ndim=2, shape=(8, 4))
+        for tensor in (x, out, weight):
+            tensor.is_contiguous.return_value = True
+        with (
+            patch.object(layer, "_parameters", {"weight": weight, "bias": None}),
+            patch.object(linear, "is_internal_npu_format", return_value=False),
+            patch.object(torch, "is_autocast_enabled", return_value=False),
+            patch.object(torch, "matmul") as matmul,
+        ):
+            self.assertTrue(layer.try_forward_into(x, out))
+            matmul.assert_called_once_with(x, weight.t.return_value, out=out)
+            matmul.reset_mock()
+
+            with layer.register_forward_hook(MagicMock()):
+                self.assertFalse(layer.try_forward_into(x, out))
+            with patch.dict(layer._parameters, bias=torch.nn.Parameter(torch.zeros(8))):
+                self.assertFalse(layer.try_forward_into(x, out))
+            with patch.object(layer, "reduce_results", True), patch.object(layer, "tp_size", 2):
+                self.assertFalse(layer.try_forward_into(x, out))
+            out.shape = (2, 7)
+            self.assertFalse(layer.try_forward_into(x, out))
+            matmul.assert_not_called()
+
     @patch("vllm_ascend.ops.linear.get_current_vllm_config", return_value=MagicMock())
     @patch(
         "vllm_ascend.ops.linear.AscendUnquantizedLinearMethod.apply",
@@ -269,6 +304,36 @@ class TestAscendRowParallelLinear(BaseLinearTest):
 
 
 class TestAscendMergedColumnParallelLinear(BaseLinearTest):
+    def test_shared_tp_loads_paired_gate_up_and_matching_down_shard(self):
+        with (
+            patch("vllm_ascend.ops.linear_op.shared_expert_tp_enable", return_value=True),
+            patch("vllm_ascend.ops.linear_op.get_shared_expert_tp_group", return_value=self.mock_group),
+        ):
+            gate_up = AscendMergedColumnParallelLinear(
+                input_size=4,
+                output_sizes=[8, 8],
+                bias=False,
+                params_dtype=torch.float32,
+                prefix="model.layers.4.mlp.shared_experts.gate_up_proj",
+            )
+            down = AscendRowParallelLinear(
+                input_size=8,
+                output_size=4,
+                bias=False,
+                params_dtype=torch.float32,
+                input_is_parallel=True,
+                reduce_results=False,
+                prefix="model.layers.4.mlp.shared_experts.down_proj",
+            )
+        gate_weight = torch.arange(32, dtype=torch.float32).reshape(8, 4)
+        up_weight = gate_weight + 100
+        down_weight = torch.arange(32, dtype=torch.float32).reshape(4, 8)
+        gate_up.weight.weight_loader(gate_up.weight, gate_weight, 0)
+        gate_up.weight.weight_loader(gate_up.weight, up_weight, 1)
+        down.weight.weight_loader(down.weight, down_weight)
+        torch.testing.assert_close(gate_up.weight, torch.cat([gate_weight[:4], up_weight[:4]]))
+        torch.testing.assert_close(down.weight, down_weight[:, :4])
+
     def test_merged_checkpoint_reload_keeps_output_padding_zero(self):
         for padding_size in (0, 3):
             kwargs: dict[str, Any] = dict(
@@ -302,6 +367,7 @@ class TestAscendMergedColumnParallelLinear(BaseLinearTest):
 
     def test_custom_allocations_preserve_missing_shard_validation(self):
         layers: tuple[Any, ...] = (
+            HeadParallelMergedColumnLinear(8, [4, 4], tp_group=SimpleNamespace(world_size=1, rank_in_group=0)),
             AscendMergedColumnParallelLinear(input_size=8, output_sizes=[4, 4], bias=False, disable_tp=True),
             AscendQKVParallelLinear(hidden_size=8, head_size=2, total_num_heads=2, bias=False, disable_tp=True),
         )
@@ -447,6 +513,7 @@ class TestGetParallelOpShareExpert(unittest.TestCase):
         self.mock_group.rank_in_group = 1
         self.mock_group.world_size = 2
         self._patches = [
+            patch("vllm_ascend.ops.linear_op.shared_expert_tp_enable", return_value=False),
             patch("vllm_ascend.ops.linear_op.get_tp_group", return_value=self.mock_group),
         ]
         for p in self._patches:

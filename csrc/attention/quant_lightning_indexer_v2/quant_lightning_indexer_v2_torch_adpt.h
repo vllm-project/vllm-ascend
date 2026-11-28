@@ -60,7 +60,8 @@ std::tuple<at::Tensor, at::Tensor> QuantLightningIndexerLocalCandidates(
     at::Tensor indices = at::full({query.size(0), 1, topk}, -1, query.options().dtype(at::kInt));
     at::Tensor values = at::full({query.size(0), 1, topk}, -std::numeric_limits<float>::infinity(),
                                query.options().dtype(isInt8 ? at::kFloat : at::kBFloat16));
-    at::Tensor unused = at::empty({0}, query.options().dtype(at::kInt));
+    at::Tensor candidateTopkIndexOut = at::empty({0}, query.options().dtype(at::kInt));
+    at::Tensor candidateBlockLengthOut = at::empty({0}, query.options().dtype(at::kInt));
     if (query.device().is_meta()) return {indices, values};
     char layoutQ[] = "TND";
     char layoutK[] = "PA_BBND";
@@ -80,9 +81,10 @@ std::tuple<at::Tensor, at::Tensor> QuantLightningIndexerLocalCandidates(
     int64_t cpInterleave = 1;
     EXEC_NPU_CMD(aclnnVllmAscendQuantLightningIndexerV2, query, key, weights, queryDequantScale,
               keyDequantScale, cuSeqlensQ, none, none, sequsedK, none, blockTable, localVisibleLengths,
-              metadata, none, none, topk, quantMode, dynamicMaxSeqLen, layoutQ, layoutK, maskMode, cmpRatio,
+              metadata, none, none, none, topk, quantMode, dynamicMaxSeqLen, layoutQ, layoutK, maskMode, cmpRatio,
               QLI_LOCAL_CANDIDATES_MODE, candidateMode, candidateTopkBlocks, candidateBlockSize,
-              keyStride0, keyScaleStride0, enableDcp, cpWorld, cpRank, cpInterleave, indices, values, unused);
+              keyStride0, keyScaleStride0, enableDcp, cpWorld, cpRank, cpInterleave, indices, values,
+              candidateTopkIndexOut, candidateBlockLengthOut);
     return {indices, values};
 }
 
@@ -165,10 +167,9 @@ std::tuple<at::Tensor, at::Tensor> ConstructQuantLightningIndexerOutputTensor(
     at::Tensor sparseIndicesOut = at::empty(outputSize, query.options().dtype(at::kInt));
     at::Tensor sparseValuesOut;
     if (returnValue) {
-        // arch22 (910B/910_93) 直接输出 FP32 score; 950/arch35 保持 BF16。
         const char *socName = aclrtGetSocName();
         const bool fp32Score =
-            (socName == nullptr) || (std::string(socName).find("Ascend950") == std::string::npos);
+            returnValue == 2 && (socName == nullptr || std::string(socName).find("Ascend950") == std::string::npos);
         sparseValuesOut = at::empty(outputSize, query.options().dtype(fp32Score ? at::kFloat : at::kBFloat16));
     } else {
         sparseValuesOut = at::empty({0}, query.options().dtype(at::kBFloat16));

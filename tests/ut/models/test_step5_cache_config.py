@@ -272,10 +272,10 @@ def test_max_memory_usage_skips_host_resident_groups() -> None:
 
 
 def test_config_from_groups_aliases_one_envelope_backing() -> None:
-    vllm_config = _vllm_config(num_gpu_blocks_override=3)
+    vllm_config = _vllm_config(num_gpu_blocks_override=99)
     groups = _planned_groups()
     envelope = 2 * MAIN_PAGE + 2 * SUMMARY_PAGE
-    config = get_step5_kv_cache_config_from_groups(vllm_config, groups, 10**9)
+    config = get_step5_kv_cache_config_from_groups(vllm_config, groups, num_blocks=3)
 
     assert config.num_blocks == 3
     assert config.kv_cache_groups == groups
@@ -302,21 +302,13 @@ def test_config_from_groups_aliases_one_envelope_backing() -> None:
     assert by_layer[RING].block_stride == RING_PAGE
 
 
-def test_config_from_groups_derives_num_blocks_from_available_memory() -> None:
-    vllm_config = _vllm_config()
-    groups = _planned_groups()
-    envelope = 2 * MAIN_PAGE + 2 * SUMMARY_PAGE
-    config = get_step5_kv_cache_config_from_groups(vllm_config, groups, envelope * 7 + 123)
-    assert config.num_blocks == 7
-
-
 def test_config_from_groups_ring_only_layout_stacks_from_byte_zero() -> None:
     # A ring-only layout: the ring IS the envelope, and its stack starts at
     # byte 0 like every other group -- no per-class start shift remains now
     # that the ring shares the attention stride class.
     ring_group = KVCacheGroupSpec([RING], _ring_spec())
     vllm_config = _vllm_config()
-    config = get_step5_kv_cache_config_from_groups(vllm_config, [ring_group], RING_PAGE * 3)
+    config = get_step5_kv_cache_config_from_groups(vllm_config, [ring_group], num_blocks=3)
 
     assert config.num_blocks == 3
     (tensor,) = config.kv_cache_tensors
@@ -334,6 +326,8 @@ def test_builder_and_generic_planner_dispatch_step5_groups_to_step5_planner() ->
 
     builder = AscendKVCacheConfigBuilder.__new__(AscendKVCacheConfigBuilder)
     assert builder._get_pool_bytes_per_block(vllm_config, groups) == envelope
+    planned = builder.get_kv_cache_config_from_groups(vllm_config, groups, num_blocks=7)
+    assert planned.num_blocks == 7
     expected_usage = (64 + 65 + 1) * envelope
     assert planning._max_memory_usage_bytes_from_groups(builder, vllm_config, groups) == expected_usage
 

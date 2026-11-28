@@ -114,6 +114,38 @@ def _make_draft_logits(num_reqs, steps, vocab, device):
     return cache, cache.values
 
 
+@pytest.mark.parametrize("topk,probabilistic", [(32, False), (3, True)])
+def test_candidate_walk_nan_rows(topk, probabilistic):
+    device = torch.device("npu")
+    num_reqs, steps = 2, 3
+    vocab = num_reqs * steps * topk
+    candidates = torch.arange(vocab).reshape(num_reqs, steps, topk)
+    scores = torch.full((num_reqs, steps, topk, topk), -torch.inf)
+    scores[..., 0] = 0
+    scores[:, 0, 0] = torch.nan
+    # Greedy: the first NaN beats +inf, then its successor row has a finite tie.
+    scores[0, 1, 0, :3] = torch.tensor([torch.inf, torch.nan, torch.nan])
+    scores[0, 2, 1, 1:3] = 1
+
+    sampler = dflash2_speculator.CandidateSampler(num_reqs, steps, topk, device)
+    tokens = torch.empty(num_reqs * steps, dtype=torch.int64, device=device)
+    draft_logits = _make_draft_logits(num_reqs, steps, vocab, device)[0] if probabilistic else None
+    sampler.sample(
+        candidates.to(device),
+        scores.to(device),
+        num_reqs,
+        torch.arange(steps, device=device).repeat(num_reqs),
+        torch.arange(num_reqs, dtype=torch.int32, device=device).repeat_interleave(steps),
+        torch.tensor([0.0, 1.0], device=device),
+        torch.arange(num_reqs, dtype=torch.int64, device=device),
+        tokens,
+        draft_logits,
+        use_fp64=False,
+    )
+    selected = tokens.cpu().reshape(num_reqs, steps) - candidates[..., 0]
+    assert selected.tolist() == [[0, 1, 1], [0, 0, 0]]
+
+
 @pytest.mark.parametrize("probabilistic", [False, True])
 def test_candidate_walk_preserves_conditional_scores_and_clears_old_cache(probabilistic):
     """Zero-temperature walks must preserve q along the chosen path for rejection."""

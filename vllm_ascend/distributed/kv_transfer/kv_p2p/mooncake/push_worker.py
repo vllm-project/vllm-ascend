@@ -11,6 +11,7 @@ from dataclasses import dataclass, field
 from typing import Any
 
 import msgspec
+import numpy as np
 import torch
 from vllm import envs
 from vllm.distributed.kv_transfer.kv_connector.v1.base import KVConnectorTransferResults
@@ -39,6 +40,7 @@ from vllm_ascend.distributed.kv_transfer.kv_p2p.mooncake.utils import (
     SizedDict,
     ensure_zmq_recv,
     ensure_zmq_send,
+    worker_rank_to_dcp_rank,
     zmq_ctx,
 )
 from vllm_ascend.distributed.kv_transfer.kv_pool.ascend_store.layerwise.layerwise_cache_layout import (
@@ -580,10 +582,9 @@ class MooncakePushConnectorWorker(MooncakeBaseConnectorWorker):
                 layer_name, remote, tuple(params["consumer_rank"])
             )
             local_dcp_rank = self.dcp_rank if local_dcp_size > 1 else 0
-            # Pull uses the same TP-major/PCP-minor ordering: DCP=PCP
-            # shards within each TP rank; DCP=TP*PCP spans all workers.
-            remote_rank = params["consumer_rank"][2] * remote.pcp_size + params["consumer_rank"][1]
-            remote_dcp_rank = remote_rank % remote_dcp_size
+            _, remote_pcp_rank, remote_tp_rank = params["consumer_rank"]
+            remote_worker_rank = remote_tp_rank * remote.pcp_size + remote_pcp_rank
+            remote_dcp_rank = worker_rank_to_dcp_rank(remote_worker_rank, remote.pcp_size, remote_dcp_size)
             local_interleave = self.transfer_metadata.cp_kv_cache_interleave_size
             remote_interleave = pp.cp_kv_cache_interleave_size
             for side, size, interleave, page_size in (
@@ -668,6 +669,16 @@ class MooncakePushConnectorWorker(MooncakeBaseConnectorWorker):
                 local_offset, remote_offset, heads = partition
                 whole = isinstance(spec, (MLAAttentionSpec, SlidingWindowMLASpec)) or is_circular_kv_cache_spec(spec)
                 local = self.transfer_metadata
+                for req in batch.requests:
+                    if len(req.local_block_ids) != len(req.remote_block_ids):
+                        raise ValueError("P/D block counts differ")
+                # Reuse the request-ordered block arrays across cache components.
+                local_blocks = np.fromiter(
+                    (block for req in batch.requests for block in req.local_block_ids), dtype=np.uint64
+                )
+                remote_blocks = np.fromiter(
+                    (block for req in batch.requests for block in req.remote_block_ids), dtype=np.uint64
+                )
                 for cache_index, (local_addr, remote_addr) in enumerate(
                     zip(local.kv_caches_base_addr[local_index], worker.kv_caches_base_addr[remote_index], strict=True)
                 ):
@@ -678,19 +689,19 @@ class MooncakePushConnectorWorker(MooncakeBaseConnectorWorker):
                         remote_len //= pp.block_shapes[remote_index][cache_index][0]
                     if local_len != remote_len:
                         raise ValueError("P/D cache slice lengths differ")
-                    for req in batch.requests:
-                        for local_block, remote_block in zip(req.local_block_ids, req.remote_block_ids, strict=True):
-                            src_list.append(
-                                local_addr
-                                + local_block * local.block_strides[local_index][cache_index]
-                                + local_offset * local_len
-                            )
-                            dst_list.append(
-                                remote_addr
-                                + remote_block * pp.block_strides[remote_index][cache_index]
-                                + remote_offset * remote_len
-                            )
-                            length_list.append(local_len * heads)
+                    src_list.extend(
+                        (
+                            local_blocks * np.uint64(local.block_strides[local_index][cache_index])
+                            + np.uint64(local_addr + local_offset * local_len)
+                        ).tolist()
+                    )
+                    dst_list.extend(
+                        (
+                            remote_blocks * np.uint64(pp.block_strides[remote_index][cache_index])
+                            + np.uint64(remote_addr + remote_offset * remote_len)
+                        ).tolist()
+                    )
+                    length_list.extend([local_len * heads] * len(local_blocks))
             batch.event.synchronize()
             if src_list:
                 session = f"{worker.local_ip}:{worker.te_rpc_port}"

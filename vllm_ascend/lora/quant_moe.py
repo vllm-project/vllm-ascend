@@ -27,6 +27,7 @@ from typing import Any
 
 import torch
 import torch_npu
+from vllm.config import get_current_vllm_config_or_none
 from vllm.model_executor.layers.fused_moe.activation import MoEActivation
 
 from vllm_ascend.ascend_forward_context import _EXTRA_CTX, MoECommType
@@ -162,8 +163,9 @@ def _apply_dynamic_int8_moe_lora(
             "MC2 and FusedMC2 are unsupported."
         )
     lora_context = mlp_compute_input.lora_context
-    if mlp_compute_input.dynamic_eplb:
-        raise NotImplementedError("Ascend quantized MoE LoRA does not support dynamic EPLB.")
+    vllm_config = get_current_vllm_config_or_none()
+    if vllm_config is not None and vllm_config.parallel_config.enable_eplb:
+        raise NotImplementedError("Ascend quantized MoE LoRA does not support EPLB.")
 
     hidden_states = mlp_compute_input.hidden_states
     if mlp_compute_input.dynamic_scale is not None or hidden_states.dtype == torch.int8:
@@ -199,7 +201,7 @@ def _apply_dynamic_int8_moe_lora(
     w1_scale = weights.w1_scale if isinstance(weights.w1_scale, list) else [weights.w1_scale]
     w2_scale = weights.w2_scale if isinstance(weights.w2_scale, list) else [weights.w2_scale]
     if not all(len(values) == 1 for values in (w1, w2, w1_scale, w2_scale)):
-        raise NotImplementedError("Quantized MoE LoRA does not support per-expert tensor lists used by dynamic EPLB.")
+        raise NotImplementedError("Quantized MoE LoRA does not support per-expert tensor lists.")
 
     input_dtype = hidden_states.dtype
     quantized_input, input_scale = DeviceOperator.npu_dynamic_quant(

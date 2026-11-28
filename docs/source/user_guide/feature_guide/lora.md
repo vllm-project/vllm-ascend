@@ -17,7 +17,7 @@ LoRA applies to both dense models and mixture-of-experts (MoE) models. The base 
 | Non-quantized | Supported | Supported |
 | W8A8 dynamic quantization | Supported | Supported |
 
-Other MoE quantization methods, Fused MC2, and dynamic EPLB are not supported with LoRA.
+Other MoE quantization methods, Fused MC2, and EPLB are not supported with LoRA.
 
 ## LoRA Parameters
 
