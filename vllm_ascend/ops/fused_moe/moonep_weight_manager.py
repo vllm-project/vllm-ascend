@@ -795,6 +795,23 @@ def _prepare_slot_cache(state, plan):
     return plan, (hits, misses), not misses
 
 
+def _apply_slot_cache_updates(
+    state: _LayerWeightState, cache_plan: tuple[list[tuple[int, int]], list[tuple[int, int]]]
+) -> None:
+    """Copy all hits into Slots before a miss can overwrite a cached expert."""
+    hits, misses = cache_plan
+    with torch.no_grad():
+        for cache_index, slot_index in hits:
+            for name, cache in state.caches.items():
+                state.slots[name][slot_index].copy_(cache[state.cache_layer_index, cache_index])
+        for expert_id, slot_index in misses:
+            cache_index = state.cache_next
+            state.cache_next = (cache_index + 1) % max(_CACHED_EXPERT_COUNT, 1)
+            for name, cache in state.caches.items():
+                cache[state.cache_layer_index, cache_index].copy_(state.slots[name][slot_index])
+            state.cache_experts[cache_index] = expert_id
+
+
 def udma_prefetch_overlap_requested(use_udma: bool, slot_mode: bool) -> bool:
     """Use the existing side-stream switch; no independent transport toggle."""
     return bool(use_udma and slot_mode and _PREFETCH_OVERLAP != "none")
@@ -927,19 +944,7 @@ def run_slot_forward(
 
         _tn_pf.npu.current_stream().wait_event(pf_ev)
     if cache_plan is not None:
-        # stream-ordered after the prefetch: hits come from this layer's cache
-        # (no remote GET), the fetched experts refill the cache for later steps
-        hits, misses = cache_plan
-        with torch.no_grad():
-            for j, i in hits:
-                for name, cache in state.caches.items():
-                    state.slots[name][i].copy_(cache[state.cache_layer_index, j])
-            for e, i in misses:
-                j = state.cache_next
-                state.cache_next = (j + 1) % max(_CACHED_EXPERT_COUNT, 1)
-                for name, cache in state.caches.items():
-                    cache[state.cache_layer_index, j].copy_(state.slots[name][i])
-                state.cache_experts[j] = e
+        _apply_slot_cache_updates(state, cache_plan)
     mlp_compute_input = build_mlp_compute_input(
         fused_experts_input=fused_experts_input,
         token_dispatch_output=token_dispatch_output,
