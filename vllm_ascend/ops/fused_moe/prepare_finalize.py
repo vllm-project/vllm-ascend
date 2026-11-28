@@ -39,7 +39,7 @@ from vllm_ascend.lora.fused_moe import prepare_lora_indices
 from vllm_ascend.ops.fused_moe.dataclass.prepare_finalize import MoEPrepareOutput
 from vllm_ascend.ops.fused_moe.moe_utils import _pad_and_split_tokens, _pad_tokens_with_cat
 from vllm_ascend.quantization.quant_type import QuantType
-from vllm_ascend.quantization.utils import get_dynamic_mx_quant_scale_alg
+from vllm_ascend.quantization.utils import DynamicMXQuantScaleAlg, get_dynamic_mx_quant_scale_alg
 
 # ForwardContext.additional_kwargs key for the per-forward MC2 mask cache.
 _MC2_RUNNER_PADDING_MASK_KEY = "ascend_mc2_runner_padding_mask"
@@ -456,7 +456,7 @@ class PrepareAndFinalizeWithAllGather(PrepareAndFinalize):
         if self._use_ep_sequence_parallel():
             return self._prepare_with_ep_group(hidden_states, router_logits, quant_type)
 
-        return self._prepare_with_dp_group(hidden_states, router_logits, replace_allreduce)
+        return self._prepare_with_dp_group(hidden_states, router_logits, replace_allreduce, quant_type)
 
     def _prepare_with_ep_group(
         self, hidden_states: torch.Tensor, router_logits: torch.Tensor, quant_type=QuantType.NONE
@@ -522,6 +522,7 @@ class PrepareAndFinalizeWithAllGather(PrepareAndFinalize):
             hidden_states = self.moe_config.dp_group.all_gather(hidden_states, 0)
             router_logits = self.moe_config.dp_group.all_gather(router_logits, 0)
 
+        pertoken_scale = None
         if self.moe_config.pcp_size > 1:
             max_tokens_across_pcp = _EXTRA_CTX.max_tokens_across_pcp
 
@@ -531,6 +532,18 @@ class PrepareAndFinalizeWithAllGather(PrepareAndFinalize):
                 hidden_states = nn.functional.pad(hidden_states, (0, 0, 0, pad_size))
                 router_logits = nn.functional.pad(router_logits, (0, 0, 0, pad_size))
 
+            # Quantize each token on its owner before replicating it across
+            # PCP. Dispatch reuses the INT8 per-token or MXFP8 block scales.
+            # LoRA needs the original floating-point activations.
+            if self.lora_context is None and hidden_states.shape[0] > 0:
+                if quant_type == QuantType.W8A8:
+                    hidden_states, pertoken_scale = torch_npu.npu_dynamic_quant(hidden_states)
+                elif quant_type == QuantType.W8A8MXFP:
+                    # Match both A5 dispatch paths: fused init_routing (quant_mode=3)
+                    # and the explicit CEIL quantizer used for MiniMax.
+                    hidden_states, pertoken_scale = torch_npu.npu_dynamic_mx_quant(
+                        hidden_states, dst_type=torch.float8_e4m3fn, scale_alg=DynamicMXQuantScaleAlg.CEIL
+                    )
             hidden_states = get_pcp_group().all_gather(
                 hidden_states,
                 dim=0,
@@ -539,13 +552,15 @@ class PrepareAndFinalizeWithAllGather(PrepareAndFinalize):
                 router_logits,
                 dim=0,
             )
+            if pertoken_scale is not None:
+                pertoken_scale = get_pcp_group().all_gather(pertoken_scale, dim=0)
 
         return MoEPrepareOutput(
             hidden_states=hidden_states,
             router_logits=router_logits,
             mc2_mask=None,
             padded_hidden_states_shape=None,
-            pertoken_scale=None,
+            pertoken_scale=pertoken_scale,
         )
 
     def all_gather_input_ids(self, input_ids: torch.Tensor) -> torch.Tensor:

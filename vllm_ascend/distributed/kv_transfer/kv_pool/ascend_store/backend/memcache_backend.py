@@ -61,7 +61,7 @@ def require_hisparse_host_tcp() -> None:
 
 MEMCACHE_THREAD_START_WAIT_S = 0.1
 MEMCACHE_SSD_MEDIA_TYPE = 2
-_HISPARSE_HOST_GET_MAX_BYTES = 256 * 1024 * 1024
+_HISPARSE_GET_MAX_BYTES = 256 * 1024 * 1024
 
 # memfabric (hybm) validates the host Ascend driver against its internal
 # minimum-version whitelist at store init time. The Innerversion field is read
@@ -326,18 +326,15 @@ class MemcacheBackend(Backend):
             raise ValueError("MemCache bulk GET requires one buffer list per key")
         self.ensure_initialized()
         assert self.store is not None
-        is_host = memory_location is MemoryLocation.HOST
-        direction = MmcDirect.COPY_G2H if is_host else MmcDirect.COPY_G2L
+        direction = MmcDirect.COPY_G2H if memory_location is MemoryLocation.HOST else MmcDirect.COPY_G2L
         result = []
         begin, batch_bytes = 0, 0
+        # Both copy directions acquire read leases per SDK call. Bound each
+        # call's payload, and send an indivisible oversized key on its own.
         try:
             for end in range(len(keys) + 1):
                 key_bytes = sum(sizes[end]) if end < len(keys) else 0
-                # Only Host GETs hold a host_tcp lease. An indivisible key
-                # larger than the lease batch budget is transferred alone.
-                if end > begin and (
-                    end == len(keys) or (is_host and batch_bytes + key_bytes > _HISPARSE_HOST_GET_MAX_BYTES)
-                ):
+                if end > begin and (end == len(keys) or batch_bytes + key_bytes > _HISPARSE_GET_MAX_BYTES):
                     result.extend(
                         require_aligned_batch_results(
                             "HiSparse Memcache GET",

@@ -26,6 +26,8 @@ from typing import Any, cast
 from unittest.mock import patch
 
 import pytest
+from vllm import SamplingParams
+from vllm.inputs import TokensPrompt
 from vllm.v1.metrics.reader import Counter, Vector
 
 from tests.e2e.conftest import DPVllmRunner, VllmRunner, wait_until_npu_memory_free
@@ -480,7 +482,21 @@ def test_dsv3_2_sfa_pcp_pp_mtp_model_runner_v2_graph() -> None:
 @wait_until_npu_memory_free(target_free_percentage=0.8)
 def test_dsv3_2_sfa_pcp_dcp_model_runner_v2_graph_accuracy() -> None:
     """Guard MRV2 SFA PCP+DCP+MTP full-decode-only graph accuracy."""
-    _run_accuracy_case(DSV3_2_SFA_PCP_DCP_CASE)
+    case = DSV3_2_SFA_PCP_DCP_CASE
+    with VllmRunner(case.model, **case.runner_kwargs) as runner:
+        # Nine uncached tokens on PCP2 split into head/tail lengths (3, 1) and (3, 2).
+        # Both Indexer ranks therefore plan for six tokens.
+        token_ids = [19923, 14, 1026, 2329, 344, 9807, 14, 342, 1030]
+        assert runner.model.get_tokenizer().encode(case.prompts[1]) == token_ids
+        outputs = runner.model.generate(
+            [case.prompts[0], TokensPrompt(prompt_token_ids=token_ids), case.prompts[2]],
+            SamplingParams(temperature=0.0, max_tokens=case.max_tokens),
+        )
+        assert outputs[1].prompt_token_ids == token_ids
+        assert outputs[1].num_cached_tokens == 0
+
+    texts = [(prompt + output.outputs[0].text).strip() for prompt, output in zip(case.prompts, outputs, strict=True)]
+    assert texts in DSV3_2_SFA_DCP_GOLDENS
 
 
 MTP_PCP_CASE = AccuracyCase(

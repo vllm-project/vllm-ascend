@@ -139,6 +139,7 @@ def test_reuse_config_is_scoped_to_layerwise_backend_connector():
     }
     multi_config = SimpleNamespace(
         kv_connector="MultiConnector",
+        kv_role="kv_producer",
         kv_connector_extra_config={
             "connectors": [
                 {
@@ -147,6 +148,7 @@ def test_reuse_config_is_scoped_to_layerwise_backend_connector():
                 },
                 {
                     "kv_connector": "AscendStoreConnector",
+                    "kv_role": "kv_consumer",
                     "kv_connector_extra_config": ascend_store_config,
                 },
             ]
@@ -162,15 +164,25 @@ def test_reuse_config_is_scoped_to_layerwise_backend_connector():
     )
 
     assert get_layerwise_offload_config(multi_config) is ascend_store_config
+    multi_config.kv_connector_extra_config["connectors"][1]["kv_role"] = "kv_producer"
+    for role in ("kv_consumer", "kv_both"):
+        multi_config.kv_role = role
+        with pytest.raises(AssertionError, match="requires kv_role=kv_producer"):
+            get_layerwise_offload_config(multi_config)
     for connector_name in (
         "AscendStoreConnector",
         "MooncakeConnectorStoreV1",
     ):
         direct_config = SimpleNamespace(
             kv_connector=connector_name,
+            kv_role="kv_producer",
             kv_connector_extra_config=ascend_store_config,
         )
         assert get_layerwise_offload_config(direct_config) is ascend_store_config
+        for role in ("kv_consumer", "kv_both"):
+            direct_config.kv_role = role
+            with pytest.raises(AssertionError, match="requires kv_role=kv_producer"):
+                get_layerwise_offload_config(direct_config)
     assert get_layerwise_offload_config(unsupported) is None
     assert get_layerwise_offload_config(not_opted_in) is None
 

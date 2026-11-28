@@ -39,7 +39,7 @@ Sequence-parallel input sharding
   -> RMS Norm
   -> Router
   -> all-to-all
-  -> Moe
+  -> MoE
 ```
 
 Different DP ranks may have different numbers of valid tokens. Therefore, the
