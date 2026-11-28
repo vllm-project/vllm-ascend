@@ -6,10 +6,18 @@ C8 PCP prefill and request-sharded decode, including full graphs.
 Core retains residency scheduling, DMA and the Host write completion fence.
 """
 
+from typing import TYPE_CHECKING, cast
+
 import torch
 from vllm.forward_context import get_forward_context, is_forward_context_available
 from vllm.v1.kv_cache_interface import HiSparseHotSpec, HiSparseResidentSpec
 from vllm.v1.worker.gpu.kv_connector import ActiveKVConnector
+
+if TYPE_CHECKING:
+    from vllm.v1.hisparse.runtime import HiSparseCacheHandle
+
+    from vllm_ascend.attention.sfa_hisparse import AscendHiSparseMetadata
+    from vllm_ascend.hisparse.worker import AscendHiSparseConnectorWorker
 
 
 def prepare_pcp_query_metadata(metadata, states, local_states, world_size):
@@ -53,28 +61,36 @@ def hisparse_write_target(cache, metadata, num_input_rows, num_slot_rows):
 
 
 def prepare_pcp_mirror_staging(worker):
-    """Size pinned Host slot staging for gathered rows before graph capture."""
-    config = worker.vllm_config
-    capacity = (
-        config.scheduler_config.max_num_batched_tokens * config.parallel_config.prefill_context_parallel_size
-        + config.scheduler_config.max_num_seqs * (config.num_lookahead_tokens + 1)
-    )
+    """Replace the Host slots before capture because Core has no staging resize API.
+
+    Core takes fresh slices of state.slots for each operation.
+    """
     staging = worker._slot_mapping_staging
-    if staging is not None and staging.slots.numel() < capacity:
-        staging.slots = torch.empty(capacity, dtype=staging.slots.dtype, pin_memory=True)
+    config = worker.vllm_config
+    pcp_size = config.parallel_config.prefill_context_parallel_size
+    if staging is None or pcp_size == 1:
+        return
+    slots = staging.slots
+    if not hasattr(staging, "_pcp_base_capacity"):
+        staging._pcp_base_capacity = slots.numel()
+    capacity = staging._pcp_base_capacity + config.scheduler_config.max_num_batched_tokens * (pcp_size - 1)
+    if slots.numel() < capacity:
+        staging.slots = torch.empty(capacity, dtype=slots.dtype, pin_memory=slots.is_pinned())
 
 
 class PCPHiSparseConnector(ActiveKVConnector):
     """Use canonical requests for Core and gathered slots for Resident/Host DMA."""
 
-    def __init__(self, connector, manager, block_tables, host_group_id):
+    def __init__(
+        self, connector, manager, block_tables, host_group_id, *, hisparse_worker: "AscendHiSparseConnectorWorker"
+    ):
         self.__dict__.update(connector.__dict__)
+        self._hisparse_worker = hisparse_worker
         self._pcp_manager = manager
-        self._pcp_group_metadata = []
+        self._pcp_group_metadata: list[tuple[HiSparseCacheHandle, AscendHiSparseMetadata]] = []
         self._pcp_write_request_ids = None
         self._global_block_tables = block_tables
-        worker = self.kv_connector.connector_worker
-        groups = worker.kv_cache_config.kv_cache_groups
+        groups = hisparse_worker.kv_cache_config.kv_cache_groups
         resident_groups = [i for i, group in enumerate(groups) if isinstance(group.kv_cache_spec, HiSparseResidentSpec)]
         hot_groups = [
             i
@@ -83,7 +99,7 @@ class PCPHiSparseConnector(ActiveKVConnector):
             for _ in group.layer_names
         ]
         self._pcp_bindings = []
-        for cache, hot_group in zip(worker.cache_handles, hot_groups, strict=True):
+        for cache, hot_group in zip(hisparse_worker.cache_handles, hot_groups, strict=True):
             self._pcp_bindings.append((cache, resident_groups[cache.runtime.resident_source_index], hot_group))
         self._pcp_host_group_id = host_group_id
         # Bind before graph capture, which bypasses connector.pre_forward.
@@ -109,7 +125,7 @@ class PCPHiSparseConnector(ActiveKVConnector):
 
     def prepare_draft_decode(self):
         """Later draft steps are replicated; use global rows without KV gather."""
-        states = self.kv_connector.connector_worker.request_state_indices
+        states = self._hisparse_worker.request_state_indices
         block_tables = self._global_block_tables
         for cache, group_id, hot_group_id in self._pcp_bindings:
             if cache.draft_layer:
@@ -137,7 +153,7 @@ class PCPHiSparseConnector(ActiveKVConnector):
         metadata_by_layer = attn_metadata or {}
         self._pcp_group_metadata = [
             (cache, metadata)
-            for name, cache in self.kv_connector.connector_worker._group_leaders
+            for name, cache in self._hisparse_worker._group_leaders
             if (metadata := metadata_by_layer.get(name)) is not None
         ]
         # Keep Core's lifecycle canonical and snapshot all gathered slots.
@@ -146,7 +162,11 @@ class PCPHiSparseConnector(ActiveKVConnector):
         return load_kwargs
 
     def _start_load_kv(self):
+        # Empty kwargs mark a no_forward step without a batch. Run Core's lifecycle and skip PCP query binding.
+        runs_forward = bool(self._pending_load_kwargs)
         super()._start_load_kv()
+        if not runs_forward:
+            return
         self.prepare_draft_prefill()
         # FULL replay also needs the resolver bound to local query states.
         for cache, metadata in self._pcp_group_metadata:
@@ -175,11 +195,25 @@ def adapt_pcp_hisparse_connector(runner):
     from vllm_ascend.hisparse.connector import HiSparseConnector
 
     # Taking over ActiveKVConnector state must not discard a subclass's lifecycle.
-    if type(connector) is not ActiveKVConnector or type(connector.kv_connector) is not HiSparseConnector:
-        raise ValueError("HiSparse PCP requires the direct HiSparseConnector")
-    prepare_pcp_mirror_staging(connector.kv_connector.connector_worker)
+    if type(connector) is not ActiveKVConnector:
+        raise ValueError(f"HiSparse PCP requires ActiveKVConnector, got {type(connector).__name__}.")
+    inner = connector.kv_connector
+    if type(inner) is HiSparseConnector:
+        source = inner
+    else:
+        from vllm_ascend.distributed.kv_transfer.ascend_multi_connector import AscendMultiConnector
+
+        if type(inner) is not AscendMultiConnector:
+            raise ValueError(f"Unsupported HiSparse PCP connector: {type(inner).__name__}.")
+        source = inner.get_hisparse_child()
+    worker = cast("AscendHiSparseConnectorWorker", source.connector_worker)
+    prepare_pcp_mirror_staging(worker)
+    # Core disables shared Host pools under PCP (vllm/v1/hisparse/runtime.py:300)
+    # and selects exactly one host-resident group (vllm/v1/hisparse/layout.py:317).
     (host_group_id,) = runner.kv_cache_config.host_group_ids
-    adapted = PCPHiSparseConnector(connector, runner.pcp_manager, runner.block_tables, host_group_id)
+    adapted = PCPHiSparseConnector(
+        connector, runner.pcp_manager, runner.block_tables, host_group_id, hisparse_worker=worker
+    )
     if runner.speculator is not None:
         runner.speculator.hisparse_pcp_connector = adapted
     return adapted

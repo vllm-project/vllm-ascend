@@ -3,8 +3,8 @@
 """Ascend SFA execution over upstream HiSparse's resident and hot cache pool."""
 
 import math
-from dataclasses import dataclass
-from typing import cast
+from dataclasses import dataclass, field
+from typing import TYPE_CHECKING, cast
 
 import torch
 from torch.overrides import TorchFunctionMode
@@ -132,6 +132,10 @@ class AscendHiSparseMetadata(AscendSFAMetadata):
     prefill: AscendHiSparsePrefillMetadata | None = None
     prefill_valid_token_mask: torch.Tensor | None = None
     hisparse_for_capture: bool = False
+    if TYPE_CHECKING:
+        # prepare_pcp_query_metadata adds these only to PCP batches.
+        hisparse_num_write_tokens: int = field(init=False)
+        hisparse_write_has_prefill: bool = field(init=False)
 
 
 class AscendHiSparseMetadataBuilder(AscendSFAMetadataBuilder):

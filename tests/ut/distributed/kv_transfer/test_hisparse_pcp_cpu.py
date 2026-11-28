@@ -4,7 +4,7 @@
 
 from types import SimpleNamespace as NS
 from typing import Any
-from unittest.mock import Mock
+from unittest.mock import Mock, patch
 
 import numpy as np
 import pytest
@@ -14,13 +14,17 @@ pytest.importorskip("vllm.v1.hisparse.backend")
 from vllm.distributed.kv_transfer.kv_connector.v1.hisparse.worker import HiSparseConnectorWorker
 from vllm.v1.hisparse.runtime import HiSparseCacheHandle
 from vllm.v1.kv_cache_interface import HiSparseHotSpec, HiSparseResidentSpec
+from vllm.v1.worker.gpu import kv_connector as core_step
 from vllm.v1.worker.gpu.kv_connector import ActiveKVConnector
 
+from vllm_ascend.distributed.kv_transfer.ascend_multi_connector import AscendMultiConnector
 from vllm_ascend.hisparse.pcp import (
     PCPHiSparseConnector,
+    prepare_pcp_mirror_staging,
     prepare_pcp_query_metadata,
     prepare_pcp_query_states,
 )
+from vllm_ascend.hisparse.worker import AscendHiSparseConnectorWorker
 
 
 def metadata(num_tokens=3, decode=True):
@@ -162,7 +166,11 @@ def make_connector(padded_tokens=3):
         _local_block_tables=original_tables,
     )
     connector = PCPHiSparseConnector(
-        active, manager, NS(slot_mappings=original_slots, input_block_tables=original_tables), 0
+        active,
+        manager,
+        NS(slot_mappings=original_slots, input_block_tables=original_tables),
+        0,
+        hisparse_worker=underlying.connector_worker,
     )
     return connector, cache, meta, local, global_batch, manager
 
@@ -200,8 +208,7 @@ def test_host_mirror_mapping_shared_across_groups_and_scheduling_steps(monkeypat
         batch.query_start_loc = torch.tensor(starts, dtype=torch.int32)
         manager._padded_gather_idx = torch.tensor(indices)
         connector.prepare_draft_decode()
-        connector._build_load_kwargs(scheduler, local, {"layer0": meta, "draft": draft_meta})
-        connector._start_load_kv()
+        connector.pre_forward(scheduler, local, {"layer0": meta, "draft": draft_meta})
         connector.prepare_host_mirror()
         assert draft.source_block_table is manager._local_block_tables[0]
         assert draft.runtime.hot_block_table is manager._local_block_tables[2]
@@ -363,13 +370,20 @@ def test_builder_padding_uses_safe_prefill_request_without_forward_ops(
         assert selected_tables.shape[0] == padded - num_decodes
 
 
-def test_pcp_adapts_ascend_hisparse_connector(monkeypatch):
+@pytest.mark.parametrize("pooled", [False, True], ids=["direct", "multi-connector"])
+def test_pcp_adapts_ascend_hisparse_connector(monkeypatch, pooled):
     from vllm_ascend.hisparse import pcp
     from vllm_ascend.hisparse.connector import HiSparseConnector
 
     connector = ActiveKVConnector.__new__(ActiveKVConnector)
-    connector.kv_connector = HiSparseConnector.__new__(HiSparseConnector)
-    connector.kv_connector.connector_worker = object()
+    source = HiSparseConnector.__new__(HiSparseConnector)
+    worker = AscendHiSparseConnectorWorker.__new__(AscendHiSparseConnectorWorker)
+    source.connector_worker = worker
+    connector.kv_connector = source
+    if pooled:
+        parent = AscendMultiConnector.__new__(AscendMultiConnector)
+        parent._hisparse_child = source
+        connector.kv_connector = parent
     runner = NS(
         kv_connector=connector,
         pcp_manager=object(),
@@ -383,8 +397,8 @@ def test_pcp_adapts_ascend_hisparse_connector(monkeypatch):
     monkeypatch.setattr(pcp, "PCPHiSparseConnector", wrapper)
 
     assert pcp.adapt_pcp_hisparse_connector(runner) is wrapper.return_value
-    prepare_staging.assert_called_once_with(connector.kv_connector.connector_worker)
-    wrapper.assert_called_once_with(connector, runner.pcp_manager, runner.block_tables, 0)
+    prepare_staging.assert_called_once_with(worker)
+    wrapper.assert_called_once_with(connector, runner.pcp_manager, runner.block_tables, 0, hisparse_worker=worker)
     assert runner.speculator.hisparse_pcp_connector is wrapper.return_value
 
 
@@ -492,3 +506,51 @@ def test_pcp_prolog_gathers_local_scratch_before_resident_write(monkeypatch, cap
     assert impl.hisparse_cache.view.cache[:, 0].tolist() == expected
     impl.hisparse_cache.finish_kv_update.assert_not_called()
     assert impl.hisparse_cache.submit_layer_mirror.call_count == int(prefill and not capture)
+
+
+@pytest.mark.parametrize(
+    ("pcp_size", "pinned"),
+    [(3, False), (3, True), (1, False), (3, None)],
+    ids=["pageable", "pinned", "pcp1", "non-writer"],
+)
+def test_pcp_mirror_staging_capacity(pcp_size, pinned):
+    slots = torch.empty(37, dtype=torch.int32)
+    staging = NS(slots=slots) if pinned is not None else None
+    config = NS(
+        scheduler_config=NS(max_num_batched_tokens=8), parallel_config=NS(prefill_context_parallel_size=pcp_size)
+    )
+    worker = NS(vllm_config=config, _slot_mapping_staging=staging)
+    cpu_empty = torch.empty
+
+    # CPU UT checks the pinning flag without requiring a pinned allocator.
+    with (
+        patch.object(slots, "is_pinned", return_value=pinned),
+        patch.object(torch, "empty", side_effect=lambda size, dtype, pin_memory: cpu_empty(size, dtype=dtype)) as empty,
+    ):
+        prepare_pcp_mirror_staging(worker)
+        if pinned is None or pcp_size == 1:
+            empty.assert_not_called()
+            assert worker._slot_mapping_staging is staging
+            if staging is not None:
+                assert staging.slots is slots
+            return
+        expanded = staging.slots
+        prepare_pcp_mirror_staging(worker)
+        empty.assert_called_once_with(53, dtype=slots.dtype, pin_memory=pinned)
+        assert staging.slots is expanded and expanded.numel() == 53
+
+
+def test_pcp_empty_load_keeps_core_lifecycle_without_rebinding(monkeypatch):
+    connector = PCPHiSparseConnector.__new__(PCPHiSparseConnector)
+    connector.kv_connector = Mock()
+    connector._pending_load_kwargs = {}
+    rebind = Mock()
+    monkeypatch.setattr(connector, "prepare_draft_prefill", rebind)
+    context = NS(attn_metadata=None)
+    monkeypatch.setattr(core_step, "is_forward_context_available", lambda: True)
+    monkeypatch.setattr(core_step, "get_forward_context", lambda: context)
+
+    connector._start_load_kv()
+
+    connector.kv_connector.start_load_kv.assert_called_once_with(context)
+    rebind.assert_not_called()

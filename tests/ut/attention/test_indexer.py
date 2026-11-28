@@ -36,6 +36,8 @@ def _make_builder(
     sharded_dcp: bool = False,
     max_model_len: int = 512,
     interleave: int = 128,
+    hisparse_stride: int | None = None,
+    capture_size: int = 0,
 ) -> AscendSFAIndexerMetadataBuilder:
     kv_cache_spec = FullAttentionSpec(
         block_size=physical_block_size,
@@ -75,7 +77,14 @@ def _make_builder(
             return_value=SimpleNamespace(ranks=[0, 4, 1, 5, 2, 6, 3, 7] if dcp_size == 8 else list(range(dcp_size))),
         ),
     ):
-        return AscendSFAIndexerMetadataBuilder(
+        builder_cls = AscendSFAIndexerMetadataBuilder
+        if hisparse_stride is not None:
+            vllm_config.compilation_config.max_cudagraph_capture_size = capture_size
+            vllm_config.compilation_config.static_forward_context = {
+                layer_names[0]: SimpleNamespace(hisparse_block_stride=hisparse_stride)
+            }
+            builder_cls = indexer_module.AscendHiSparseIndexerMetadataBuilder
+        return builder_cls(
             kv_cache_spec,
             layer_names,
             vllm_config,
@@ -795,3 +804,36 @@ def test_sharded_pcp_prefill_uses_global_history_and_local_query_rows(
     assert metadata.qli_metadata is None and metadata.qli_metadata_group_id is None
     assert builder.take_device_metadata_tasks() == ()
     assert builder._sharded_seq_buffers == {}
+
+
+@pytest.mark.filterwarnings("error:An output with one or more elements was resized")
+@pytest.mark.parametrize("rows,query,capture", [(8, 2, 0), (16, 1, 16)], ids=["split-prefill", "padded-graph"])
+def test_hisparse_indexer_remap_capacity(monkeypatch, rows, query, capture):
+    page, stride = _KERNEL_BLOCK_SIZE, 3
+    builder = _make_builder(pcp_size=2, max_model_len=2 * page, hisparse_stride=stride, capture_size=capture)
+    monkeypatch.setattr(indexer_module, "get_cos_and_sin_mla", lambda positions, **kwargs: (positions, positions))
+    tokens = rows * query
+    bounds = torch.arange(rows + 1, dtype=torch.int32) * query
+    table = torch.arange(rows * 2).view(rows, 2)
+    logical = torch.arange(page - 1, page - 1 + 32)
+    common = _make_common_metadata().replace(
+        num_reqs=rows,
+        num_input_tokens=tokens,
+        num_actual_tokens=tokens - bool(capture),
+        max_query_len=query,
+        query_start_loc=bounds,
+        query_start_loc_cpu=bounds,
+        positions=torch.arange(tokens),
+        seq_lens=torch.full((rows,), page),
+        is_prefilling=torch.full((rows,), query > 1),
+        block_table_tensor=table,
+        slot_mapping=logical,
+        pcp_context=object(),
+    )
+    if capture:
+        table[-1] = common.seq_lens[-1] = 0
+        logical.view(2, rows)[:, -1] = -1
+    metadata = builder.build_for_graph_capture(common) if capture else builder.build(0, common)
+    torch.testing.assert_close(metadata.block_table, table * stride)
+    physical = logical + logical // page * (stride - 1) * page
+    torch.testing.assert_close(metadata.slot_mapping, torch.where(logical >= 0, physical, -1))

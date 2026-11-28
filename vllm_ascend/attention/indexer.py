@@ -1897,10 +1897,9 @@ class AscendHiSparseIndexerMetadataBuilder(AscendSFAIndexerMetadataBuilder):
         context = vllm_config.compilation_config.static_forward_context
         self._cache_layers = [context[name] for name in layer_names]
         self._physical_metadata_buffers: dict[object, tuple[torch.Tensor, torch.Tensor]] = {}
-        scheduler = vllm_config.scheduler_config
         max_capture = vllm_config.compilation_config.max_cudagraph_capture_size or 0
         self._table_capacity = (
-            max(scheduler.max_num_seqs, max_capture) + 1,
+            max(get_cp_max_num_reqs(vllm_config), max_capture + 1),
             _round_up(vllm_config.model_config.max_model_len, self.kernel_block_size) // self.kernel_block_size,
         )
 

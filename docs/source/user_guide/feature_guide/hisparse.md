@@ -39,7 +39,7 @@ across requests.
 | Hardware and software | A2/A3 with the arch22 custom operators, or 950PR&950DT Products with a SIMT-capable CANN 9.2 toolchain. |
 | Cache formats | A2/A3: INT8 C8. 950PR&950DT Products: BF16 or native E4M3FN C8. C4 and TurboQuant are outside the current support scope. |
 | Parallelism and transport | Supports PCP (prefill and decode request sharding). DCP and external P/D transport are outside the current support scope. |
-| Host storage | Use private Host pools per tensor-parallel rank and Core eager Host mirroring. |
+| Host storage | Use eager Host mirroring. With PCP > 1, each worker has a private Host pool. |
 | TopK | The existing SFA requirement of divisibility by 128 applies. |
 | Feature mutual exclusion | HiSparse and `additional_config.sparse_kv_offload_config.enabled` cannot be enabled together. |
 
@@ -126,14 +126,38 @@ for the metrics to check after startup.
 Mooncake support is deferred pending a fix for
 [PUT timeout data corruption](https://github.com/kvcache-ai/Mooncake/issues/4491).
 
-AscendStore keys for HiSparse use the `hisparse-ascendstore-v1` namespace.
-This version identifies the external pool key format. The keys include the
+With PCP=1, HiSparse uses the existing `hisparse-ascendstore-v1` namespace.
+With PCP > 1, `hisparse-ascendstore-pcp-v1` isolates pages by TP size, PCP size
+and physical KV partition layout. The keys include the
 target and draft checkpoint identities, resolved revisions, dummy-weight mode,
 filename patterns for `sharded_state` and `runai_streamer_sharded`, effective
 model configurations (including RoPE settings), and page layout. If the Hub revision
 resolver is unavailable, pin the checkpoint commit when sharing a persistent
 pool. Use a versioned directory when replacing local weights in a persistent
 pool. Files overwritten in place keep the same model path.
+
+#### Request-sharded decode with AscendStore
+
+Use the AscendStore configuration above, set `--prefill-context-parallel-size`
+greater than 1, and add `--scheduler-reserve-full-isl`.
+
+- **Supported setup** — Sparse MLA/SFA on one node with colocated Prefill and
+  Decode. Keep DCP=1, PP=1, and KVPP disabled. Use eager mode,
+  `FULL_DECODE_ONLY`, or `FULL_AND_PIECEWISE`. Cacheable groups must be
+  HiSparse Source or Indexer groups.
+- **Memory budget** — Each worker needs a private Host Source pool and NPU
+  Indexer capacity for the full history. Budget `host_pool_gib` per worker
+  and account for MemCache DRAM, Resident pages, and Hot slots separately.
+  Each Host pool needs at least `ceil(max_model_len / host_block_size) + 2` pages.
+- **External loads** — A prefix is ready when all TP × PCP workers finish.
+  MemCache GET has no per-request timeout. Use an SDK whose `host_tcp` GET
+  stops writing before returning on success or error.
+
+Set `save_decode_cache=true` to save committed decode pages in addition to
+complete prompt pages.
+
+Device validation covered GLM-5.3 W4A4C8 with native FP8 E4M3FN KV on A5,
+at TP4 × PCP2 with one DP group, `FULL_DECODE_ONLY`, and MTP=3.
 
 ### Verifying the Feature
 
@@ -157,7 +181,7 @@ A request served from the local prefix cache may leave both counters unchanged.
 | --- | --- |
 | `hisparse_config` | Enables Core HiSparse for the supported sparse Attention backend. |
 | `eager_host_mirror` | Keep `true` for this foundation; Core maintains the Host KV mirror. |
-| `host_pool_gib` | Host pool size in GiB per tensor-parallel rank. Size it for the planned context lengths and concurrency; the example reserves 4 GiB per rank. |
+| `host_pool_gib` | Host pool size in GiB. With PCP > 1, budget this amount per worker for the planned context lengths and concurrency. |
 | `device_buffer_size` | Per-request Hot capacity in KV rows. It must hold the deduplicated union of rows selected during speculative verification and fit the resolver's on-chip UB budget. |
 | `kv_cache_dtype` / `indexer_kv_dtype` | Select main and Indexer KV formats independently from model-weight quantization. |
 
@@ -168,9 +192,9 @@ A request served from the local prefix cache may leave both counters unchanged.
 | `kv_connector` / `kv_role` | In `--kv-transfer-config`, use `MultiConnector` with one `HiSparseConnector` and one `AscendStoreConnector`. Set `kv_role=kv_both` on the parent and both children. |
 | `backend` / `load_async` | In the AscendStore child's `kv_connector_extra_config`, set `backend=memcache` and `load_async=true`. |
 | `use_layerwise` / `discard_partial_chunks` | In the AscendStore child's `kv_connector_extra_config`, keep `use_layerwise=false` and `discard_partial_chunks=true` for whole-block transfers. |
-| `protocol` | Set to `host_tcp` in the MemCache local configuration. |
+| `ock.mmc.local_service.protocol` | Set to `host_tcp` in the configuration file named by `MMC_LOCAL_CONFIG_PATH`. |
 | `hisparse_config.eager_host_mirror` | Set to `true` in `--attention-config`, including for Prefill-only saves. |
-| `prefill_context_parallel_size` | Keep at `1`. |
+| `prefill_context_parallel_size` | Use `1`, or a larger size with the request-sharded decode configuration above. |
 
 To fall back to local computation after an external load fails, set
 `kv_load_failure_policy=recompute` in `--kv-transfer-config`.

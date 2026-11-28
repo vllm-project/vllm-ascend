@@ -35,9 +35,12 @@ def get_bulk_by_memory_location(
     sizes: list[list[int]],
     *,
     memory_locations: list[MemoryLocation],
-    tp_rank: int = 0,
+    read_rank: int = 0,
 ) -> list[int] | None:
-    """Group and rotate homogeneous batches, then restore input key order."""
+    """Group and rotate homogeneous batches, then restore input key order.
+
+    Under PCP, read_rank is pcp_rank * tp_size + tp_rank.
+    """
     if not len(keys) == len(addrs) == len(sizes) == len(memory_locations):
         raise ValueError("Bulk GET requires one buffer list and memory location per key")
     indices_by_location: dict[MemoryLocation, list[int]] = {MemoryLocation.DEVICE: [], MemoryLocation.HOST: []}
@@ -50,8 +53,9 @@ def get_bulk_by_memory_location(
     for memory_location, indices in indices_by_location.items():
         if not indices:
             continue
-        # Start each TP rank at a different key to spread concurrent reads across the pool.
-        rotation = tp_rank % len(indices)
+        # Short batches can share a starting key (always for length one).
+        # Rotation changes order only: each replica still reads every byte.
+        rotation = read_rank % len(indices)
         indices = indices[rotation:] + indices[:rotation]
         batch_keys = [keys[i] for i in indices]
         codes = backend.get(
@@ -1187,6 +1191,9 @@ class KVCacheStoreRecvingThread(_WholeBlockKVTransferThread):
         worker: Any = None,
         record_operation: Callable[[str, float, int], None] | None = None,
         host_memory_group_ids: frozenset[int] = frozenset(),
+        *,
+        kvpp_rank: int = 0,
+        hisparse_layout: bool = False,
     ):
         super().__init__(
             m_store,
@@ -1199,6 +1206,9 @@ class KVCacheStoreRecvingThread(_WholeBlockKVTransferThread):
             name="KVCacheStoreRecvingThread",
         )
         self.host_memory_group_ids = host_memory_group_ids
+        self.kvpp_rank = kvpp_rank
+        # Non-HiSparse receivers keep the base read order.
+        self._hisparse_layout = hisparse_layout
         self._invalid_block_ids = invalid_block_ids if invalid_block_ids is not None else set()
         self._invalid_block_ids_lock = invalid_block_ids_lock or threading.Lock()
         self.worker = worker
@@ -1318,7 +1328,8 @@ class KVCacheStoreRecvingThread(_WholeBlockKVTransferThread):
                 return
             # With explicit memory locations, rotate keys within each group and restore input order.
             # Otherwise rotate the whole batch together with its block IDs.
-            rotation = self.tp_rank % len(key_list)
+            read_rank = self.kvpp_rank if self._hisparse_layout else self.tp_rank
+            rotation = read_rank % len(key_list)
             if memory_locations is None and rotation:
                 key_list = key_list[rotation:] + key_list[:rotation]
                 addr_list = addr_list[rotation:] + addr_list[:rotation]
@@ -1341,7 +1352,7 @@ class KVCacheStoreRecvingThread(_WholeBlockKVTransferThread):
                     key_list,
                     addr_list,
                     size_list,
-                    tp_rank=self.tp_rank,
+                    read_rank=read_rank,
                     memory_locations=memory_locations,
                 )
             if self._record_operation_cb is not None:

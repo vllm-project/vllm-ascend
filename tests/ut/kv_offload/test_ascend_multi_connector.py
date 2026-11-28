@@ -1,3 +1,5 @@
+# SPDX-License-Identifier: Apache-2.0
+# SPDX-FileCopyrightText: Copyright contributors to the vLLM Ascend project
 """Tests for Ascend-specific MultiConnector allocation fan-out."""
 
 from threading import Event, Thread
@@ -30,7 +32,7 @@ def _hisparse_store_multi_config(*, with_hisparse=True, nnodes=1):
             kv_role="kv_both",
             kv_connector_extra_config={"connectors": children},
         ),
-        parallel_config=SimpleNamespace(nnodes=nnodes, prefill_context_parallel_size=1),
+        parallel_config=SimpleNamespace(nnodes=nnodes),
         scheduler_config=SimpleNamespace(disable_hybrid_kv_cache_manager=True),
         speculative_config=None,
     )
@@ -129,17 +131,6 @@ def test_hisparse_source_stays_live_if_store_shutdown_fails():
     source.shutdown.assert_not_called()
 
 
-def test_hisparse_rejects_prefill_context_parallelism_before_constructing_children():
-    config = _hisparse_store_multi_config()
-    config.parallel_config.prefill_context_parallel_size = 2
-    with (
-        patch.object(MultiConnector, "__init__") as initialize_children,
-        pytest.raises(ValueError, match="prefill_context_parallel_size=1"),
-    ):
-        AscendMultiConnector(config, KVConnectorRole.SCHEDULER, None)
-    initialize_children.assert_not_called()
-
-
 @pytest.mark.parametrize("target", ["outer", "hisparse", "store"])
 @pytest.mark.parametrize("pd_role", ["kv_producer", "kv_consumer"])
 def test_hisparse_store_rejects_pd_roles_before_constructing_children(target, pd_role):
@@ -197,12 +188,38 @@ def test_hisparse_store_validation_preserves_supported_topologies(with_hisparse)
         transfer = config.kv_transfer_config
         transfer.kv_role = "kv_producer"
         transfer.kv_connector_extra_config["connectors"][0]["kv_role"] = "kv_producer"
+    children = [object(), object()] if with_hisparse else []
     with (
-        patch.object(MultiConnector, "__init__", lambda self, **_: setattr(self, "_connectors", [])),
+        patch.object(MultiConnector, "__init__", lambda self, **_: setattr(self, "_connectors", children)),
         patch("vllm.distributed.parallel_state.get_node_count", return_value=1) as count_nodes,
     ):
         AscendMultiConnector(config, KVConnectorRole.WORKER, None)
     assert count_nodes.call_count == int(with_hisparse)
+
+
+@pytest.mark.parametrize("order", ["hisparse-first", "store-first", "store-subclass"])
+def test_pcp_uses_only_the_exact_hisparse_store_pair(order):
+    from vllm_ascend.distributed.kv_transfer.kv_pool.ascend_store.ascend_store_connector import AscendStoreConnector
+    from vllm_ascend.hisparse.connector import HiSparseConnector
+
+    class StoreSubclass(AscendStoreConnector):
+        pass
+
+    config = _hisparse_store_multi_config()
+    config.parallel_config.prefill_context_parallel_size = 2
+    source = HiSparseConnector.__new__(HiSparseConnector)
+    store_class = StoreSubclass if order == "store-subclass" else AscendStoreConnector
+    children = [source, store_class.__new__(store_class)]
+    if order == "store-first":
+        config.kv_transfer_config.kv_connector_extra_config["connectors"].reverse()
+        children.reverse()
+    with patch.object(MultiConnector, "__init__", lambda self, **_: setattr(self, "_connectors", children)):
+        connector = AscendMultiConnector(config, KVConnectorRole.SCHEDULER, None)
+    if order == "store-subclass":
+        with pytest.raises(ValueError, match="HiSparse PCP requires the exact"):
+            connector.get_hisparse_child()
+    else:
+        assert connector.get_hisparse_child() is source
 
 
 def test_load_ready_observer_does_not_advance_child_attention_hooks():

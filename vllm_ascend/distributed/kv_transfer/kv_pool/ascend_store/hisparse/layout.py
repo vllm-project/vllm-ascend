@@ -10,11 +10,11 @@ import os
 from collections.abc import Callable
 from copy import copy
 from dataclasses import dataclass, fields
-from typing import TYPE_CHECKING, Any
+from typing import TYPE_CHECKING, Any, NamedTuple
 
 import torch
 from vllm.model_executor.model_loader.utils import get_draft_load_config
-from vllm.v1.kv_cache_interface import KVCacheConfig, KVCacheTensor, UniformTypeKVCacheSpecs
+from vllm.v1.kv_cache_interface import KVCacheConfig, KVCacheGroupRole, KVCacheTensor, UniformTypeKVCacheSpecs
 
 from vllm_ascend.core.kv_cache_interface import AlignedKVCacheTensor
 from vllm_ascend.distributed.kv_transfer.kv_pool.ascend_store.buffer import (
@@ -27,7 +27,17 @@ if TYPE_CHECKING:
     from vllm.config import LoadConfig, ModelConfig, VllmConfig
 
 _HISPARSE_POOL_KEY_NAMESPACE = "hisparse-ascendstore-v1"
+_HISPARSE_PCP_POOL_KEY_NAMESPACE = "hisparse-ascendstore-pcp-v1"
 _HF_CONFIG_METADATA = frozenset({"_name_or_path", "transformers_version"})
+
+
+class CacheGroupSharding(NamedTuple):
+    group_id: int
+    tp_partitions: int
+    tp_replicas: int
+
+
+GroupShardingSpec = tuple[CacheGroupSharding, ...]
 
 
 def has_hisparse_cache_layout(config: KVCacheConfig | None) -> bool:
@@ -36,7 +46,8 @@ def has_hisparse_cache_layout(config: KVCacheConfig | None) -> bool:
         return False
     host_blocks = getattr(config, "hisparse_host_num_blocks", None)
     return (isinstance(host_blocks, int) and not isinstance(host_blocks, bool)) or any(
-        getattr(group, "role", None) == "hisparse_source" for group in getattr(config, "kv_cache_groups", ())
+        getattr(group, "role", None) == KVCacheGroupRole.HISPARSE_SOURCE
+        for group in getattr(config, "kv_cache_groups", ())
     )
 
 
@@ -79,22 +90,40 @@ def _model_cache_identity(model: ModelConfig, load_config: LoadConfig) -> tuple[
 
 
 def build_pool_key_namespace(
-    vllm_config: VllmConfig, config: KVCacheConfig | None, dcp_size: int, granularity: int
+    vllm_config: VllmConfig,
+    config: KVCacheConfig | None,
+    dcp_size: int,
+    granularity: int,
+    *,
+    group_sharding: GroupShardingSpec = (),
 ) -> str:
-    """Build the external key namespace for the model and its cache layout."""
+    """Fingerprint the model and transferable pages, including cache group sharding under PCP."""
     model = vllm_config.model_config
     if not has_hisparse_cache_layout(config):
         return model.model.rstrip("/").split("/")[-1]
     assert config is not None
     speculative = vllm_config.speculative_config
     draft = speculative.draft_model_config if speculative is not None else None
-    identity = (
+    identity: tuple[Any, ...] = (
         _model_cache_identity(model, vllm_config.load_config),
         _model_cache_identity(draft, get_draft_load_config(vllm_config)) if draft is not None else None,
         _hisparse_page_geometry(config, dcp_size, granularity),
     )
+    namespace = _HISPARSE_POOL_KEY_NAMESPACE
+    parallel = vllm_config.parallel_config
+    pcp_size = parallel.prefill_context_parallel_size
+    if pcp_size > 1:
+        topology = {
+            "pcp_size": pcp_size,
+            "tp_size": parallel.tensor_parallel_size,
+            "pcp_kv_layout": "pcp-replicated",
+            # Keep the serialized key "groups" compatible with the published PCP pool key namespace.
+            "groups": sorted(group_sharding),
+        }
+        identity = (*identity, topology)
+        namespace = _HISPARSE_PCP_POOL_KEY_NAMESPACE
     digest = hashlib.sha256(json.dumps(identity, sort_keys=True, separators=(",", ":")).encode()).hexdigest()[:24]
-    return f"{_HISPARSE_POOL_KEY_NAMESPACE}:{digest}"
+    return f"{namespace}:{digest}"
 
 
 def aligned_hisparse_allocation_config(kv_cache_config: KVCacheConfig) -> KVCacheConfig:
@@ -176,7 +205,7 @@ def plan_hisparse_store_views(
             host_memory_group_ids.add(group_id)
         for name in group.layer_names:
             parts = as_cache_tuple(kv_caches[name])
-            if group.role == "hisparse_indexer":
+            if group.role == KVCacheGroupRole.HISPARSE_INDEXER:
                 parts = hisparse_indexer_transfer_views(parts, forward_context[name])
             normalized_caches[name] = parts
             if group.host_resident:

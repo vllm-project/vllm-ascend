@@ -613,6 +613,7 @@ class BaseKVPoolScheduler(ABC):
         request: Request,
         block_ids: list[list[int]],
     ) -> ReqMeta | None:
+        # Later steps only poll loading_req_ids for completion and produce no further loadable row for this GET.
         load_spec = self.load_specs.pop(request_id, None)
         if not load_spec:
             return None

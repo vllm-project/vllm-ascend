@@ -30,9 +30,12 @@ if TYPE_CHECKING:
     from vllm_ascend.distributed.kv_transfer.kv_pool.ascend_store.hisparse.draft_host_mirror import (
         HiSparseDraftHostMirrorSaveHook,
     )
+    from vllm_ascend.hisparse.connector import HiSparseConnector
 
 
 class AscendMultiConnector(MultiConnector, SupportsHMA):
+    _hisparse_child: "HiSparseConnector | None" = None
+
     @classmethod
     def _get_connector_classes_and_configs(
         cls, vllm_config: "VllmConfig"
@@ -112,8 +115,6 @@ class AscendMultiConnector(MultiConnector, SupportsHMA):
                 raise ValueError(
                     "HiSparse pooling requires exactly one HiSparseConnector and one AscendStoreConnector."
                 )
-            if vllm_config.parallel_config.prefill_context_parallel_size != 1:
-                raise ValueError("HiSparse with AscendStore requires prefill_context_parallel_size=1.")
             nnodes = vllm_config.parallel_config.nnodes
             if role == KVConnectorRole.WORKER and nnodes == 1:
                 from vllm.distributed.parallel_state import get_node_count
@@ -134,6 +135,16 @@ class AscendMultiConnector(MultiConnector, SupportsHMA):
             role=role,
             kv_cache_config=kv_cache_config,
         )
+        if self._hisparse_store_shutdown_order is not None:
+            from vllm_ascend.distributed.kv_transfer.kv_pool.ascend_store.ascend_store_connector import (
+                AscendStoreConnector,
+            )
+            from vllm_ascend.hisparse.connector import HiSparseConnector
+
+            store_index, source_index = self._hisparse_store_shutdown_order
+            source, store = self._connectors[source_index], self._connectors[store_index]
+            if type(source) is HiSparseConnector and type(store) is AscendStoreConnector:
+                self._hisparse_child = source
 
         self._requires_full_dspark_prompt = (
             uses_sfa_dspark_kv_transfer(vllm_config) and transfer.is_kv_producer and not transfer.is_kv_consumer
@@ -174,6 +185,12 @@ class AscendMultiConnector(MultiConnector, SupportsHMA):
         self.requires_mamba_state_copy_after_load = any(
             getattr(connector, "requires_mamba_state_copy_after_load", False) for connector in self._connectors
         )
+
+    def get_hisparse_child(self) -> "HiSparseConnector":
+        """Return the HiSparse child of the exact pair while the parent owns its lifecycle."""
+        if self._hisparse_child is None:
+            raise ValueError("HiSparse PCP requires the exact HiSparseConnector and AscendStoreConnector pair.")
+        return self._hisparse_child
 
     def _configure_draft_host_mirror_save_hook(self) -> None:
         from vllm.distributed.kv_transfer.kv_connector.v1.hisparse.connector import HiSparseConnector
