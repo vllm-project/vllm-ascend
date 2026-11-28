@@ -1,0 +1,4 @@
+pr: 23187
+entries:
+  - category: documentation
+    text: Added a tutorial and deployment recipe for serving Qwen3-Omni-30B-A3B-Instruct on four Ascend 910B4-1 NPUs. The guide includes an audio transcription example using the BF16 checkpoint.
