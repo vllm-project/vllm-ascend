@@ -238,6 +238,15 @@ def test_consumer_uses_internal_checkpoint_only_when_export_is_valid(
     assert _mamba_block_aligned_split(scheduler, request, num_new_tokens=33) == expected_tokens
 
 
+@pytest.mark.parametrize("alignment,expected", [(64, 400), (256, 384)])
+def test_sparse_index_kpool_delegates_internal_checkpoint_validity(alignment, expected):
+    scheduler = _scheduler(is_kv_consumer=False, is_kv_producer=True, uses_sparse_index_kpool=True)
+    scheduler.mamba_has_prefill_checkpoint_blocks = True
+    scheduler.mamba_prefill_checkpoint_alignment = alignment
+    request = _request(num_computed_tokens=0, num_prompt_tokens=400, num_tokens=400)
+    assert _mamba_block_aligned_split(scheduler, request, 400) == expected
+
+
 def test_patch_is_registered_with_upstream_signature():
     registered = scheduler_module.Scheduler._mamba_block_aligned_split
     # The producer/standalone EAGLE-backoff suppression is applied inline

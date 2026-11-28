@@ -1,0 +1,10 @@
+pr: 23291
+entries:
+  - category: feature
+    text: >-
+      Users can enable native FP32 prefill checkpoints for Kimi KDA on A5 by setting
+      `kda_internal_prefill_checkpoints` to `true` in `additional_config`, avoiding an
+      extra model forward solely to save an eligible recurrent-state checkpoint.
+      The option is disabled by default and requires a matching fla_npu build with
+      native checkpoint support.
+    hardware: [A5]

@@ -146,6 +146,8 @@ class HardwareCapability(Enum):
     INDEXER_QUANT_CACHE = auto()
     # Prepare per-token INT8 KDA projection inputs before the BFG stream wait.
     KDA_INT8_QUANT_OVERLAP = auto()
+    # AscendC chunk64 can export selected native FP32 KDA states on this stack.
+    KDA_INTERNAL_PREFILL_CHECKPOINT = auto()
     # Native sparse indexer ABI with INT8 Q/K, FP16 scales and FP32 scores.
     NATIVE_INT8_SPARSE = auto()
     # Reserve host CPUs for interrupt handling when constructing worker CPU pools.
@@ -533,6 +535,7 @@ _HARDWARE_PROFILES: Mapping[AscendDeviceType, HardwareProfile] = MappingProxyTyp
                     HardwareCapability.DYNAMIC_MX_QUANT_SCALE_ALG_ONE,
                     HardwareCapability.FLA_GDN_PREFILL,
                     HardwareCapability.FLA_GDN_PREFILL_CHUNK32,
+                    HardwareCapability.KDA_INTERNAL_PREFILL_CHECKPOINT,
                     HardwareCapability.FP8_ATTENTION,
                     HardwareCapability.INDEXER_QUANT_CACHE,
                     HardwareCapability.FUSED_ROTARY_MUL_INTERLEAVE,
