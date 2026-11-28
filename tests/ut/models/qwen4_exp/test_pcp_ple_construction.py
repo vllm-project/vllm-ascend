@@ -53,6 +53,7 @@ def test_ple_construction_and_registration(monkeypatch, dp, pcp, expected):
         self.start_layer, self.end_layer = 0, len(self.layers)
 
     monkeypatch.setattr(model, "Qwen4ExpPLELayer", RecordingPLE)
+    monkeypatch.setattr(model, "AscendPLELayer", RecordingPLE)
     monkeypatch.setattr(model, "AscendPCPPLELayer", RecordingPCPPLE)
     monkeypatch.setattr(model.AscendQwen4ExpModel.__bases__[0], "__init__", init_decoder)
     backbone = model.AscendQwen4ExpModel(vllm_config=config, prefix=prefix)

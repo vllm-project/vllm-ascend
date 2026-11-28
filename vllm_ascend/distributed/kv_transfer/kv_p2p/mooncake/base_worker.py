@@ -4,6 +4,7 @@
 
 import math
 import os
+from dataclasses import replace
 from typing import TYPE_CHECKING
 
 import torch
@@ -104,6 +105,19 @@ def _is_component_major_mla_binding(spec: KVCacheSpec, caches: tuple[torch.Tenso
     return rope.storage_offset() - nope.storage_offset() == nope_block_elems
 
 
+def _persistent_mamba_transfer_spec(spec: MambaSpec) -> MambaSpec:
+    """Publish GDN conv/checkpoint only; speculative replay is decoder-local.
+
+    Keep the runner's original three-view descriptor and backing untouched.
+    Both registration and address validation must use the same wire schema.
+    """
+    if spec.mamba_type == MambaAttentionBackendEnum.GDN_ATTN and len(spec.shapes) == 3:
+        if len(spec.dtypes) != 3 or spec.dtypes[2] != torch.float32:
+            raise ValueError("RecoverSSM replay transfer descriptor must have an FP32 third state")
+        return replace(spec, shapes=spec.shapes[:2], dtypes=spec.dtypes[:2])
+    return spec
+
+
 class MooncakeTransferAddressMixin:
     """Direction-independent local/remote address calculation."""
 
@@ -131,6 +145,7 @@ class MooncakeTransferAddressMixin:
         length_list: list[int],
     ) -> None:
         """Append a replicated Mamba state or one producer PCP/TP head shard."""
+        spec = _persistent_mamba_transfer_spec(spec)
         tp_replicated = getattr(spec, "tp_replicated", False)
         remote_tp_metadata = remote_metadata.metadata_by_pcp_rank[remote_pcp_rank].metadata_by_tp_rank[remote_tp_rank]
         local_rank = self.tp_rank * self.pcp_size + self.pcp_rank
@@ -624,6 +639,9 @@ class MooncakeBaseConnectorWorker(MooncakeTransferAddressMixin):
                 spec_index = self.layer_name_to_spec_index[layer_name]
                 spec = self.kv_cache_specs[spec_index]
                 caches = as_kv_cache_tensors(cache_or_caches)
+                if isinstance(spec, MambaSpec):
+                    wire_spec = _persistent_mamba_transfer_spec(spec)
+                    caches = caches[: len(wire_spec.shapes)]
                 shared_page_metadata = (
                     self._get_shared_page_metadata(caches)
                     if isinstance(spec, (MLAAttentionSpec, SlidingWindowMLASpec))
