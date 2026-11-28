@@ -649,6 +649,7 @@ class AscendDSAV41PCPImpl(_ReplicatedCacheImpl):
     """Update replicated caches once, then run rank-local V4.1 attention."""
 
     supports_pcp: ClassVar[bool] = True
+    supports_fused_long_kv_store = False
 
     def _prepare_inputs_and_caches(self, attn, hidden_states, metadata, metadata_by_prefix):
         if not isinstance(metadata.swa, AscendDSAV41PCPMetadata):
