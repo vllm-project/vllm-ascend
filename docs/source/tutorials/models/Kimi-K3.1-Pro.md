@@ -14,7 +14,7 @@ This guide covers the validated Atlas 800I A3 and 950DT Products platforms. A2 a
 
 Kimi K3.1 Pro is a multimodal Mixture-of-Experts (MoE) model developed by Moonshot AI as an evolution of Kimi K3. It retains the hybrid attention and Latent MoE architecture and introduces DSA sparse attention. The model supports visual understanding and a one-million-token context, combining language understanding, reasoning, and tool calling for coding, long-document processing, and multi-step agent tasks.
 
-This guide provides eight-node 4P4D basic and 1M configurations for Atlas 800I A3 and 950DT Products. Use the parallelism, cache types, and parsers specified by each platform's templates. [Section 5.3](#53-pooled-pd) provides the Atlas 800I A3 pooled reference and the 950DT Products pooled configuration.
+The basic and 1M examples use an eight-node 4P4D configuration on Atlas 800I A3. On 950DT Products, the 1P1D example uses four nodes for one Prefill instance and four more for one Decode instance. Choose the number of Prefill and Decode instances based on your workload and available hardware. For pooled deployments, see [Section 5.3](#53-pooled-pd).
 
 This guide is based on **vLLM-Ascend 0.30.0**, which introduces experimental support for Kimi K3.1 Pro for evaluation and validation with the configurations provided here. Supported scenarios, performance, and configuration interfaces may evolve in later releases.
 
@@ -31,7 +31,7 @@ Refer to the [feature guide](../../user_guide/feature_guide/index.md) for featur
 | Weight Version | Hardware Requirements | Download Links | Notes |
 |---|---|---|---|
 | Kimi K3.1 Pro target model (A3)<br>`Kimi-K3.1-Pro-w4a8` | PD separation:<br>8 Atlas 800I A3 servers, with 16 devices per node (64 GB × 16). | [ModelScope](https://www.modelscope.cn/models/Eco-Tech/Kimi-K3.1-Pro-w4a8) | Use the W4A8 quantized checkpoint for A3 with `--quantization ascend`. See [Section 5](#5-online-service-deployment) for the topology and loading options. |
-| Kimi K3.1 Pro target model (950DT Products)<br>`Kimi-K3.1-Pro-w4a8-mxfp` | PD separation:<br>8 950DT servers, with 8 devices per node. | [ModelScope](https://www.modelscope.cn/models/Eco-Tech/Kimi-K3.1-Pro-w4a8-mxfp) | Use the W4A8_MXFP quantized checkpoint for 950DT Products with `--quantization ascend`. See [Section 5](#5-online-service-deployment) for the topology and loading options. |
+| Kimi K3.1 Pro target model (950DT Products)<br>`Kimi-K3.1-Pro-w4a8-mxfp` | 1P1D example<br>4 Prefill nodes and 4 Decode nodes, with 8 devices per node. | [ModelScope](https://www.modelscope.cn/models/Eco-Tech/Kimi-K3.1-Pro-w4a8-mxfp) | Use the W4A8_MXFP quantized checkpoint for 950DT Products with `--quantization ascend`. See [Section 5](#5-online-service-deployment) for the topology and loading options. |
 
 The target checkpoint directory must contain the model configuration, tokenizer, image processor, and model weight files required by the Kimi K3.1 Pro release. DSpark is a speculative decoding method: a draft model proposes candidate tokens, which the target model then verifies. For DSpark in PD separation or pooled PD deployment, prepare a draft checkpoint compatible with the platform and target model and specify its local directory.
 
@@ -377,7 +377,7 @@ MegaMoE refers to the fused MoE computation path controlled by `enable_fused_mc2
 
 === "950DT Products"
 
-    950DT Products use eight nodes in a 4P4D topology: DP1 / PP4 / PCP8 / TP1 on Prefill, with layer partition `24,24,24,21`, and DP4 / TP8 / DCP8 on Decode. Only P0 exposes a Prefill API; P1–P3 use `--headless`, and all four Decode nodes expose APIs.
+    In the 950DT Products 1P1D example, P0–P3 form one Prefill instance using DP1 / PP4 / PCP8 / TP1 with layer partition `24,24,24,21`. P0 exposes the Prefill API and P1–P3 run with `--headless`. D0–D3 form one Decode instance using DP4 / TP8 / DCP8. Each Decode node runs one DP rank and exposes its own API.
 
     Both roles use `--max-model-len 140000` in the basic configuration. The target model uses W4A8_MXFP weights with `--quantization ascend`; the main attention and indexer K caches use FP8. Both roles enable Model Runner V2 and CCU communication (`HCCL_OP_EXPANSION_MODE=CCU_SCHED`), with `HCCL_BUFFSIZE` set to `2000/800` on Prefill/Decode.
 
@@ -734,7 +734,7 @@ The Decode launcher is located at [`vllm-ascend/examples/external_online_dp/laun
 
     **Start Decode (D0–D3)**
 
-    Deploy `launch_online_dp.py` on the D nodes and save the matching Decode template as `run_dp_template.sh` in the same directory. Run the following command from that directory to start one DP instance per node:
+    Place `launch_online_dp.py` and the Decode template `run_dp_template.sh` in the same directory on D0–D3. Run the following command on each node with its assigned rank to start all four DP ranks of the Decode instance.
 
     This guide uses the repository launcher that passes seven positional arguments. DCP is explicitly set in the Decode template: `16` for A3 and `8` for 950DT Products. Use a launcher that matches the template; do not substitute versions that pass parameters through `$8` or `AICLUSTERHUB_PCP_SIZE` / `AICLUSTERHUB_DCP_SIZE` without adapting the template.
 
@@ -1005,7 +1005,7 @@ The Decode launcher is located at [`vllm-ascend/examples/external_online_dp/laun
 
 === "950DT Products"
 
-    950DT Products 1M deployment uses the basic eight-node 4P4D topology: DP1 / PP4 / PCP8 / TP1 on Prefill and DP4 / TP8 / DCP8 on Decode. Set `--max-model-len 1048576` on both Prefill and Decode and retain the other basic settings.
+    The 950DT Products 1M example uses the same 1P1D deployment as [Section 5.1](#51-pd-deployment). P0–P3 form one PP4 Prefill instance and D0–D3 form one DP4 Decode instance. Set `--max-model-len 1048576` on both roles and keep the other basic settings.
 
     The 1M limit includes both input and output tokens. Reserve space for the generated response.
 
