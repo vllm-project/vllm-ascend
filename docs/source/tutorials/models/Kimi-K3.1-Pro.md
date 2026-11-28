@@ -137,7 +137,7 @@ MegaMoE refers to the fused MoE computation path controlled by `enable_fused_mc2
 
 ### 5.1 Basic Multi-node PD Separation Deployment {: #51-pd-deployment}
 
-In both platform examples, one Prefill instance spans nodes P0–P3 and one Decode instance spans nodes D0–D3, for a total of eight nodes. You can choose the number of Prefill and Decode instances independently to suit your workload.
+In both platform examples, one Prefill instance spans nodes P0–P3 and one Decode instance spans nodes D0–D3, for a total of eight nodes. The examples use a 1:1 ratio. Choose the number of Prefill and Decode instances independently to match your workload.
 
 #### 5.1.1 Create the Engine Templates {: #511-create-the-engine-templates}
 
@@ -791,7 +791,7 @@ The Decode launcher is located at [`vllm-ascend/examples/external_online_dp/laun
 
 ### 5.2 Long-Context and 1M PD Separation Deployment {: #52-long-context}
 
-The 1M examples use the same layout as [Section 5.1](#51-pd-deployment), with one four-node Prefill instance and one four-node Decode instance.
+The 1M examples use the same layout as [Section 5.1](#51-pd-deployment), with one four-node Prefill instance and one four-node Decode instance. The examples use a 1:1 ratio. Choose the number of Prefill and Decode instances independently to match your workload.
 
 #### 5.2.1 Create the Engine Templates {: #521-create-the-engine-templates}
 
@@ -1237,7 +1237,7 @@ The 1M examples use the same layout as [Section 5.1](#51-pd-deployment), with on
 
 ### 5.3 Pooled PD Separation Deployment {: #53-pooled-pd}
 
-Both pooled examples use one Prefill instance on P0–P3 and one Decode instance on D0–D3, with four nodes per instance.
+Both pooled examples use one Prefill instance on P0–P3 and one Decode instance on D0–D3, with four nodes per instance. The examples use a 1:1 ratio. Choose the number of Prefill and Decode instances independently to match your workload.
 
 The pooling flow differs by platform: A3 uses a separate MetaService, eight standalone MemCache providers, and zero-capacity engine clients. 950DT Products uses the same MetaService startup procedure without standalone providers. See [Section 5.3.2](#532-prepare-the-memcache-configuration-files) for configuration.
 
