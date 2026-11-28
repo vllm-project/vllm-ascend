@@ -1,0 +1,4 @@
+pr: 21518
+entries:
+  - category: performance
+    text: Fixed the DFlash/DSpark `prepare_dflash_inputs` tile width to a constant, eliminating multi-second host-side Triton recompilation stalls that previously triggered on the first encounter of each tile-width bucket during serving (see #20334); no steady-state performance regression was observed in service-level A/B testing.
