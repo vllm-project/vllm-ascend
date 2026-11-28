@@ -1,0 +1,8 @@
+pr: 22789
+entries:
+  - category: performance
+    text: >-
+      A5 C4 sparse lightning-indexer inference now reuses batch metadata across compatible layers,
+      reducing repeated setup during each forward. No new configuration is required.
+    model: GLM-5.3
+    hardware: [A5]

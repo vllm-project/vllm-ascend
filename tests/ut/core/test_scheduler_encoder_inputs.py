@@ -52,8 +52,6 @@ def _make_scheduler(scheduler_cls: type[Scheduler]) -> Scheduler:
     config.cache_config.enable_prefix_caching = False
     config.scheduler_config.async_scheduling = issubclass(scheduler_cls, AsyncScheduler)
     scheduler = create_dyntra_lb_scheduler(config, scheduler_cls=scheduler_cls)
-    # Releasing CPU payloads is an MRV2 contract; the fixture defaults to V1.
-    scheduler.use_v2_model_runner = True
     # Supply the encoder budget directly: these CPU tests exercise the real
     # scheduler without loading a multimodal model or running its processor.
     scheduler.encoder_cache_manager = EncoderCacheManager(cache_size=ENCODER_BUDGET)

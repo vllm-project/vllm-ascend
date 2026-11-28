@@ -164,7 +164,6 @@ def test_qwen_selector_enables_shared_lifecycle_only_after_validation(connector,
     config.speculative_config = SimpleNamespace(method=method, num_speculative_tokens=4)
     if connector is not None:
         config.kv_transfer_config = SimpleNamespace(kv_connector=connector, kv_role="kv_consumer")
-    config.use_v2_model_runner = True
     config.cache_config.mamba_ssm_cache_dtype = ssm_dtype
     config.cache_config.mamba_cache_dtype = "auto"
     config.parallel_config.tensor_parallel_size = 4

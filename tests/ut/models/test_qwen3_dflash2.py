@@ -31,7 +31,6 @@ def test_grouped_conv_keeps_nonfinite_taps_inside_each_request():
 @pytest.fixture
 def build_mla_layer(monkeypatch):
     vllm_config = SimpleNamespace(
-        use_v2_model_runner=True,
         model_config=SimpleNamespace(dtype=torch.bfloat16, hf_text_config=SimpleNamespace(num_hidden_layers=2)),
         compilation_config=SimpleNamespace(static_forward_context={}),
         speculative_config=SimpleNamespace(num_speculative_tokens=7),

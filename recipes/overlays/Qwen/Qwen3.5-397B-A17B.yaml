@@ -49,6 +49,66 @@ variants:
     hardware_overrides:
       ascend_950dt:
         docker_image: quay.io/ascend/vllm-ascend:v0.23.0-950DT
+  ascend_w4a8_mtp:
+    model_id: Eco-Tech/Qwen3.5-397B-A17B-w4a8-mtp
+    precision: int4
+    label: W4A8-MTP (Ascend A2 PD)
+    # W4A8 weights ~397B x 0.5 bytes x 1.2; one pool (8 x 64 GB) fits it, so
+    # each 1P1D pool sizes to one Atlas 800I A2 node.
+    vram_minimum_gb: 238
+    description: >-
+      ModelSlim W4A8 checkpoint with the MTP head, served as 1P1D prefill/decode
+      disaggregation over two Atlas 800I A2 nodes (8 x Ascend 910B, 64 GB each),
+      DP1 x TP8 per pool, KV over MooncakeConnectorV1. Requires --quantization ascend.
+    supported_hardware:
+      - ascend_910b
+    min_vllm_version: '0.32.0rc1'
+    # MTP is fixed in this variant's extra_args (the core qwen3_5_mtp mode does
+    # not allowlist this new variant), so the runtime spec_decoding toggle is not
+    # offered here. Every other core feature stays selectable.
+    supported_features:
+      - tool_calling
+      - reasoning
+      - text_only
+      - encoder_parallel
+      - long_context
+    extra_args:
+      - '--quantization'
+      - ascend
+      - '--served-model-name'
+      - qwen3.5
+      - '--max-model-len'
+      - '133120'
+      - '--allowed-local-media-path'
+      - '/'
+      - '--gpu-memory-utilization'
+      - '0.90'
+      - '--enable-prefix-caching'
+      - '--async-scheduling'
+      - '--mm-processor-cache-gb'
+      - '0'
+      - '--distributed-executor-backend'
+      - mp
+      - '--seed'
+      - '1024'
+      # The core qwen3_5_mtp mode allowlists only the w8a8/w4a4 variants, so this
+      # new variant carries MTP in extra_args (identical on both pools).
+      - '--speculative-config'
+      - '{"method":"qwen3_5_mtp","num_speculative_tokens":3}'
+    extra_env:
+      VLLM_EXECUTE_MODEL_TIMEOUT_SECONDS: '30000'
+      HCCL_BUFFSIZE: '1024'
+      HCCL_OP_EXPANSION_MODE: AIV
+      VLLM_USE_V2_MODEL_RUNNER: '0'
+      VLLM_USE_FASTOKENS: '1'
+    hardware_overrides:
+      ascend_910b:
+        docker_image: quay.io/ascend/vllm-ascend:v0.32.0rc1
+        # 397B PD runs need more than the 16g /dev/shm default.
+        docker_shm_size: "64g"
+        docker_serve_command: vllm serve
+        install:
+          pip: false
   ascend_w4a4_mxfp4:
     model_id: Eco-Tech/Qwen3.5-397B-A17B-w4a4-mxfp4
     precision: mxfp4
@@ -100,6 +160,27 @@ variants:
 meta:
   hardware:
     ascend_950dt: verified
+    ascend_910b: verified
+# The 910B lane is PD-disaggregation only (1P1D, w4a8-mtp). Disable the other
+# serving strategies on the exact 910B profile only — the npu-brand key would
+# also hit the existing 950DT lanes, which must stay unchanged.
+strategy_hardware:
+  single_node_tp:
+    ascend_910b: unsupported
+  single_node_tep:
+    ascend_910b: unsupported
+  single_node_dep:
+    ascend_910b: unsupported
+  multi_node_tp:
+    ascend_910b: unsupported
+  multi_node_tp_pp:
+    ascend_910b: unsupported
+  multi_node_dep:
+    ascend_910b: unsupported
+  multi_node_tep:
+    ascend_910b: unsupported
+  pd_cluster:
+    ascend_910b: supported
 strategy_overrides:
   single_node_dep:
     hardware_overrides:
@@ -111,3 +192,150 @@ strategy_overrides:
           - '8'
           - '--data-parallel-size'
           - '1'
+presets:
+  ascend_a2_w4a8_mtp_pd:
+    label: A2 W4A8-MTP PD Separation (1P1D)
+    hardware: ascend_910b
+    strategy: pd_cluster
+    variants:
+      - ascend_w4a8_mtp
+    workload: Prefill/decode disaggregation, 133120 context, MTP
+    default: true
+    description: >-
+      One Atlas 800I A2 node per pool (8 x Ascend 910B, 64 GB each), 1P1D over
+      MooncakeConnectorV1: prefill DP1 x TP8 produces KV on :55220, decode
+      DP1 x TP8 consumes it on :56010, and the Ascend proxy in front lists one
+      endpoint per pool. Prefill runs eager, decode captures FULL_DECODE_ONLY.
+    source:
+      label: vLLM Ascend Qwen3.5-397B-A17B tutorial (5.6 A2 PD)
+      href: https://docs.vllm.ai/projects/ascend/en/latest/tutorials/models/Qwen3.5-397B-A17B.html
+      revision: '2026-11-24'
+    select:
+      pd_router: ascend
+      pd_connector: mooncake_ascend
+      frontend: python
+      features:
+        # Both pools serve OpenAI tool calls and Qwen3 thinking; the parsers are
+        # emitted identically on the prefill and decode commands.
+        tool_calling: true
+        reasoning: true
+    roles:
+      prefill:
+        nodes: 1
+        parallelism: tep
+        # `tep` emits --tensor-parallel-size 8 + --enable-expert-parallel (DP1),
+        # which is the doc's self-contained prefill mode: it sets no DP address
+        # or RPC port.
+        args:
+          - '--host'
+          - $PREFILL_NODE_1
+          - '--data-parallel-size'
+          - '1'
+          - '--data-parallel-size-local'
+          - '1'
+          - '--max-num-batched-tokens'
+          - '16384'
+          - '--max-num-seqs'
+          - '64'
+          - '--enforce-eager'
+          - '--additional-config'
+          - '{"enable_flashcomm1":true,"ascend_compilation_config":{"enable_npugraph_ex":false,"enable_static_kernel":false},"weight_nz_mode":1,"enable_shared_expert_dp":true,"scheduler_config":{"recompute_scheduler_enable":false}}'
+        env:
+          IP_ADDRESS: $PREFILL_NODE_1
+          NETWORK_CARD_NAME: $IFACE_NAME
+          HCCL_IF_IP: $PREFILL_NODE_1
+          HCCL_SOCKET_IFNAME: $IFACE_NAME
+          GLOO_SOCKET_IFNAME: $IFACE_NAME
+        json_args:
+          --kv-transfer-config:
+            kv_connector: MooncakeConnectorV1
+            kv_buffer_device: npu
+            kv_role: kv_producer
+            kv_port: '55220'
+            engine_id: '0'
+            kv_connector_extra_config:
+              prefill: { dp_size: 1, tp_size: 8, pp_size: null }
+              decode: { dp_size: 1, tp_size: 8, pp_size: null }
+      decode:
+        nodes: 1
+        parallelism: tep
+        args:
+          - '--host'
+          - $DECODE_NODE_1
+          - '--data-parallel-size'
+          - '1'
+          - '--max-num-batched-tokens'
+          - '300'
+          - '--max-num-seqs'
+          - '200'
+          - '--compilation-config'
+          - '{"cudagraph_mode":"FULL_DECODE_ONLY"}'
+          - '--additional-config'
+          - '{"ascend_compilation_config":{"enable_npugraph_ex":true,"enable_static_kernel":false},"weight_nz_mode":1,"enable_shared_expert_dp":false,"scheduler_config":{"recompute_scheduler_enable":true}}'
+        env:
+          VLLM_MEMORY_PROFILER_ESTIMATE_CUDAGRAPHS: '0'
+          IP_ADDRESS: $DECODE_NODE_1
+          NETWORK_CARD_NAME: $IFACE_NAME
+          HCCL_IF_IP: $DECODE_NODE_1
+          HCCL_SOCKET_IFNAME: $IFACE_NAME
+          GLOO_SOCKET_IFNAME: $IFACE_NAME
+        json_args:
+          --kv-transfer-config:
+            kv_connector: MooncakeConnectorV1
+            kv_buffer_device: npu
+            kv_role: kv_consumer
+            kv_port: '56010'
+            engine_id: '2'
+            kv_connector_extra_config:
+              prefill: { dp_size: 1, tp_size: 8, pp_size: null }
+              decode: { dp_size: 1, tp_size: 8, pp_size: null }
+guide_sections:
+  ascend: |
+    ### Ascend deployment (A2 PD, W4A8-MTP, 1P1D)
+
+    This lane serves `Eco-Tech/Qwen3.5-397B-A17B-w4a8-mtp` as 1P1D prefill/decode
+    disaggregation on **two Atlas 800I A2 nodes** (8 x Ascend 910B, 64 GB each),
+    from `quay.io/ascend/vllm-ascend:v0.32.0rc1`. Each pool is one DP1 x TP8
+    expert-parallel engine; KV moves over `MooncakeConnectorV1` (prefill produces
+    on :55220, decode consumes on :56010), and a pull proxy in front forwards
+    requests between them. MTP (3 speculative tokens) is on for both pools.
+
+    The rendered prefill/decode commands carry placeholders that must be
+    substituted with each host's own values (read them from `ifconfig`):
+
+    - `$PREFILL_NODE_1` — the prefill node's service IP. It is the engine's
+      `--host`, its `IP_ADDRESS` / `HCCL_IF_IP`, and the proxy's
+      `--prefiller-hosts`.
+    - `$DECODE_NODE_1` — the decode node's own service IP: its engine `--host`,
+      `IP_ADDRESS` / `HCCL_IF_IP`, and the proxy's `--decoder-hosts`.
+    - `$IFACE_NAME` — the business NIC name on each node (`NETWORK_CARD_NAME`,
+      `HCCL_SOCKET_IFNAME`, `GLOO_SOCKET_IFNAME`). Pick the NIC that owns the IP.
+
+    `ASCEND_RT_VISIBLE_DEVICES` is filled by the recipe as `0..7`; change it to
+    run each engine on a device subset. Prepare the Mooncake communication
+    environment on both nodes and `unset ftp_proxy https_proxy http_proxy`
+    before launch.
+
+    **Prefill** uses the self-contained DP1/TP8 mode and runs `--enforce-eager`
+    without `--compilation-config`. **Decode** keeps the same DP1/TP8 engine
+    (no DP rank/address/RPC-port flags either) and captures
+    `{"cudagraph_mode":"FULL_DECODE_ONLY"}`. Both pools pass
+    `--enable-auto-tool-choice --tool-call-parser qwen3_coder --reasoning-parser qwen3`.
+
+    Start both pools, then run the pull proxy
+    (`examples/disaggregated_prefill_v1/load_balance_proxy_server_example.py`)
+    on the prefill host, pointing `--prefiller-ports` / `--decoder-ports` at the
+    pools' HTTP ports:
+
+    ```shell
+    python3 load_balance_proxy_server_example.py \
+      --prefiller-hosts "$PREFILL_NODE_1" --prefiller-ports 8001 \
+      --decoder-hosts "$DECODE_NODE_1" --decoder-ports 8002 \
+      --host "$PREFILL_NODE_1" --port 8000
+    ```
+
+    Send client requests to the proxy (`http://<PREFILL_NODE_1>:8000`), never to
+    either pool directly. The checkpoint is pulled from Hugging Face, so
+    `VLLM_USE_MODELSCOPE` is left off; stage the weights under `~/.cache/huggingface`
+    if you pull inside the container.
+
