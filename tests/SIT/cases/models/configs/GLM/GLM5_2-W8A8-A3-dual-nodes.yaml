@@ -96,3 +96,9 @@ benchmarks:
     request_rate: 0
     baseline: 55.988
     threshold: 0.97
+test_content:
+  - spec_decode_acceptance
+acceptance_rate:
+  benchmark: acc_aime2025
+  baseline: [0.92, 0.82, 0.71]
+  tolerance: 0.05
