@@ -1579,7 +1579,7 @@ def test_cann_index_score_forwards_metadata_operands() -> None:
 
     mock_index_score = MagicMock(return_value=expected)
     with patch.dict("sys.modules", {"cann_ops_transformer.ops": SimpleNamespace(msa_index_score=mock_index_score)}):
-        actual = _minimax_m3_index_score_topk(
+        actual, counts = _minimax_m3_index_score_topk(
             idx_q,
             index_key_cache,
             block_table,
@@ -1593,6 +1593,7 @@ def test_cann_index_score_forwards_metadata_operands() -> None:
         )
 
     assert actual is expected
+    assert counts.tolist() == [[4], [4]]
     mock_index_score.assert_called_once()
     args, kwargs = mock_index_score.call_args
     assert args[0] is idx_q
@@ -1942,9 +1943,10 @@ def test_index_score_requests_fused_topk_indices(fused_index_ops: MagicMock) -> 
     indices = torch.zeros(2, 2, 3, dtype=torch.int32)
     fused_index_ops.return_value = indices
 
-    actual = _minimax_m3_index_score_topk(**operands, topk=3, local_blocks=1)
+    actual, counts = _minimax_m3_index_score_topk(**operands, topk=3, local_blocks=1)
 
     assert actual is indices
+    assert counts.tolist() == [[3, 3], [3, 3]]
     kwargs = fused_index_ops.call_args.kwargs
     assert kwargs["return_choice"] == 1
     assert kwargs["topk"] == 3
@@ -1954,6 +1956,47 @@ def test_index_score_requests_fused_topk_indices(fused_index_ops: MagicMock) -> 
     # to the separate path writing 1e30 / 1e29.
     assert kwargs["init_blocks"] == 0
     assert kwargs["local_blocks"] == 1
+
+
+def test_index_score_uses_operator_sparse_count(fused_index_ops: MagicMock) -> None:
+    operands = _index_score_call_operands()
+    indices = torch.full((2, 2, 3), -1, dtype=torch.int32)
+    sparse_count = torch.tensor([[1, 2], [0, 3]], dtype=torch.int32)
+    fused_index_ops.return_value = (indices, sparse_count)
+
+    actual, counts = _minimax_m3_index_score_topk(**operands, topk=3)
+
+    assert actual is indices
+    assert counts is sparse_count
+
+
+def test_index_score_skips_derivation_when_counts_unused(fused_index_ops: MagicMock) -> None:
+    operands = _index_score_call_operands()
+    indices = torch.zeros(2, 2, 3, dtype=torch.int32)
+    fused_index_ops.return_value = indices
+    derive = MagicMock()
+
+    with patch.object(msa_m3_npu_module, "_select_num_idx_from_topk", derive):
+        actual, counts = _minimax_m3_index_score_topk(**operands, topk=3, need_counts=False)
+
+    assert actual is indices
+    assert counts is None
+    derive.assert_not_called()
+
+
+def test_index_score_keeps_operator_count_when_derivation_skipped(fused_index_ops: MagicMock) -> None:
+    operands = _index_score_call_operands()
+    indices = torch.zeros(2, 2, 3, dtype=torch.int32)
+    sparse_count = torch.tensor([[1, 2], [0, 3]], dtype=torch.int32)
+    fused_index_ops.return_value = (indices, sparse_count)
+    derive = MagicMock()
+
+    with patch.object(msa_m3_npu_module, "_select_num_idx_from_topk", derive):
+        actual, counts = _minimax_m3_index_score_topk(**operands, topk=3, need_counts=False)
+
+    assert actual is indices
+    assert counts is sparse_count
+    derive.assert_not_called()
 
 
 def test_index_score_keeps_forcing_off_on_the_score_path(fused_index_ops: MagicMock) -> None:
@@ -2147,7 +2190,7 @@ def test_fused_index_topk_passes_topk_through(fused_index_ops: MagicMock) -> Non
     operands = _fused_index_topk_operands(max_blocks=4)
     fused_index_ops.return_value = torch.zeros(2, 2, 8, dtype=torch.int32)
 
-    actual = _minimax_m3_index_score_topk(**operands, topk=8)
+    actual, _ = _minimax_m3_index_score_topk(**operands, topk=8)
 
     assert fused_index_ops.call_args.kwargs["topk"] == 8
     assert tuple(actual.shape) == (2, 2, 8)

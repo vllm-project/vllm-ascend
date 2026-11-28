@@ -121,15 +121,16 @@ class BaseDeviceAdaptor:
         cp_interleave: int,
         qli_metadata: torch.Tensor,
         topk: int = 2048,
+        initialize_outputs: bool = True,
     ) -> tuple[torch.Tensor, torch.Tensor]:
-        """Select owner-local causal candidates with the A3 QLI DCP kernel."""
+        """Return raw A3 candidates for packing with per-row local visible lengths."""
         if (
             not get_current_hardware_profile().supports(HardwareCapability.NATIVE_INT8_SPARSE)
             or q_li.dtype != torch.int8
             or kv_cache.dtype != torch.int8
         ):
             raise NotImplementedError("DCP QLI requires A3 INT8 query and key caches")
-        indices, scores = torch.ops._C_ascend.npu_quant_lightning_indexer_v2(
+        return torch.ops._C_ascend.npu_quant_lightning_indexer_v2(
             q_li.contiguous(),
             kv_cache,
             weights.to(torch.float16).contiguous(),
@@ -152,10 +153,8 @@ class BaseDeviceAdaptor:
             cp_kv_cache_interleave_size=cp_interleave,
             causal_seqlens_kv_global=global_seq_lens,
             return_value=1,
+            initialize_outputs=initialize_outputs,
         )
-        from vllm_ascend.ops.triton.sharded_indexer import normalize_dcp_candidates
-
-        return normalize_dcp_candidates(indices, scores, query_start_loc)
 
     @staticmethod
     def indexer_select_local_candidates(
@@ -1165,7 +1164,11 @@ class A5DeviceAdaptor(BaseDeviceAdaptor):
         # indexer imports DeviceOperator; defer the reverse import until runtime.
         from vllm_ascend.attention.indexer import QLIMetadataConfig
 
-        if getattr(cache_spec, "cache_sparse_li_c4", False) or not getattr(cache_spec, "cache_sparse_li_c8", False):
+        if getattr(cache_spec, "cache_sparse_li_c4", False):
+            return QLIMetadataConfig(
+                hf_config.index_n_heads, hf_config.index_head_dim, 5, topk=getattr(hf_config, "index_topk", 2048)
+            )
+        if not getattr(cache_spec, "cache_sparse_li_c8", False):
             return None
         if cache_spec.dtype != torch.float8_e4m3fn:
             return None
@@ -1808,6 +1811,7 @@ class A5DeviceAdaptor(BaseDeviceAdaptor):
         cp_interleave: int,
         qli_metadata: torch.Tensor,
         topk: int = 2048,
+        initialize_outputs: bool = True,
     ) -> tuple[torch.Tensor, torch.Tensor]:
         """A5 computes causal prefixes internally and returns local IDs/BF16 scores."""
         return torch.ops._C_ascend.npu_quant_lightning_indexer_v2(
@@ -1833,6 +1837,9 @@ class A5DeviceAdaptor(BaseDeviceAdaptor):
             cp_rank=cp_rank,
             cp_kv_cache_interleave_size=cp_interleave,
             causal_seqlens_kv_global=global_seq_lens,
+            # Keep A5's existing output initialization until its write coverage
+            # is independently established.
+            initialize_outputs=True,
         )
 
     @staticmethod
@@ -1908,33 +1915,15 @@ class A5DeviceAdaptor(BaseDeviceAdaptor):
             # quant_mode=5 requires weights to be float32.
             weights_c4 = weights.to(torch.float32)
 
-            # TND layout requires cu_seqlens_q (b+1,) cumulative.
-            # actual_seq_lengths_query is cum_query_lens = query_start_loc[1:] (b,).
-            # Reconstruct full cu_seqlens_q by prepending 0.
-            cu_seqlens_q = F.pad(actual_seq_lengths_query, (1, 0), value=0)
-            seqused_k = actual_seq_lengths_key
+            from vllm_ascend.attention.indexer import QLIMetadataConfig, get_qli_metadata
 
-            num_heads_q = q_li_shape_ori[1]
-            head_dim = q_li_shape_ori[-1]
-            batch_size = seqused_k.shape[0]
-
-            quant_li_metadata_op, quant_li_op = A5DeviceAdaptor._load_cann_quant_lightning_indexer_ops()
-
-            metadata = quant_li_metadata_op(
-                num_heads_q=num_heads_q,
-                num_heads_k=1,
-                head_dim=head_dim,
-                topk=topk,
-                quant_mode=5,
-                cu_seqlens_q=cu_seqlens_q,
-                seqused_k=seqused_k,
-                batch_size=batch_size,
-                max_seqlen_q=-1,
-                max_seqlen_k=-1,
-                layout_q="TND",
-                layout_k="PA_BBND",
-                mask_mode=3,
-                cmp_ratio=1,
+            metadata_op, quant_li_op = A5DeviceAdaptor._load_cann_quant_lightning_indexer_ops()
+            inputs = get_qli_metadata(
+                getattr(attn_metadata, "qli_inputs", None),
+                QLIMetadataConfig(q_li_shape_ori[1], q_li_shape_ori[-1], 5, topk=topk),
+                actual_seq_lengths_query,
+                actual_seq_lengths_key,
+                metadata_op,
             )
 
             # FP4 (float4_e2m1fn_x2) packs 2 values per byte: npu_dynamic_mx_quant
@@ -1947,12 +1936,12 @@ class A5DeviceAdaptor(BaseDeviceAdaptor):
                 weights_c4,
                 q_li_scale,
                 key_dequant_scale,
-                topk=topk,
+                topk=inputs.config.topk,
                 quant_mode=5,
-                cu_seqlens_q=cu_seqlens_q,
-                seqused_k=seqused_k,
+                cu_seqlens_q=inputs.query_start_loc,
+                seqused_k=inputs.seq_lens,
                 block_table=attn_metadata.block_table,
-                metadata=metadata,
+                metadata=inputs.metadata,
                 max_seqlen_q=-1,
                 layout_q="TND",
                 layout_k="PA_BBND",

@@ -1,0 +1,275 @@
+# yaml-language-server: $schema=https://recipes.vllm.ai/recipe.schema.json
+meta:
+  title: "Qwen3-Coder-30B-A3B-Instruct (Ascend)"
+  slug: "qwen3-coder-30b-a3b-instruct"
+  provider: "Qwen"
+  description: "Agentic coding Mixture-of-Experts model (30.5B total / 3.3B active) served with vLLM Ascend on Atlas 800I A3, with validated W8A8 presets for high throughput, low latency, and 128K long context."
+  date_added: "2026-11-19"
+  date_updated: "2026-11-26"
+  tasks:
+    - text
+  performance_headline: "Atlas 800I A3 W8A8: 1219 tok/s output in the TP4 low-latency preset, 21.35 ms TPOT"
+  default_hardware: ascend_910c
+  hardware:
+    ascend_910c: verified
+
+model:
+  model_id: "Qwen/Qwen3-Coder-30B-A3B-Instruct"
+  min_vllm_version: "0.30.0"
+  install:
+    docker:
+      command: "docker pull quay.io/ascend/vllm-ascend:v0.30.0-a3-openeuler"
+      note: "Official Ascend all-in-one image. Install the host driver and firmware separately."
+    pip: false
+  architecture: moe
+  parameter_count: "30.5B"
+  active_parameters: "3.3B"
+  context_length: 262144
+  base_args:
+    - "--trust-remote-code"
+  base_env:
+    HCCL_OP_EXPANSION_MODE: "AIV"
+    HCCL_BUFFSIZE: "1024"
+    OMP_PROC_BIND: "false"
+    OMP_NUM_THREADS: "1"
+    PYTORCH_NPU_ALLOC_CONF: "expandable_segments:True"
+    VLLM_USE_MODELSCOPE: "True"
+
+variants:
+  default:
+    model_id: "Eco-Tech/Qwen3-Coder-30B-A3B-Instruct-w8a8"
+    precision: int8
+    label: "W8A8 (Ascend A3)"
+    vram_minimum_gb: 37
+    supported_hardware: [ascend_910c]
+    hardware_overrides:
+      ascend_910c:
+        docker_image: "quay.io/ascend/vllm-ascend:v0.30.0-a3-openeuler"
+        docker_serve_command: "vllm serve"
+    extra_args:
+      - "--quantization"
+      - "ascend"
+    description: "W8A8 checkpoint published by Eco-Tech on ModelScope; served with the Ascend quantization method."
+  bf16:
+    precision: bf16
+    vram_minimum_gb: 74
+    supported_hardware: [ascend_910c]
+    hardware_overrides:
+      ascend_910c:
+        docker_image: "quay.io/ascend/vllm-ascend:v0.30.0-a3-openeuler"
+        docker_serve_command: "vllm serve"
+    extra_args:
+      - "--max-model-len"
+      - "37364"
+    description: "Official BF16 checkpoint; no quantization flag is added. A conservative 37364-token limit is set because this fallback path is not benchmarked."
+
+compatible_strategies:
+  - single_node_tp
+
+hardware_overrides: {}
+
+strategy_overrides:
+  single_node_tp:
+    tp: 4
+
+features:
+  spec_decoding:
+    label: "Eagle3 Spec Decoding"
+    description: "Optional Eagle3 speculative decoding; replace your_eagle3_model_path with the downloaded draft model path"
+    args: ["--speculative-config", '{"method": "eagle3", "model": "your_eagle3_model_path", "num_speculative_tokens": 3}']
+  tool_calling:
+    description: "Qwen3-Coder tool-call parser with automatic tool choice"
+    args:
+      - "--enable-auto-tool-choice"
+      - "--tool-call-parser"
+      - "qwen3_coder"
+
+opt_in_features:
+  - spec_decoding
+
+hardware_opt_in_features:
+  ascend_910c:
+    - tool_calling
+
+dependencies:
+  - note: "Optional Eagle3 draft model for speculative decoding (replace your_eagle3_model_path)"
+    command: "pip install modelscope && modelscope download --model AngelSlim/Qwen3-a3B_eagle3"
+    optional: true
+
+presets:
+  a3_low_latency:
+    label: "Low Latency (TP4)"
+    hardware: ascend_910c
+    strategy: single_node_tp
+    variants: [default]
+    workload: "2048 input / 2048 output tokens, concurrency 32"
+    default: true
+    description: "TP4 with expert parallelism and FlashComm1; highest measured output rate."
+    tp: 4
+    args:
+      - "--max-num-seqs"
+      - "100"
+      - "--max-model-len"
+      - "37364"
+      - "--max-num-batched-tokens"
+      - "16384"
+      - "--enable-expert-parallel"
+      - "--distributed-executor-backend"
+      - "mp"
+      - "--no-enable-prefix-caching"
+      - "--async-scheduling"
+      - "--compilation-config"
+      - '{"cudagraph_mode": "FULL_DECODE_ONLY"}'
+      - "--additional-config"
+      - '{"enable_flashcomm1": true, "weight_nz_mode": 2}'
+      - "--gpu-memory-utilization"
+      - "0.95"
+    runbook: |
+      Measured on one Atlas 800I A3 with `quay.io/ascend/vllm-ascend:v0.30.0-a3-openeuler`
+      (4 of 16 chips, TP4) and the W8A8 checkpoint.
+
+      - 100/100 requests completed at concurrency 32.
+      - Output throughput **1219.29 tok/s**.
+      - Mean TTFT **1007.98 ms**, mean TPOT **21.35 ms**.
+
+  a3_high_throughput:
+    label: "High Throughput (TP1)"
+    hardware: ascend_910c
+    strategy: single_node_tp
+    variants: [default]
+    workload: "2048 input / 2048 output tokens, concurrency 32"
+    description: "Single-chip deployment without expert parallelism; maximizes concurrent request processing."
+    tp: 1
+    args:
+      - "--max-num-seqs"
+      - "100"
+      - "--max-model-len"
+      - "37364"
+      - "--max-num-batched-tokens"
+      - "16384"
+      - "--distributed-executor-backend"
+      - "mp"
+      - "--no-enable-prefix-caching"
+      - "--async-scheduling"
+      - "--compilation-config"
+      - '{"cudagraph_mode": "FULL_DECODE_ONLY"}'
+      - "--additional-config"
+      - '{"weight_nz_mode": 2}'
+      - "--gpu-memory-utilization"
+      - "0.95"
+    runbook: |
+      Measured on one Atlas 800I A3 with `quay.io/ascend/vllm-ascend:v0.30.0-a3-openeuler`
+      (1 of 16 chips, TP1) and the W8A8 checkpoint.
+
+      - 100/100 requests completed at concurrency 32.
+      - Output throughput **756.42 tok/s**.
+      - Mean TTFT **1205.82 ms**, mean TPOT **36.56 ms**.
+
+  a3_long_context:
+    label: "Long Context (TP4, 128K)"
+    hardware: ascend_910c
+    strategy: single_node_tp
+    variants: [default]
+    workload: "8192 input / 512 output tokens, concurrency 4"
+    description: "TP4 with a 131072-token limit and a smaller sequence budget for KV cache."
+    tp: 4
+    args:
+      - "--max-num-seqs"
+      - "14"
+      - "--max-model-len"
+      - "131072"
+      - "--max-num-batched-tokens"
+      - "16384"
+      - "--enable-expert-parallel"
+      - "--distributed-executor-backend"
+      - "mp"
+      - "--no-enable-prefix-caching"
+      - "--async-scheduling"
+      - "--compilation-config"
+      - '{"cudagraph_mode": "FULL_DECODE_ONLY"}'
+      - "--additional-config"
+      - '{"enable_flashcomm1": true, "weight_nz_mode": 2}'
+      - "--gpu-memory-utilization"
+      - "0.95"
+    runbook: |
+      Measured on one Atlas 800I A3 with `quay.io/ascend/vllm-ascend:v0.30.0-a3-openeuler`
+      (4 of 16 chips, TP4) and the W8A8 checkpoint.
+
+      - 20/20 requests completed at concurrency 4.
+      - Output throughput **221.63 tok/s**.
+      - Mean TTFT **735.66 ms**, mean TPOT **16.64 ms**.
+      - A separate 60025-token prompt returned the correct answer in 3.58 s.
+
+      The checkpoint supports 262144 positions natively, so 131072 needs no RoPE scaling.
+
+guide: |
+  ## Overview
+
+  Qwen3-Coder-30B-A3B-Instruct is a Mixture-of-Experts coding model with 30.5B total
+  parameters and 3.3B activated per token. It targets agentic coding, repository-level
+  code generation, and tool calling, and supports a native context length of 262144
+  tokens.
+
+  ## Validation scope and support status
+
+  The main vLLM Ascend tutorial marks this model discontinued since v0.30.0 and points at
+  the v0.23.0 documentation. This recipe migrates that tutorial content to the recipes
+  format and re-validates it end to end on the v0.30.0 A3 image. All results below were
+  collected on one Atlas 800I A3 node with
+  `quay.io/ascend/vllm-ascend:v0.30.0-a3-openeuler` and the W8A8 checkpoint published by
+  Eco-Tech. The node exposes 16 chips; the presets use one chip (TP1) or four chips (TP4).
+
+  ## Validated presets
+
+  | Preset | Chips | Workload | Requests | Output tok/s | Mean TTFT | Mean TPOT |
+  | --- | --- | --- | --- | --- | --- | --- |
+  | Low Latency (TP4) | 4 | 2048 in / 2048 out, concurrency 32 | 100/100 | 1219.29 | 1007.98 ms | 21.35 ms |
+  | High Throughput (TP1) | 1 | 2048 in / 2048 out, concurrency 32 | 100/100 | 756.42 | 1205.82 ms | 36.56 ms |
+  | Long Context (TP4) | 4 | 8192 in / 512 out, concurrency 4 | 20/20 | 221.63 | 735.66 ms | 16.64 ms |
+
+  The long-context preset also served a 60025-token prompt, which returned the expected
+  answer in 3.58 s. These numbers are reproducibility measurements on the stated image,
+  not an official performance baseline.
+
+  ## Accuracy
+
+  EvalScope 1.15.0, 100 GSM8K samples, W8A8, TP1 service:
+
+  | Dataset | Metric | Score |
+  | --- | --- | --- |
+  | GSM8K | accuracy | 98.00% |
+
+  The upstream tutorial reports 90.14% with AISBench; the difference is consistent with
+  sampling variance on a 100-question subset.
+
+  ## Weights
+
+  The default variant uses the pre-quantized
+  [Eco-Tech/Qwen3-Coder-30B-A3B-Instruct-w8a8](https://www.modelscope.cn/models/Eco-Tech/Qwen3-Coder-30B-A3B-Instruct-w8a8)
+  checkpoint. The BF16 variant uses the canonical Qwen checkpoint published on
+  [ModelScope](https://www.modelscope.cn/models/Qwen/Qwen3-Coder-30B-A3B-Instruct) and
+  [Hugging Face](https://huggingface.co/Qwen/Qwen3-Coder-30B-A3B-Instruct).
+
+  The optional Eagle3 draft model is not part of the default weights. Download it with
+  `modelscope download --model AngelSlim/Qwen3-a3B_eagle3` and enable the opt-in
+  `spec_decoding` feature; the measured preset numbers above remain the non-Eagle3 baseline.
+
+  Tool calling is exposed as an opt-in component using the `qwen3_coder` parser and is
+  not enabled in the benchmark presets.
+
+  ## Limitations
+
+  - The optional Eagle3 draft model from the tutorial is exposed as an opt-in `spec_decoding` feature. It was functionally validated on Atlas 800I A3 at TP1 (3/3 HTTP 200 responses, no ERROR/Traceback in the logs); it is not enabled in the default presets or performance baselines. Replace `your_eagle3_model_path` with the local draft-model directory before enabling it.
+  - Only the W8A8 variant was benchmarked and evaluated. BF16 numbers are not claimed;
+    its 37364-token limit is a conservative safety cap, not a performance result.
+  - Multi-node and PD-separated topologies are out of scope for this recipe.
+
+  ## References
+
+  - [Eagle3 draft model (ModelScope)](https://www.modelscope.cn/models/AngelSlim/Qwen3-a3B_eagle3)
+
+  - [Historical vLLM Ascend tutorial (v0.23.0)](https://docs.vllm.ai/projects/ascend/en/v0.23.0/tutorials/models/Qwen3-Coder-30B-A3B.html)
+  - [Main tutorial support status](https://github.com/vllm-project/vllm-ascend/blob/main/docs/source/tutorials/models/Qwen3-Coder-30B-A3B.md)
+  - [Qwen3-Coder-30B-A3B-Instruct on ModelScope](https://www.modelscope.cn/models/Qwen/Qwen3-Coder-30B-A3B-Instruct)
+  - [W8A8 checkpoint on ModelScope](https://www.modelscope.cn/models/Eco-Tech/Qwen3-Coder-30B-A3B-Instruct-w8a8)
+

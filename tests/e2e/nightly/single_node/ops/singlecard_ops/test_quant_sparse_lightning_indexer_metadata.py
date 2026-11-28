@@ -36,7 +36,7 @@ def _check_native_dispatch(fake):
 
     ops = torch.ops._C_ascend
     for name, count in (
-        ("npu_quant_lightning_indexer_v2", 26),
+        ("npu_quant_lightning_indexer_v2", 27),
         ("npu_quant_lightning_indexer_v2_metadata", 23),
         ("npu_quant_lightning_indexer_v3", 31),
         ("npu_quant_sparse_lightning_indexer_metadata", 18),
@@ -102,7 +102,7 @@ def _check_native_dispatch(fake):
             )
             assert metadata.shape == (1024,) and metadata.dtype == torch.int32
             assert metadata.device.type == device
-            for return_value in (0, 1):
+            for return_value in (0, 1, 2):
                 kwargs = dict(
                     cu_seqlens_q=starts,
                     seqused_k=lengths,
@@ -116,7 +116,7 @@ def _check_native_dispatch(fake):
                     indices, scores = outputs[:2]
                     assert indices.shape == (3, 1, 512) and indices.dtype == torch.int32
                     assert scores.shape == ((3, 1, 512) if return_value else (0,))
-                    assert scores.dtype == (torch.bfloat16 if is_950() or not return_value else torch.float32)
+                    assert scores.dtype == (torch.float32 if return_value == 2 and not is_950() else torch.bfloat16)
                     assert all(output.device.type == device for output in outputs)
                     if fake:
                         assert all(isinstance(output, FakeTensor) for output in outputs)

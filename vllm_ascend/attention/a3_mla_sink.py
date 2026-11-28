@@ -12,15 +12,25 @@ import math
 from collections.abc import Callable
 from dataclasses import dataclass, replace
 from importlib import import_module
+from importlib.metadata import PackageNotFoundError, version
 from typing import Any
 
 import torch
+from packaging.version import Version
 
 ROPE_DIM = 64
 LATENT_DIM = 512
 QK_DIM = ROPE_DIM + LATENT_DIM
 PAGE_SIZE = 128
 OPERATOR_MODULE = "flash_attn_npu_3"
+
+
+def supports_a3_mla_window() -> bool:
+    # Older 910 wheels export the same Python APIs but cannot execute split Q/Qv.
+    try:
+        return Version(version("flash-attn-npu")) >= Version("0.5.1.post1")
+    except PackageNotFoundError:
+        return False
 
 
 def get_a3_mla_ops():
@@ -46,10 +56,20 @@ class A3MLAConfig:
     max_seqlen_k: int = PAGE_SIZE
     max_seqlen_q: int = 1
     dtype: torch.dtype = torch.bfloat16
+    sliding_window: int | None = None
+
+    def window_kwargs(self) -> dict[str, tuple[int, int]]:
+        if self.sliding_window is None:
+            return {}
+        return {"window_size": (self.sliding_window - 1, 0)}
 
     def __post_init__(self):
-        if self.num_heads <= 0 or self.mask_mode not in (0, 3):
-            raise ValueError("A3 MLA requires positive heads, plain/causal mask and ND paged cache")
+        if self.num_heads <= 0 or self.mask_mode not in (0, 3, 4):
+            raise ValueError("A3 MLA requires positive heads and a supported mask mode")
+        if (self.mask_mode == 4) != (self.sliding_window is not None) or (
+            self.sliding_window is not None and not 1 <= self.sliding_window <= 2**31
+        ):
+            raise ValueError("A3 windowed MLA requires mode 4 and a positive window with an int32 left bound")
         if not math.isfinite(self.softmax_scale):
             raise ValueError("softmax_scale must be finite")
         if self.dtype not in (torch.float16, torch.bfloat16):
@@ -60,7 +80,9 @@ class A3MLAConfig:
             raise ValueError("query capacity must be nonnegative")
 
 
-def supports_a3_mla(impl, *, is_a3: bool, is_draft: bool, supports_pd_layout: Callable[[Any], bool]) -> bool:
+def supports_a3_mla(
+    impl, *, is_a3: bool, is_draft: bool, supports_pd_layout: Callable[[Any], bool], dflash_draft_window: bool = False
+) -> bool:
     """Static selection before cache allocation; no tensor-content reads."""
     if not is_a3 or not is_draft:
         return False
@@ -68,7 +90,12 @@ def supports_a3_mla(impl, *, is_a3: bool, is_draft: bool, supports_pd_layout: Ca
     if cfg.model_config.hf_config.model_type != "kimi_k31":
         return False
     spec = cfg.speculative_config
-    if not getattr(cfg, "use_v2_model_runner", False) or spec is None or spec.method != "dspark":
+    if spec is None:
+        return False
+    if spec.method == "dflash":
+        if not dflash_draft_window or impl.use_dcp or not supports_a3_mla_window():
+            return False
+    elif spec.method != "dspark":
         return False
     if impl.num_kv_heads != 1 or impl.kv_lora_rank != LATENT_DIM or impl.qk_rope_head_dim != ROPE_DIM:
         return False
@@ -161,7 +188,8 @@ class A3MLAAdapter:
             headdim_v=LATENT_DIM,
             cu_seqlens_q=cu_seqlens_q,
             page_size=PAGE_SIZE,
-            causal=cfg.mask_mode == 3,
+            causal=cfg.mask_mode != 0,
+            **cfg.window_kwargs(),
             num_splits=1,
         )
         if (
@@ -181,7 +209,7 @@ class A3MLAAdapter:
         request = torch.searchsorted(cu_seqlens_q[1:].contiguous(), token, right=True).long()
         lengths = cache_seqlens[request]
         invalid = lengths <= 0
-        if self.config.mask_mode == 3:
+        if self.config.mask_mode != 0:
             query_start = cu_seqlens_q[request]
             query_lengths = cu_seqlens_q[request + 1] - query_start
             invalid |= lengths - query_lengths + token - query_start < 0
@@ -245,7 +273,8 @@ class A3MLAAdapter:
             cu_seqlens_q=cu_seqlens_q,
             max_seqlen_q=cfg.max_seqlen_q,
             softmax_scale=cfg.softmax_scale,
-            causal=cfg.mask_mode == 3,
+            causal=cfg.mask_mode != 0,
+            **cfg.window_kwargs(),
             scheduler_metadata=metadata,
             num_splits=1,
             return_softmax_lse=return_softmax_lse,
