@@ -207,13 +207,7 @@ Mount the endpoint directory (here `/etc/hixlep`) inside each container. Merge t
     # export ASCEND_GLOBAL_RESOURCE_CONFIG='{"comm_resource_config.protocol_desc":"roce:host"}'
     ```
 
-Use the host's physical SuperPod ID to follow the HIXL naming convention for `net_instance_id`. On hosts that expose `spod-info`, query the target NPU and chip (here both IDs are 0).
-
-```bash
-npu-smi info -t spod-info -i 0 -c 0
-```
-
-Replace `<super_pod_id>` below with the reported `Super Pod ID`. For example, an ID of `3` gives `superpod_3`.
+Set `net_instance_id` according to the SuperPod that the host belongs to. Use the same value within a SuperPod and different values across SuperPods. The example below uses `superpod_0` for SuperPod 0. See the [HIXL A5 LocalCommRes guide][hixl-localcommres].
 
 To find the host RoCE IP for each physical NPU:
 
@@ -226,7 +220,7 @@ To find the host RoCE IP for each physical NPU:
 ```json
 {
     "version": "1.3",
-    "net_instance_id": "superpod_<super_pod_id>",
+    "net_instance_id": "superpod_0",
     "endpoint_list": [
         {
             "protocol": "roce",
