@@ -20,7 +20,7 @@ vLLM's online quantization is table driven: ``(layer kind, QuantKey)`` selects a
 method class and a ``--quantization`` name selects default
 ``QuantizationConfigArgs``.
 
-This package declares the recipes Ascend supports: ``ONLINE_METHODS`` /
+This package declares the recipes Ascend supports: ``ONLINE_LINEAR_METHODS`` /
 ``ONLINE_MOE_METHODS`` for the dispatch and ``ONLINE_SHORTHANDS`` for the
 ``--quantization`` names. ``patch_online_quant`` applies them on top of vLLM's
 tables; vLLM's other entries are left untouched, and a recipe Ascend cannot
@@ -44,7 +44,7 @@ from .int8 import (
 # writes these into vLLM's dispatch tables; their keys are the weight keys
 # ``online_validate`` accepts, so listing a method here is what makes a recipe
 # supported end to end.
-ONLINE_METHODS: dict[QuantKey, type] = {
+ONLINE_LINEAR_METHODS: dict[QuantKey, type] = {
     kInt8StaticChannelSym: AscendInt8PerChannelOnlineLinearMethod,
 }
 ONLINE_MOE_METHODS: dict[QuantKey, type] = {
@@ -53,7 +53,7 @@ ONLINE_MOE_METHODS: dict[QuantKey, type] = {
 }
 
 # Weight keys Ascend has an execution path for, for either layer kind.
-SUPPORTED_ONLINE_WEIGHT_KEYS: frozenset[QuantKey] = frozenset(ONLINE_METHODS) | frozenset(ONLINE_MOE_METHODS)
+SUPPORTED_ONLINE_WEIGHT_KEYS: frozenset[QuantKey] = frozenset(ONLINE_LINEAR_METHODS) | frozenset(ONLINE_MOE_METHODS)
 
 # The online ``--quantization`` names Ascend supports, with the config we test
 # them with. They are *applied on top of* vLLM's table: a name vLLM already
@@ -75,7 +75,7 @@ ONLINE_SHORTHANDS: dict[str, QuantizationConfigArgs] = {
 __all__ = [
     "AscendInt8PerChannelOnlineLinearMethod",
     "AscendInt8PerChannelOnlineMoEMethod",
-    "ONLINE_METHODS",
+    "ONLINE_LINEAR_METHODS",
     "ONLINE_MOE_METHODS",
     "ONLINE_SHORTHANDS",
     "SUPPORTED_ONLINE_WEIGHT_KEYS",

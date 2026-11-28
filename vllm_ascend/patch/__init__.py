@@ -1687,7 +1687,7 @@
 #       `weight_utils.maybe_compose_online_quantization` (untouched by
 #       vllm-project/vllm#64056).
 #    How:
-#       Write Ascend's `ONLINE_METHODS` / `ONLINE_MOE_METHODS` entries
+#       Write Ascend's `ONLINE_LINEAR_METHODS` / `ONLINE_MOE_METHODS` entries
 #       (`vllm_ascend/quantization/methods/online/__init__.py`) into the two
 #       upstream tables, and apply Ascend's own `--quantization` name
 #       (`int8_per_channel`) on top of vLLM's table (it also joins

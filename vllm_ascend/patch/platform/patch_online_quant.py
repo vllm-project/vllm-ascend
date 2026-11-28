@@ -30,7 +30,7 @@ the ones that apply the NPU post-load weight processing.
 
 How
 ---
-Write Ascend's ``ONLINE_METHODS`` / ``ONLINE_MOE_METHODS`` into the dispatch
+Write Ascend's ``ONLINE_LINEAR_METHODS`` / ``ONLINE_MOE_METHODS`` into the dispatch
 tables and take over ``OnlineQuantizationConfig.get_quant_method``'s fallback.
 
 vLLM's ``--quantization`` table is left alone: every upstream recipe and every
@@ -65,7 +65,7 @@ from vllm.model_executor.layers.quantization.online import base as online_base
 from vllm_ascend.ops.fused_moe.routed_experts import AscendUnquantizedFusedMoEMethod
 from vllm_ascend.ops.linear import AscendUnquantizedLinearMethod
 from vllm_ascend.quantization.methods.online import (
-    ONLINE_METHODS,
+    ONLINE_LINEAR_METHODS,
     ONLINE_MOE_METHODS,
 )
 
@@ -78,7 +78,7 @@ def _patch_method_tables() -> None:
     """Dispatch Ascend's QuantKeys to Ascend's method classes."""
     # In place: `online.base.resolve_quant_method_cls` reads these module
     # globals at call time, and the keys double as the CLI-supported set.
-    online_base._ONLINE_LINEAR_METHODS.update(ONLINE_METHODS)
+    online_base._ONLINE_LINEAR_METHODS.update(ONLINE_LINEAR_METHODS)
     online_base._ONLINE_MOE_METHODS.update(ONLINE_MOE_METHODS)
 
 

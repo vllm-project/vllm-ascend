@@ -18,7 +18,7 @@
 
 vLLM accepts every weight key it knows about in ``--quantization-config`` and
 only fails once a layer is built with a method it cannot dispatch. Ascend's
-supported recipes are a small, explicit set (``ONLINE_METHODS`` /
+supported recipes are a small, explicit set (``ONLINE_LINEAR_METHODS`` /
 ``ONLINE_MOE_METHODS`` in ``quantization.methods.online``), so the request is
 validated from ``NPUPlatform.apply_config_platform_defaults`` -- before the model
 is constructed -- and an undeclared recipe is rejected there with the supported
