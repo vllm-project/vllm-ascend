@@ -1,0 +1,285 @@
+{
+  "schema_version": 1,
+  "run_id": "b10fcbfb54509dbd",
+  "fixture": "synthetic BF16 GLM5Next KDA with FP32 checkpoint, hidden input to output projection",
+  "a5_comparator_method": "https://github.com/Biuapha/vllm-ascend/blob/26cbec39d8d66b71f351681d32fd36877c1fa2f3/benchmarks/kernels/kda_verify/README.md#token-length-sweep",
+  "image_digest": "sha256:7bff69f611867a77fb11da5e08f9debaa745ec0cf9615fa21456f467db71d6ba",
+  "benchmark_source_sha256": "6a32407d4273e72b4c7e60fae721420b873d4090c4303f61a28a19354c658529",
+  "benchmark_source_sha256_method": "SHA-256 of sorted filename + NUL + LF-normalized bytes + NUL",
+  "benchmark_source_files": [
+    "compare_full.py",
+    "full_candidate.py",
+    "full_gates.py",
+    "full_kernel.py",
+    "full_prepare.py",
+    "full_reference.py",
+    "native_adapter.py"
+  ],
+  "cann": "9.2.1",
+  "tilelang_backend_revision": "9b5ac505c801ce038e31cc8ab6f1f83e14df1497",
+  "device_count_with_data": 8,
+  "environments": [
+    {
+      "device_sku": "Ascend910_9362",
+      "python": "3.12.16",
+      "torch": "2.10.0+cpu",
+      "torch-npu": "2.10.0.post7",
+      "tilelang": "0.1.4",
+      "vllm-ascend": "0.19.1rc2.dev3322+g62fe4cde6"
+    }
+  ],
+  "shards": [
+    {
+      "anonymous_device_index": 0,
+      "assigned_tokens": [
+        1,
+        5
+      ],
+      "observed_tokens": [
+        1,
+        5
+      ],
+      "tokens_with_all_batch_records": [
+        1,
+        5
+      ]
+    },
+    {
+      "anonymous_device_index": 1,
+      "assigned_tokens": [
+        2,
+        6
+      ],
+      "observed_tokens": [
+        2,
+        6
+      ],
+      "tokens_with_all_batch_records": [
+        2,
+        6
+      ]
+    },
+    {
+      "anonymous_device_index": 2,
+      "assigned_tokens": [
+        3,
+        7
+      ],
+      "observed_tokens": [
+        3,
+        7
+      ],
+      "tokens_with_all_batch_records": [
+        3,
+        7
+      ]
+    },
+    {
+      "anonymous_device_index": 3,
+      "assigned_tokens": [
+        4,
+        8
+      ],
+      "observed_tokens": [
+        4,
+        8
+      ],
+      "tokens_with_all_batch_records": [
+        4,
+        8
+      ]
+    },
+    {
+      "anonymous_device_index": 4,
+      "assigned_tokens": [
+        9,
+        13
+      ],
+      "observed_tokens": [
+        9,
+        13
+      ],
+      "tokens_with_all_batch_records": [
+        9,
+        13
+      ]
+    },
+    {
+      "anonymous_device_index": 5,
+      "assigned_tokens": [
+        10,
+        14
+      ],
+      "observed_tokens": [
+        10,
+        14
+      ],
+      "tokens_with_all_batch_records": [
+        10,
+        14
+      ]
+    },
+    {
+      "anonymous_device_index": 6,
+      "assigned_tokens": [
+        11,
+        15
+      ],
+      "observed_tokens": [
+        11,
+        15
+      ],
+      "tokens_with_all_batch_records": [
+        11,
+        15
+      ]
+    },
+    {
+      "anonymous_device_index": 7,
+      "assigned_tokens": [
+        12,
+        16
+      ],
+      "observed_tokens": [
+        12,
+        16
+      ],
+      "tokens_with_all_batch_records": [
+        12,
+        16
+      ]
+    }
+  ],
+  "unreadable_tokens": [],
+  "configuration": {
+    "batch_range": [
+      1,
+      80
+    ],
+    "token_range": [
+      1,
+      16
+    ],
+    "heads": 64,
+    "head_dim": 128,
+    "hidden": 4096,
+    "core_count": 20,
+    "samples": 7,
+    "repeat": 3,
+    "warmup": 5,
+    "base_seed": 724311,
+    "timing_accepted_length": 1,
+    "accuracy_protocol": "relative-l2",
+    "accepted_cases": [
+      "one",
+      "two",
+      "full",
+      "mixed"
+    ],
+    "timing": "ABBA/BAAB pair means of NPU stream-event microseconds per full-layer Graph forward"
+  },
+  "expected_shapes": 1280,
+  "shape_status_counts": {
+    "passed": 1280
+  },
+  "accuracy_by_path": {
+    "native": {
+      "shapes_checked": 1280,
+      "shapes_passed": 1280,
+      "eager_checks": 5120,
+      "eager_passed": 5120,
+      "graph_checks": 5120,
+      "graph_passed": 5120,
+      "eager_elementwise_passed": 5120,
+      "graph_elementwise_passed": 5120,
+      "eager_relative_l2_passed": 5120,
+      "graph_relative_l2_passed": 5120,
+      "eager_history_exact": 5120,
+      "graph_history_exact": 5120,
+      "checkpoint_paths_checked": 1280
+    },
+    "fused_prep": {
+      "shapes_checked": 1280,
+      "shapes_passed": 1280,
+      "eager_checks": 5120,
+      "eager_passed": 5120,
+      "graph_checks": 5120,
+      "graph_passed": 5120,
+      "eager_elementwise_passed": 5120,
+      "graph_elementwise_passed": 5120,
+      "eager_relative_l2_passed": 5120,
+      "graph_relative_l2_passed": 5120,
+      "eager_history_exact": 5120,
+      "graph_history_exact": 5120,
+      "checkpoint_paths_checked": 1280
+    },
+    "cv1": {
+      "shapes_checked": 1280,
+      "shapes_passed": 1280,
+      "eager_checks": 5120,
+      "eager_passed": 5120,
+      "graph_checks": 5120,
+      "graph_passed": 5120,
+      "eager_elementwise_passed": 5120,
+      "graph_elementwise_passed": 5120,
+      "eager_relative_l2_passed": 5120,
+      "graph_relative_l2_passed": 5120,
+      "eager_history_exact": 5120,
+      "graph_history_exact": 5120,
+      "checkpoint_paths_checked": 1280
+    },
+    "cv2": {
+      "shapes_checked": 1280,
+      "shapes_passed": 1280,
+      "eager_checks": 5120,
+      "eager_passed": 5120,
+      "graph_checks": 5120,
+      "graph_passed": 5120,
+      "eager_elementwise_passed": 5120,
+      "graph_elementwise_passed": 5120,
+      "eager_relative_l2_passed": 5120,
+      "graph_relative_l2_passed": 5120,
+      "eager_history_exact": 5120,
+      "graph_history_exact": 5120,
+      "checkpoint_paths_checked": 1280
+    }
+  },
+  "paired_timing": {
+    "fused_prep_vs_native": {
+      "shapes": 1280,
+      "candidate_faster_shapes": 0,
+      "candidate_tied_shapes": 0,
+      "baseline_median_across_shapes_us": 2618.878325,
+      "candidate_median_across_shapes_us": 6912.341595,
+      "geomean_baseline_over_candidate": 0.400856,
+      "median_paired_reduction_pct": -114.403918
+    },
+    "cv1_vs_native": {
+      "shapes": 1280,
+      "candidate_faster_shapes": 0,
+      "candidate_tied_shapes": 0,
+      "baseline_median_across_shapes_us": 2619.181672,
+      "candidate_median_across_shapes_us": 7292.031606,
+      "geomean_baseline_over_candidate": 0.377376,
+      "median_paired_reduction_pct": -129.66286
+    },
+    "cv2_vs_native": {
+      "shapes": 1280,
+      "candidate_faster_shapes": 0,
+      "candidate_tied_shapes": 0,
+      "baseline_median_across_shapes_us": 2616.781632,
+      "candidate_median_across_shapes_us": 7012.1967,
+      "geomean_baseline_over_candidate": 0.390208,
+      "median_paired_reduction_pct": -121.715336
+    },
+    "double_vs_single_slot": {
+      "shapes": 1280,
+      "candidate_faster_shapes": 1276,
+      "candidate_tied_shapes": 0,
+      "baseline_median_across_shapes_us": 7290.706635,
+      "candidate_median_across_shapes_us": 7009.711742,
+      "geomean_baseline_over_candidate": 1.033984,
+      "median_paired_reduction_pct": 3.354186
+    }
+  }
+}

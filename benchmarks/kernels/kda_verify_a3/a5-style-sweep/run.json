@@ -1,0 +1,786 @@
+{
+  "schema_version": 1,
+  "expected_shapes": 1280,
+  "validated_shapes": 1280,
+  "baseline": "native",
+  "candidate": "a5-style-parallel",
+  "environment": {
+    "device": "Ascend910_9362",
+    "python": "3.12.16",
+    "torch": "2.10.0+cpu",
+    "torch-npu": "2.10.0.post7",
+    "tilelang": "0.1.4",
+    "vllm-ascend": "0.19.1rc2.dev3322+g62fe4cde6"
+  },
+  "configuration": {
+    "heads": 64,
+    "hidden": 4096,
+    "core_count": 20,
+    "warmup": 5,
+    "repeat": 3,
+    "seed": 724311,
+    "head_dim": 128,
+    "tokens": [
+      1,
+      16
+    ],
+    "batch": [
+      1,
+      80
+    ],
+    "paired_samples_per_shape": 7,
+    "sample_order": "ABBA/BAAB, where A is native and B is A5-style parallel",
+    "accuracy_protocol": "both",
+    "history_check": "exact BF16 history",
+    "accepted_prefix_cases": [
+      "one",
+      "two",
+      "full",
+      "mixed"
+    ],
+    "timing_accepted_tokens": 1,
+    "reset_timed": false,
+    "timing_method": "NPU stream-event duration per full forward in a repeated NPU graph"
+  },
+  "latency": {
+    "shapes": 1280,
+    "median_wins": {
+      "parallel": 1280,
+      "native": 0,
+      "tied": 0
+    },
+    "paired_samples": {
+      "parallel": 8958,
+      "native": 2,
+      "tied": 0
+    },
+    "parallel_all_pairs_faster_shapes": 1278,
+    "native_all_pairs_faster_shapes": 0,
+    "geomean_native_over_parallel": 1.2878267094292366,
+    "median_parallel_latency_reduction_pct": 23.87624332790896,
+    "max_parallel_latency_reduction": {
+      "tokens": 14,
+      "batch": 71,
+      "native_us": 8807.273228963215,
+      "parallel_us": 6191.39321645101,
+      "parallel_latency_reduction_pct": 29.701360960504054
+    },
+    "min_parallel_latency_reduction": {
+      "tokens": 1,
+      "batch": 1,
+      "native_us": 258.1166625022888,
+      "parallel_us": 251.20333830515543,
+      "parallel_latency_reduction_pct": 2.678371915285438
+    }
+  },
+  "latency_by_request_length": {
+    "1": {
+      "shapes": 80,
+      "median_wins": {
+        "parallel": 80,
+        "native": 0,
+        "tied": 0
+      },
+      "paired_samples": {
+        "parallel": 559,
+        "native": 1,
+        "tied": 0
+      },
+      "parallel_all_pairs_faster_shapes": 79,
+      "native_all_pairs_faster_shapes": 0,
+      "geomean_native_over_parallel": 1.0849016122497774,
+      "median_parallel_latency_reduction_pct": 8.02444206214344,
+      "max_parallel_latency_reduction": {
+        "tokens": 1,
+        "batch": 44,
+        "native_us": 688.9700094858805,
+        "parallel_us": 624.126652876536,
+        "parallel_latency_reduction_pct": 9.41163704030188
+      },
+      "min_parallel_latency_reduction": {
+        "tokens": 1,
+        "batch": 1,
+        "native_us": 258.1166625022888,
+        "parallel_us": 251.20333830515543,
+        "parallel_latency_reduction_pct": 2.678371915285438
+      }
+    },
+    "2": {
+      "shapes": 80,
+      "median_wins": {
+        "parallel": 80,
+        "native": 0,
+        "tied": 0
+      },
+      "paired_samples": {
+        "parallel": 560,
+        "native": 0,
+        "tied": 0
+      },
+      "parallel_all_pairs_faster_shapes": 80,
+      "native_all_pairs_faster_shapes": 0,
+      "geomean_native_over_parallel": 1.2302219830730297,
+      "median_parallel_latency_reduction_pct": 20.106176223882766,
+      "max_parallel_latency_reduction": {
+        "tokens": 2,
+        "batch": 62,
+        "native_us": 1415.7333374023438,
+        "parallel_us": 1096.3000059127808,
+        "parallel_latency_reduction_pct": 22.563100200471
+      },
+      "min_parallel_latency_reduction": {
+        "tokens": 2,
+        "batch": 1,
+        "native_us": 285.5333288510641,
+        "parallel_us": 264.90333676338196,
+        "parallel_latency_reduction_pct": 7.2250732237436495
+      }
+    },
+    "3": {
+      "shapes": 80,
+      "median_wins": {
+        "parallel": 80,
+        "native": 0,
+        "tied": 0
+      },
+      "paired_samples": {
+        "parallel": 559,
+        "native": 1,
+        "tied": 0
+      },
+      "parallel_all_pairs_faster_shapes": 79,
+      "native_all_pairs_faster_shapes": 0,
+      "geomean_native_over_parallel": 1.2623024976309567,
+      "median_parallel_latency_reduction_pct": 21.926325190885937,
+      "max_parallel_latency_reduction": {
+        "tokens": 3,
+        "batch": 77,
+        "native_us": 2402.800003687541,
+        "parallel_us": 1826.2766997019448,
+        "parallel_latency_reduction_pct": 23.99381151576555
+      },
+      "min_parallel_latency_reduction": {
+        "tokens": 3,
+        "batch": 2,
+        "native_us": 329.0566702683767,
+        "parallel_us": 298.1633345286051,
+        "parallel_latency_reduction_pct": 9.38845449161544
+      }
+    },
+    "4": {
+      "shapes": 80,
+      "median_wins": {
+        "parallel": 80,
+        "native": 0,
+        "tied": 0
+      },
+      "paired_samples": {
+        "parallel": 560,
+        "native": 0,
+        "tied": 0
+      },
+      "parallel_all_pairs_faster_shapes": 80,
+      "native_all_pairs_faster_shapes": 0,
+      "geomean_native_over_parallel": 1.2694209946925368,
+      "median_parallel_latency_reduction_pct": 21.938612077529683,
+      "max_parallel_latency_reduction": {
+        "tokens": 4,
+        "batch": 76,
+        "native_us": 3000.2899169921875,
+        "parallel_us": 2277.6933511098223,
+        "parallel_latency_reduction_pct": 24.08422472074877
+      },
+      "min_parallel_latency_reduction": {
+        "tokens": 4,
+        "batch": 2,
+        "native_us": 356.9166660308838,
+        "parallel_us": 317.0199990272522,
+        "parallel_latency_reduction_pct": 11.178146273556012
+      }
+    },
+    "5": {
+      "shapes": 80,
+      "median_wins": {
+        "parallel": 80,
+        "native": 0,
+        "tied": 0
+      },
+      "paired_samples": {
+        "parallel": 560,
+        "native": 0,
+        "tied": 0
+      },
+      "parallel_all_pairs_faster_shapes": 80,
+      "native_all_pairs_faster_shapes": 0,
+      "geomean_native_over_parallel": 1.277936746805203,
+      "median_parallel_latency_reduction_pct": 22.543132860789107,
+      "max_parallel_latency_reduction": {
+        "tokens": 5,
+        "batch": 66,
+        "native_us": 3203.8567860921225,
+        "parallel_us": 2423.6566225687666,
+        "parallel_latency_reduction_pct": 24.351905082342917
+      },
+      "min_parallel_latency_reduction": {
+        "tokens": 5,
+        "batch": 1,
+        "native_us": 318.9766605695089,
+        "parallel_us": 288.1899972756704,
+        "parallel_latency_reduction_pct": 9.651697788443592
+      }
+    },
+    "6": {
+      "shapes": 80,
+      "median_wins": {
+        "parallel": 80,
+        "native": 0,
+        "tied": 0
+      },
+      "paired_samples": {
+        "parallel": 560,
+        "native": 0,
+        "tied": 0
+      },
+      "parallel_all_pairs_faster_shapes": 80,
+      "native_all_pairs_faster_shapes": 0,
+      "geomean_native_over_parallel": 1.319453183365122,
+      "median_parallel_latency_reduction_pct": 25.60660057600937,
+      "max_parallel_latency_reduction": {
+        "tokens": 6,
+        "batch": 77,
+        "native_us": 4333.916664123535,
+        "parallel_us": 3168.4799194335938,
+        "parallel_latency_reduction_pct": 26.89107417171881
+      },
+      "min_parallel_latency_reduction": {
+        "tokens": 6,
+        "batch": 1,
+        "native_us": 330.3833305835724,
+        "parallel_us": 299.0833322207133,
+        "parallel_latency_reduction_pct": 9.473843098431246
+      }
+    },
+    "7": {
+      "shapes": 80,
+      "median_wins": {
+        "parallel": 80,
+        "native": 0,
+        "tied": 0
+      },
+      "paired_samples": {
+        "parallel": 560,
+        "native": 0,
+        "tied": 0
+      },
+      "parallel_all_pairs_faster_shapes": 80,
+      "native_all_pairs_faster_shapes": 0,
+      "geomean_native_over_parallel": 1.3011446691597257,
+      "median_parallel_latency_reduction_pct": 24.383848274918734,
+      "max_parallel_latency_reduction": {
+        "tokens": 7,
+        "batch": 71,
+        "native_us": 4590.4466311136875,
+        "parallel_us": 3415.320078531901,
+        "parallel_latency_reduction_pct": 25.599394721569592
+      },
+      "min_parallel_latency_reduction": {
+        "tokens": 7,
+        "batch": 1,
+        "native_us": 343.71668100357056,
+        "parallel_us": 304.25000190734863,
+        "parallel_latency_reduction_pct": 11.482328696119326
+      }
+    },
+    "8": {
+      "shapes": 80,
+      "median_wins": {
+        "parallel": 80,
+        "native": 0,
+        "tied": 0
+      },
+      "paired_samples": {
+        "parallel": 560,
+        "native": 0,
+        "tied": 0
+      },
+      "parallel_all_pairs_faster_shapes": 80,
+      "native_all_pairs_faster_shapes": 0,
+      "geomean_native_over_parallel": 1.3004328535885892,
+      "median_parallel_latency_reduction_pct": 24.135747921210452,
+      "max_parallel_latency_reduction": {
+        "tokens": 8,
+        "batch": 80,
+        "native_us": 5804.499944051107,
+        "parallel_us": 4346.109867095947,
+        "parallel_latency_reduction_pct": 25.125163080582492
+      },
+      "min_parallel_latency_reduction": {
+        "tokens": 8,
+        "batch": 2,
+        "native_us": 446.71666622161865,
+        "parallel_us": 388.3833487828573,
+        "parallel_latency_reduction_pct": 13.058236204203288
+      }
+    },
+    "9": {
+      "shapes": 80,
+      "median_wins": {
+        "parallel": 80,
+        "native": 0,
+        "tied": 0
+      },
+      "paired_samples": {
+        "parallel": 560,
+        "native": 0,
+        "tied": 0
+      },
+      "parallel_all_pairs_faster_shapes": 80,
+      "native_all_pairs_faster_shapes": 0,
+      "geomean_native_over_parallel": 1.3013304726782264,
+      "median_parallel_latency_reduction_pct": 24.213144183110295,
+      "max_parallel_latency_reduction": {
+        "tokens": 9,
+        "batch": 71,
+        "native_us": 5818.16323598226,
+        "parallel_us": 4347.929954528809,
+        "parallel_latency_reduction_pct": 25.269715231790624
+      },
+      "min_parallel_latency_reduction": {
+        "tokens": 9,
+        "batch": 1,
+        "native_us": 380.1833391189575,
+        "parallel_us": 335.4033430417379,
+        "parallel_latency_reduction_pct": 11.778526692146329
+      }
+    },
+    "10": {
+      "shapes": 80,
+      "median_wins": {
+        "parallel": 80,
+        "native": 0,
+        "tied": 0
+      },
+      "paired_samples": {
+        "parallel": 560,
+        "native": 0,
+        "tied": 0
+      },
+      "parallel_all_pairs_faster_shapes": 80,
+      "native_all_pairs_faster_shapes": 0,
+      "geomean_native_over_parallel": 1.352966868322221,
+      "median_parallel_latency_reduction_pct": 27.304128595871923,
+      "max_parallel_latency_reduction": {
+        "tokens": 10,
+        "batch": 61,
+        "native_us": 5570.943514506022,
+        "parallel_us": 3999.0633328755694,
+        "parallel_latency_reduction_pct": 28.215690529575088
+      },
+      "min_parallel_latency_reduction": {
+        "tokens": 10,
+        "batch": 2,
+        "native_us": 483.543336391449,
+        "parallel_us": 416.7766571044922,
+        "parallel_latency_reduction_pct": 13.807796377718319
+      }
+    },
+    "11": {
+      "shapes": 80,
+      "median_wins": {
+        "parallel": 80,
+        "native": 0,
+        "tied": 0
+      },
+      "paired_samples": {
+        "parallel": 560,
+        "native": 0,
+        "tied": 0
+      },
+      "parallel_all_pairs_faster_shapes": 80,
+      "native_all_pairs_faster_shapes": 0,
+      "geomean_native_over_parallel": 1.3098623530789277,
+      "median_parallel_latency_reduction_pct": 24.731951650605428,
+      "max_parallel_latency_reduction": {
+        "tokens": 11,
+        "batch": 58,
+        "native_us": 5761.343320210775,
+        "parallel_us": 4293.056646982828,
+        "parallel_latency_reduction_pct": 25.485144550875873
+      },
+      "min_parallel_latency_reduction": {
+        "tokens": 11,
+        "batch": 2,
+        "native_us": 500.5533297856649,
+        "parallel_us": 443.65666309992474,
+        "parallel_latency_reduction_pct": 11.366754209806796
+      }
+    },
+    "12": {
+      "shapes": 80,
+      "median_wins": {
+        "parallel": 80,
+        "native": 0,
+        "tied": 0
+      },
+      "paired_samples": {
+        "parallel": 560,
+        "native": 0,
+        "tied": 0
+      },
+      "parallel_all_pairs_faster_shapes": 80,
+      "native_all_pairs_faster_shapes": 0,
+      "geomean_native_over_parallel": 1.3091722251179752,
+      "median_parallel_latency_reduction_pct": 24.466764951592317,
+      "max_parallel_latency_reduction": {
+        "tokens": 12,
+        "batch": 79,
+        "native_us": 8420.04680633545,
+        "parallel_us": 6270.946502685547,
+        "parallel_latency_reduction_pct": 25.523614690988015
+      },
+      "min_parallel_latency_reduction": {
+        "tokens": 12,
+        "batch": 2,
+        "native_us": 526.7333189646403,
+        "parallel_us": 451.8099824587504,
+        "parallel_latency_reduction_pct": 14.224149832245459
+      }
+    },
+    "13": {
+      "shapes": 80,
+      "median_wins": {
+        "parallel": 80,
+        "native": 0,
+        "tied": 0
+      },
+      "paired_samples": {
+        "parallel": 560,
+        "native": 0,
+        "tied": 0
+      },
+      "parallel_all_pairs_faster_shapes": 80,
+      "native_all_pairs_faster_shapes": 0,
+      "geomean_native_over_parallel": 1.3106767463780065,
+      "median_parallel_latency_reduction_pct": 24.58641872194856,
+      "max_parallel_latency_reduction": {
+        "tokens": 13,
+        "batch": 76,
+        "native_us": 8772.67328898112,
+        "parallel_us": 6505.0201416015625,
+        "parallel_latency_reduction_pct": 25.849055044918103
+      },
+      "min_parallel_latency_reduction": {
+        "tokens": 13,
+        "batch": 2,
+        "native_us": 530.5700103441875,
+        "parallel_us": 463.6833270390829,
+        "parallel_latency_reduction_pct": 12.606570669479488
+      }
+    },
+    "14": {
+      "shapes": 80,
+      "median_wins": {
+        "parallel": 80,
+        "native": 0,
+        "tied": 0
+      },
+      "paired_samples": {
+        "parallel": 560,
+        "native": 0,
+        "tied": 0
+      },
+      "parallel_all_pairs_faster_shapes": 80,
+      "native_all_pairs_faster_shapes": 0,
+      "geomean_native_over_parallel": 1.376200037545045,
+      "median_parallel_latency_reduction_pct": 28.286623311817838,
+      "max_parallel_latency_reduction": {
+        "tokens": 14,
+        "batch": 71,
+        "native_us": 8807.273228963215,
+        "parallel_us": 6191.39321645101,
+        "parallel_latency_reduction_pct": 29.701360960504054
+      },
+      "min_parallel_latency_reduction": {
+        "tokens": 14,
+        "batch": 2,
+        "native_us": 550.6233175595601,
+        "parallel_us": 466.38667583465576,
+        "parallel_latency_reduction_pct": 15.298415275664844
+      }
+    },
+    "15": {
+      "shapes": 80,
+      "median_wins": {
+        "parallel": 80,
+        "native": 0,
+        "tied": 0
+      },
+      "paired_samples": {
+        "parallel": 560,
+        "native": 0,
+        "tied": 0
+      },
+      "parallel_all_pairs_faster_shapes": 80,
+      "native_all_pairs_faster_shapes": 0,
+      "geomean_native_over_parallel": 1.3174318240990082,
+      "median_parallel_latency_reduction_pct": 24.851746217740363,
+      "max_parallel_latency_reduction": {
+        "tokens": 15,
+        "batch": 66,
+        "native_us": 8741.063435872395,
+        "parallel_us": 6462.596893310547,
+        "parallel_latency_reduction_pct": 26.06623964323681
+      },
+      "min_parallel_latency_reduction": {
+        "tokens": 15,
+        "batch": 2,
+        "native_us": 572.9433298110962,
+        "parallel_us": 497.96666701634723,
+        "parallel_latency_reduction_pct": 13.08622666389525
+      }
+    },
+    "16": {
+      "shapes": 80,
+      "median_wins": {
+        "parallel": 80,
+        "native": 0,
+        "tied": 0
+      },
+      "paired_samples": {
+        "parallel": 560,
+        "native": 0,
+        "tied": 0
+      },
+      "parallel_all_pairs_faster_shapes": 80,
+      "native_all_pairs_faster_shapes": 0,
+      "geomean_native_over_parallel": 1.307544613239313,
+      "median_parallel_latency_reduction_pct": 24.231028349999967,
+      "max_parallel_latency_reduction": {
+        "tokens": 16,
+        "batch": 61,
+        "native_us": 8675.863583882649,
+        "parallel_us": 6490.3567632039385,
+        "parallel_latency_reduction_pct": 25.19065450428216
+      },
+      "min_parallel_latency_reduction": {
+        "tokens": 16,
+        "batch": 2,
+        "native_us": 596.5166687965393,
+        "parallel_us": 511.97334130605066,
+        "parallel_latency_reduction_pct": 14.172835716569853
+      }
+    }
+  },
+  "accuracy": {
+    "native": {
+      "eager_prefix_checks": 5120,
+      "graph_prefix_checks": 5120,
+      "output_checks": 51200,
+      "history_exact_checks": 10240,
+      "checkpoint_unchanged_shapes": 1280,
+      "history_input_unchanged_shapes": 1280,
+      "worst_by_output": {
+        "output": {
+          "rtol": 0.025,
+          "atol": 0.002,
+          "relative_l2_limit": 0.012,
+          "max_abs": {
+            "value": 0.001953125,
+            "tokens": 2,
+            "batch": 24,
+            "prefix": "one",
+            "mode": "graph"
+          },
+          "relative_l2": {
+            "value": 0.0003994818025321687,
+            "tokens": 4,
+            "batch": 2,
+            "prefix": "full",
+            "mode": "graph"
+          }
+        },
+        "normalized": {
+          "rtol": 0.025,
+          "atol": 0.002,
+          "relative_l2_limit": 0.012,
+          "max_abs": {
+            "value": 0.0078125,
+            "tokens": 6,
+            "batch": 53,
+            "prefix": "one",
+            "mode": "graph"
+          },
+          "relative_l2": {
+            "value": 0.00014456862998595227,
+            "tokens": 6,
+            "batch": 10,
+            "prefix": "one",
+            "mode": "eager"
+          }
+        },
+        "correction": {
+          "rtol": 0.0001,
+          "atol": 1e-06,
+          "relative_l2_limit": 0.003,
+          "max_abs": {
+            "value": 1.1920928955078125e-07,
+            "tokens": 1,
+            "batch": 43,
+            "prefix": "one",
+            "mode": "graph"
+          },
+          "relative_l2": {
+            "value": 3.142226745361648e-08,
+            "tokens": 1,
+            "batch": 3,
+            "prefix": "one",
+            "mode": "eager"
+          }
+        },
+        "kg": {
+          "rtol": 0.01,
+          "atol": 0.0001,
+          "relative_l2_limit": 0.003,
+          "max_abs": {
+            "value": 0.0,
+            "tokens": 1,
+            "batch": 1,
+            "prefix": "one",
+            "mode": "eager"
+          },
+          "relative_l2": {
+            "value": 0.0,
+            "tokens": 1,
+            "batch": 1,
+            "prefix": "one",
+            "mode": "eager"
+          }
+        },
+        "history": {
+          "rtol": 0.0,
+          "atol": 0.0,
+          "relative_l2_limit": 0.0,
+          "max_abs": {
+            "value": 0.0,
+            "tokens": 1,
+            "batch": 1,
+            "prefix": "one",
+            "mode": "eager"
+          },
+          "relative_l2": {
+            "value": 0.0,
+            "tokens": 1,
+            "batch": 1,
+            "prefix": "one",
+            "mode": "eager"
+          }
+        }
+      }
+    },
+    "parallel": {
+      "eager_prefix_checks": 5120,
+      "graph_prefix_checks": 5120,
+      "output_checks": 51200,
+      "history_exact_checks": 10240,
+      "checkpoint_unchanged_shapes": 1280,
+      "history_input_unchanged_shapes": 1280,
+      "worst_by_output": {
+        "output": {
+          "rtol": 0.025,
+          "atol": 0.002,
+          "relative_l2_limit": 0.012,
+          "max_abs": {
+            "value": 0.001953125,
+            "tokens": 1,
+            "batch": 64,
+            "prefix": "one",
+            "mode": "graph"
+          },
+          "relative_l2": {
+            "value": 0.0003590962158524871,
+            "tokens": 3,
+            "batch": 4,
+            "prefix": "two",
+            "mode": "graph"
+          }
+        },
+        "normalized": {
+          "rtol": 0.025,
+          "atol": 0.002,
+          "relative_l2_limit": 0.012,
+          "max_abs": {
+            "value": 0.0078125,
+            "tokens": 3,
+            "batch": 66,
+            "prefix": "one",
+            "mode": "graph"
+          },
+          "relative_l2": {
+            "value": 0.00013907113550253126,
+            "tokens": 10,
+            "batch": 3,
+            "prefix": "full",
+            "mode": "eager"
+          }
+        },
+        "correction": {
+          "rtol": 0.0001,
+          "atol": 1e-06,
+          "relative_l2_limit": 0.003,
+          "max_abs": {
+            "value": 1.7881393432617188e-07,
+            "tokens": 7,
+            "batch": 64,
+            "prefix": "full",
+            "mode": "eager"
+          },
+          "relative_l2": {
+            "value": 3.101489893256929e-08,
+            "tokens": 1,
+            "batch": 3,
+            "prefix": "one",
+            "mode": "eager"
+          }
+        },
+        "kg": {
+          "rtol": 0.01,
+          "atol": 0.0001,
+          "relative_l2_limit": 0.003,
+          "max_abs": {
+            "value": 0.0,
+            "tokens": 1,
+            "batch": 1,
+            "prefix": "one",
+            "mode": "eager"
+          },
+          "relative_l2": {
+            "value": 0.0,
+            "tokens": 1,
+            "batch": 1,
+            "prefix": "one",
+            "mode": "eager"
+          }
+        },
+        "history": {
+          "rtol": 0.0,
+          "atol": 0.0,
+          "relative_l2_limit": 0.0,
+          "max_abs": {
+            "value": 0.0,
+            "tokens": 1,
+            "batch": 1,
+            "prefix": "one",
+            "mode": "eager"
+          },
+          "relative_l2": {
+            "value": 0.0,
+            "tokens": 1,
+            "batch": 1,
+            "prefix": "one",
+            "mode": "eager"
+          }
+        }
+      }
+    }
+  }
+}

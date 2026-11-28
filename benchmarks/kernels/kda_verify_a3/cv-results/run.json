@@ -1,0 +1,45 @@
+{
+  "run_id": "f35e17de7a2821b8",
+  "image_digest": "sha256:7bff69f611867a77fb11da5e08f9debaa745ec0cf9615fa21456f467db71d6ba",
+  "tilelang_backend_revision": "9b5ac505c801ce038e31cc8ab6f1f83e14df1497",
+  "benchmark_source_sha256": "3ca93381da5608fcc15c5a8539fdfd0339d157f671868e9e8431b632dd20a961",
+  "cann": "9.2.1",
+  "fixture": "synthetic BF16 GLM5Next KDA with FP32 checkpoint",
+  "device_count": 1,
+  "versions": {
+    "python": "3.12.16",
+    "torch": "2.10.0+cpu",
+    "device": "Ascend910_9362",
+    "tilelang": "0.1.4",
+    "torch-npu": "2.10.0.post7",
+    "vllm-ascend": "0.19.1rc2.dev3322+g62fe4cde6"
+  },
+  "graph_parameters": {
+    "batches": [
+      1,
+      16
+    ],
+    "tokens": [
+      6
+    ],
+    "heads": 64,
+    "hidden": 4096,
+    "baseline": "native",
+    "variant": [
+      "legacy",
+      "fused-prep",
+      "fused-prep-cv1",
+      "fused-prep-cv2"
+    ],
+    "core_count": 20,
+    "protocol": "relative-l2",
+    "warmup": 5,
+    "repeat": 9,
+    "samples": 23,
+    "seed": 724311
+  },
+  "timing_accepted": 1,
+  "graph_timing": "NPU stream events per full-layer Graph forward in ABBA and BAAB pairs",
+  "graph_units": "microseconds",
+  "profile_samples_per_backend": 11
+}
