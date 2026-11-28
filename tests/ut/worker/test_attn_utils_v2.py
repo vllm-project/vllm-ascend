@@ -29,7 +29,11 @@ from vllm.v1.worker.utils import AttentionGroup
 
 from vllm_ascend.attention import dsa_attn_kv_plan, dsa_v1
 from vllm_ascend.attention import utils as attention_utils
-from vllm_ascend.attention.attention_c8_mxfp import mxfp_cache_spec, mxfp_paged_cache_views
+from vllm_ascend.attention.attention_c8_mxfp import (
+    AscendC8MXFPAttentionBackend,
+    mxfp_cache_spec,
+    mxfp_paged_cache_views,
+)
 from vllm_ascend.attention.attention_v1 import (
     AscendAttentionBackend,
     AscendAttentionBackendImpl,
@@ -3018,6 +3022,57 @@ def test_reshape_kv_cache_v2_builds_c8_mxfp_views(monkeypatch, head_size_v):
     assert k.shape == (num_blocks, 2, 64 // 32, 512, 32)
     assert v.shape == (num_blocks, 2, head_size_v // 32, 512, 32)
     assert k.dtype == v.dtype == torch.float8_e4m3fn
+
+
+@pytest.mark.parametrize("head_size_v", [64, 128])
+def test_c8_mxfp_dense_end_to_end_spec_and_views_characterization(monkeypatch, head_size_v):
+    """Pin pure C8-MXFP dense spec, page size, and reshaped view geometry."""
+    vllm_config = _c8_mxfp_vllm_config()
+    attn_module = SimpleNamespace(
+        is_draft_layer=False,
+        get_kv_cache_spec=lambda _cfg: _plain_full_attention_spec(head_size_v),
+        get_attn_backend=lambda: AscendC8MXFPAttentionBackend,
+    )
+    monkeypatch.setattr(attn_utils, "get_layers_from_vllm_config", lambda _cfg, _type: {"attn": attn_module})
+    spec = attn_utils.get_kv_cache_spec(vllm_config)["attn"]
+
+    expected_state_bytes = 64 + head_size_v + (64 + head_size_v) // 32
+    assert type(spec) is FullAttentionSpec
+    assert spec.dtype == torch.float8_e4m3fn
+    assert spec.state_content_bytes == expected_state_bytes
+    assert spec.page_size_bytes == 2 * 512 * expected_state_bytes
+    assert spec.block_size == 512
+
+    num_blocks = 2
+    raw = torch.zeros((num_blocks * spec.page_size_bytes,), dtype=torch.int8)
+    kv_cache_config = KVCacheConfig(
+        num_blocks=num_blocks,
+        kv_cache_tensors=[_make_kv_cache_tensor(raw.numel(), ["attn"], spec.page_size_bytes)],
+        kv_cache_groups=[KVCacheGroupSpec(layer_names=["attn"], kv_cache_spec=spec)],
+    )
+    monkeypatch.setattr(attn_utils, "get_current_vllm_config", lambda: vllm_config)
+    monkeypatch.setattr(attn_utils, "enable_sfa", lambda _cfg: False)
+
+    reshaped = attn_utils._reshape_kv_cache_v2(
+        attn_groups=[
+            AttentionGroup(
+                backend=AscendC8MXFPAttentionBackend,
+                layer_names=["attn"],
+                kv_cache_spec=spec,
+                kv_cache_group_id=0,
+            )
+        ],
+        kv_cache_raw_tensors={"attn": raw},
+        cache_dtype="mxfp8",
+        kernel_block_sizes=[512],
+        shared_kv_cache_layers={},
+        kv_cache_config=kv_cache_config,
+    )
+    k, v, k_scale, v_scale = reshaped["attn"]
+    assert k.shape == (num_blocks, 2, 64 // 32, 512, 32)
+    assert v.shape == (num_blocks, 2, head_size_v // 32, 512, 32)
+    assert k.dtype == v.dtype == torch.float8_e4m3fn
+    assert k_scale.dtype == v_scale.dtype == torch.uint8
     # One kernel block per page: the dim-0 stride is the packet pitch.
     assert k.stride(0) == spec.page_size_bytes
     assert k_scale.shape == (num_blocks, 2, 512 // 16, 64 // 64, 16, 2)
