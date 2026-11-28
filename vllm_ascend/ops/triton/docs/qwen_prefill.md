@@ -1,5 +1,10 @@
 # Qwen prefill layout kernels
 
+For the batch-one vision path, `pack_vision_qk` copies eight token rows per tile
+from packed QKV directly to the contiguous Q and K planes consumed by the
+existing rotary embedding. The final tile masks rows beyond the token count.
+V remains a view of the original projection.
+
 The vision block calls the torch-npu binding for CANN aclnnAddLayerNorm with
 additional_output=True. Its first output feeds the MLP and its fourth output
 carries the residual for the following addition.

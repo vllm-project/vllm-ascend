@@ -10,6 +10,7 @@ from vllm.model_executor.models.qwen3_vl import (
 )
 from vllm.triton_utils import HAS_TRITON
 
+from vllm_ascend.ascend_config import get_ascend_config
 from vllm_ascend.ops.rotary_embedding import AscendMRotaryEmbedding
 from vllm_ascend.utils import enable_sp
 
@@ -108,7 +109,7 @@ patch_qwen3_vl_moe_pp_layer_range()
 
 
 if HAS_TRITON:
-    from vllm_ascend.ops.triton.qwen_prefill import vision_add_norm
+    from vllm_ascend.ops.triton.qwen_prefill import pack_vision_qk, vision_add_norm
 
     _original_vision_block = Qwen3_VisionBlock.forward
 
@@ -143,14 +144,31 @@ if HAS_TRITON:
         ):
             return _original_vision_block(self, x, cu_seqlens, cos, sin, max_seqlen, sequence_lengths)
 
-        projected = attention(
-            self.norm1(x),
-            cu_seqlens=cu_seqlens,
-            rotary_pos_emb_cos=cos,
-            rotary_pos_emb_sin=sin,
-            max_seqlen=max_seqlen,
-            sequence_lengths=sequence_lengths,
-        )
+        if get_ascend_config().ascend_fusion_config.enable_vision_qk_pack:
+            tokens = x.size(0)
+            heads = attention.num_attention_heads_per_partition
+            packed, _ = attention.qkv(self.norm1(x))
+            qkv = packed.reshape(tokens, 3, heads, dim)
+            rotated = attention.apply_rotary_emb(pack_vision_qk(qkv), cos, sin)
+            q, k = rotated.reshape(2, 1, tokens, heads, dim).unbind(0)
+            context = attention.attn(
+                query=q,
+                key=k,
+                value=qkv[:, 2].unsqueeze(0),
+                cu_seqlens=cu_seqlens,
+                max_seqlen=max_seqlen,
+                sequence_lengths=sequence_lengths,
+            )
+            projected, _ = attention.proj(context.reshape(tokens, 1, heads * dim).contiguous())
+        else:
+            projected = attention(
+                self.norm1(x),
+                cu_seqlens=cu_seqlens,
+                rotary_pos_emb_cos=cos,
+                rotary_pos_emb_sin=sin,
+                max_seqlen=max_seqlen,
+                sequence_lengths=sequence_lengths,
+            )
         residual, normalized = vision_add_norm(x, projected.contiguous(), self.norm2)
         return residual + self.mlp(normalized)
 

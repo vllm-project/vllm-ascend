@@ -3,8 +3,17 @@ import pytest
 import torch
 
 from vllm_ascend.ops.triton.linearnorm.split_qkv_rmsnorm_mrope import triton_split_qkv_rmsnorm_mrope
-from vllm_ascend.ops.triton.qwen_prefill import split_packed_qkvz, vision_add_norm
+from vllm_ascend.ops.triton.qwen_prefill import pack_vision_qk, split_packed_qkvz, vision_add_norm
 from vllm_ascend.ops.triton.triton_utils import init_device_properties_triton
+
+
+@pytest.mark.parametrize("tokens,heads", [(1, 16), (11, 4), (20048, 16), (37836, 16)])
+def test_pack_vision_qk(tokens, heads):
+    qkv = torch.randn(tokens, 3, heads, 72, device="npu", dtype=torch.bfloat16)
+    packed = pack_vision_qk(qkv)
+    assert packed.is_contiguous()
+    assert torch.equal(packed[0], qkv[:, 0])
+    assert torch.equal(packed[1], qkv[:, 1])
 
 
 def test_gdn_split():

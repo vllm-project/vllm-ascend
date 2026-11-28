@@ -180,6 +180,7 @@ class AscendFusionConfig:
     """
 
     fusion_ops_gmmswigluquant: bool = True
+    enable_vision_qk_pack: bool = False
 
 
 @config(config=ConfigDict(frozen=True))
