@@ -70,6 +70,9 @@ def test_strided_paged_flash_attn_matches_golden(dtype, window, layout, causal, 
     mask = torch.triu(torch.ones(2048, 2048, dtype=torch.int8, device=device), diagonal=1)
     builder = AscendFlashAttentionMetadataBuilder.__new__(AscendFlashAttentionMetadataBuilder)
     builder.model_config = SimpleNamespace(runner_type="draft")
+    builder.num_heads, builder.num_kv_heads, builder.head_size = 8, 1, physical_dim
+    builder.sliding_window, builder.layout_kv = window, layout
+    builder.plan_buffer = None
     builder.attn_mask_builder = SimpleNamespace(
         get_splitfuse_attn_mask=lambda: mask,
     )
@@ -94,9 +97,7 @@ def test_strided_paged_flash_attn_matches_golden(dtype, window, layout, causal, 
     def run():
         common.seq_lens = optimistic - rejected
         metadata = builder.build(0, common)
-        for _ in range(6):
-            result = impl.forward_impl(query, None, None, (k_view, v_view), metadata, output)
-        return result
+        return impl.forward_impl(query, None, None, (k_view, v_view), metadata, output)
 
     result = run()
     reference = golden(

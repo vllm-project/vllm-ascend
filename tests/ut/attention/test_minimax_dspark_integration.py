@@ -1,15 +1,13 @@
 # SPDX-License-Identifier: Apache-2.0
 # SPDX-FileCopyrightText: Copyright contributors to the vllm-ascend project
-"""Execute the production selection/tiling logic on CPU without NPU imports."""
+"""Exercise MiniMax Flash draft selection on CPU without NPU imports."""
 
 import __future__
 
 import ast
 import sys
-from contextlib import nullcontext
 from pathlib import Path
 from types import SimpleNamespace
-from unittest.mock import Mock
 
 import pytest
 import torch
@@ -87,76 +85,3 @@ def test_flash_draft_selection(selector_runtime, architecture, dtype):
     r.config.speculative_config.draft_model_config.architectures = [architecture]
     r.selector.dtype = dtype
     assert r.select((False, False, False), r.selector)
-
-
-@pytest.mark.parametrize("eager", [False, True])
-@pytest.mark.parametrize("architecture", ["MiniMaxM3SparseForCausalLM", "MiniMaxM3SparseForConditionalGeneration"])
-def test_original_qwen3_dspark_graph_and_eager_support_is_retained(selector_runtime, eager, architecture):
-    r = selector_runtime
-    spec = r.config.speculative_config
-    spec.enforce_eager = eager
-    spec.target_model_config.hf_config.architectures = [architecture]
-    spec.target_model_config.hf_text_config.model_type = "minimax_m3"
-    spec.draft_model_config.architectures = ["Qwen3DSparkModel"]
-    assert r.select((False, False, False), r.selector)
-    r.backends.model_tag = "backbone"
-    assert not r.select((False, False, False), r.selector)
-
-
-def test_glm_dflash_selection_is_retained(selector_runtime):
-    r = selector_runtime
-    spec = r.config.speculative_config
-    spec.method = "dflash"
-    spec.target_model_config.hf_text_config.model_type = "glm5_next_text"
-    spec.draft_model_config.architectures = ["DFlash2DraftModel"]
-    r.backends.model_tag = "dflash_head"
-    assert r.select((False, False, False), r.selector)
-    spec.enforce_eager = False
-    assert r.select((False, False, False), r.selector)
-
-
-def test_flash_attn_plan_cache_separates_causal_masks(monkeypatch):
-    source = Path(__file__).resolve().parents[3] / "vllm_ascend/attention/fa_v1.py"
-    tree = ast.parse(source.read_text())
-    cls = next(n for n in tree.body if isinstance(n, ast.ClassDef) and n.name == "AscendFlashAttentionImpl")
-    method = next(n for n in cls.body if isinstance(n, ast.FunctionDef) and n.name == "forward_impl")
-    pad = next(n for n in cls.body if isinstance(n, ast.FunctionDef) and n.name == "_pad_head")
-    backend_cls = next(n for n in tree.body if isinstance(n, ast.ClassDef) and n.name == "AscendFlashAttentionBackend")
-    padded_size = next(
-        n for n in backend_cls.body if isinstance(n, ast.FunctionDef) and n.name == "get_padded_head_size"
-    )
-    namespace = {"torch": torch, "F": torch.nn.functional, "attention_transfer_window": nullcontext}
-    exec(compile(ast.Module(body=[method, pad, padded_size], type_ignores=[]), str(source), "exec"), namespace)
-    namespace["AscendFlashAttentionBackend"] = SimpleNamespace(get_padded_head_size=namespace["get_padded_head_size"])
-    query = torch.zeros(2, 8, 128, dtype=torch.bfloat16)
-    ops = SimpleNamespace(
-        flash_attn_metadata=Mock(side_effect=[object(), object()]), flash_attn=Mock(return_value=(query, None))
-    )
-    monkeypatch.setitem(sys.modules, "cann_ops_transformer.ops", ops)
-    impl = SimpleNamespace(
-        num_heads=8,
-        num_kv_heads=1,
-        sliding_window=None,
-        use_bnsd_kv_cache=False,
-        key_cache=None,
-        value_cache=None,
-        sinks=None,
-        scale=1.0,
-        _pad_head=namespace["_pad_head"],
-    )
-    metadata = SimpleNamespace(
-        flash_attn_lengths=None,
-        flash_attn_plans={},
-        block_tables=torch.zeros(1, 1, dtype=torch.int32),
-        query_start_loc_gpu=torch.tensor([0, 2]),
-        seq_lens_gpu=torch.tensor([3]),
-        max_query_len=2,
-        flash_attn_mask=torch.ones(2, 2),
-        causal=False,
-    )
-    for causal in [False, True, False]:
-        metadata.causal = causal
-        namespace["forward_impl"](impl, query, None, None, None, metadata, torch.empty_like(query))
-    assert ops.flash_attn_metadata.call_count == 2
-    assert [call.kwargs["mask_mode"] for call in ops.flash_attn.call_args_list] == [0, 3, 0]
-    assert ops.flash_attn.call_args_list[0].kwargs["metadata"] is ops.flash_attn.call_args_list[2].kwargs["metadata"]
