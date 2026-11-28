@@ -148,7 +148,13 @@ For each release, we'll publish the performance test and accuracy test report in
 
 ### 11. How to fix the error "InvalidVersion" when using vllm-ascend?
 
-The problem is usually caused by the installation of a development or editable version of the vLLM package. In this case, we provide the environment variable `VLLM_VERSION` to let users specify the version of vLLM package to use. Please set the environment variable `VLLM_VERSION` to the version of the vLLM package you have installed. The format of `VLLM_VERSION` should be `X.Y.Z`.
+This problem can occur when a development or editable build reports a valid version that differs from the vLLM source it was built from. vLLM Ascend uses the detected vLLM version to select version-specific code paths. For example, suppose the installed vLLM development build reports version `0.32.1`, but was built from the vLLM `0.32.0` source. To make vLLM Ascend select the compatibility path for the vLLM `0.32.0` APIs, set:
+
+```bash
+export VLLM_VERSION=0.32.0
+```
+
+`VLLM_VERSION` overrides the vLLM version that vLLM Ascend uses for compatibility checks; it does not change the installed version of either package. This may also resolve import errors such as `No module named 'vllm.v1.core.kv_cache_planning'` when that module is not present in the vLLM source version you built. Set `VLLM_VERSION` to the release version that source is based on. See the [versioning policy](community/versioning_policy.md#backward-compatibility) for details.
 
 ### 12. How to handle the out-of-memory issue?
 
