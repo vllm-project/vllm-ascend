@@ -181,6 +181,14 @@ class XliteModelRunnerV2(XliteModelRunnerMixin, NPUModelRunnerV2):  # type: igno
         # Drop hidden-state-only caches by spec (per-layer, as the MRV2 reshape does):
         # xlite registers attention K/V pairs only.
         hidden_state_layers = _hidden_state_cache_layers(kv_cache_config)
-        kv_caches: list[torch.Tensor] = self._attention_kv_caches(hidden_state_layers)
-        logger.info_once("xlite: registering kv caches to runner model: %s", _TensorRepr(kv_caches, max_it=None))
+        flat_caches = self._attention_kv_caches(hidden_state_layers)
+        # Hybrid adapters resolve per-layer ownership from the runner's name -> view mapping;
+        # legacy adapters keep the flat group-by-group order.
+        if self.runner_model.structured_kv_cache:
+            kv_caches = {
+                name: cache for name, cache in self.kv_caches_by_layer.items() if name not in hidden_state_layers
+            }
+        else:
+            kv_caches = flat_caches
+        logger.info_once("xlite: registering kv caches to runner model: %s", _TensorRepr(flat_caches, max_it=None))
         self.runner_model.register_kv_caches(kv_caches)
