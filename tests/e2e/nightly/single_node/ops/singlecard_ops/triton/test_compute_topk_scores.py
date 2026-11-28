@@ -105,6 +105,13 @@ def test_selected_token_rank_is_one_based():
     assert all(rank >= 1 for rank in ranks), f"ranks must be 1-based, got {ranks}"
 
 
+def _is_ascend_score_fn(obj: object) -> bool:
+    # The sampler path must resolve to the Ascend host impl under either
+    # binding mechanism: the monkey-patch installs the function itself,
+    # the Triton kernel dispatcher installs a KernelOverride wrapping it.
+    return obj is compute_topk_scores or getattr(obj, "func", None) is compute_topk_scores
+
+
 def test_compute_topk_scores_bindings():
     importlib.import_module("vllm_ascend.patch.worker.patch_triton")
     for module_name in (
@@ -112,7 +119,9 @@ def test_compute_topk_scores_bindings():
         "vllm.v1.worker.gpu.sample.prompt_logprob",
         "vllm.v1.worker.gpu.spec_decode.rejection_sampler",
     ):
-        assert importlib.import_module(module_name).compute_topk_scores is compute_topk_scores, module_name
+        assert _is_ascend_score_fn(
+            importlib.import_module(module_name).compute_topk_scores
+        ), module_name
 
 
 @pytest.mark.parametrize("num_logprobs", [0, 2])
@@ -190,7 +199,7 @@ def test_large_token_scores(num_logprobs, custom, logits_mode):
     init_device_properties_triton()
     importlib.import_module("vllm_ascend.patch.worker.patch_triton")
     score_fn = importlib.import_module("vllm.v1.worker.gpu.sample.sampler").compute_topk_scores
-    assert score_fn is compute_topk_scores
+    assert _is_ascend_score_fn(score_fn)
     torch.manual_seed(42)
     logits = torch.randn(2, 152064, device="npu", dtype=torch.float32)
     sampled = torch.tensor([11, 12], device="npu", dtype=torch.int64)
