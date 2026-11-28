@@ -43,6 +43,14 @@ from vllm_ascend.device.hardware_profile import HardwareCapability, get_current_
 from vllm_ascend.worker.device_metadata import DeviceMetadataStage, wait_for_device_metadata
 
 
+class AscendCompressorStateCacheSpec(AscendSlidingWindowMLASpec):
+    """Compressor state is scratch state and must not participate in hashing."""
+
+    @property
+    def prefix_cacheable(self) -> bool:
+        return False
+
+
 class AscendCompressorStateCache(CompressorStateCache):
     def __init__(
         self,
@@ -62,7 +70,7 @@ class AscendCompressorStateCache(CompressorStateCache):
         pads = dsv4_block_sizes(vllm_config)[vllm_config.cache_config.block_size][1]
         page_size_padded = pads[0] if self.state_dim == 2 * 256 and self.compress_ratio == 4 else pads[1]
 
-        return AscendSlidingWindowMLASpec(
+        return AscendCompressorStateCacheSpec(
             block_size=self.block_size,
             num_kv_heads=1,
             head_size=self.state_dim,

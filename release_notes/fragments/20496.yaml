@@ -1,0 +1,5 @@
+pr: 20496
+entries:
+  - category: bugfix
+    text: Excluded DeepSeek V4 compressor state from prefix caching, restoring short-prompt cache hits.
+    model: deepseek-v4
