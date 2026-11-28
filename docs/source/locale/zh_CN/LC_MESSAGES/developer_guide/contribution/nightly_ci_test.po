@@ -554,10 +554,10 @@ msgstr ""
 "W8A8，PIECEWISE 与全图模式 |"
 
 msgid ""
-"| `acceptace_rate_deepseekv4-flash-w8a8-mtp` | DeepSeek-V4-Flash W8A8 + MTP "
+"| `acceptance_rate_deepseekv4-flash-w8a8-mtp` | DeepSeek-V4-Flash W8A8 + MTP "
 "acceptance rate |"
 msgstr ""
-"| `acceptace_rate_deepseekv4-flash-w8a8-mtp` | DeepSeek-V4-Flash W8A8 + MTP "
+"| `acceptance_rate_deepseekv4-flash-w8a8-mtp` | DeepSeek-V4-Flash W8A8 + MTP "
 "接受率 |"
 
 msgid "| `glm-5.2-w4a8c8-sfa-dcp` | GLM-5.2 W4A8C8, DCP16 |"

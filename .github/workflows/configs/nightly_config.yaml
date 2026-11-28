@@ -211,9 +211,9 @@ a3-560t:
         os: linux-aarch64-a3-800i-16
         config_file_path: Qwen3-235B-A22B-W8A8_piecewise_fullgraph_A3.yaml
         config_base_path: tests/SIT/cases/models/configs/Qwen
-      - name: acceptace_rate_deepseekv4-flash-w8a8-mtp
+      - name: acceptance_rate_deepseekv4-flash-w8a8-mtp
         os: linux-aarch64-a3-800i-8
-        config_file_path: acceptace_rate_deepseekv4-flash-w8a8-mtp.yaml
+        config_file_path: acceptance_rate_deepseekv4-flash-w8a8-mtp.yaml
         config_base_path: tests/SIT/cases/models/configs/DeepSeek
       - name: glm-5.2-w4a8c8-sfa-dcp
         os: linux-aarch64-a3-800i-16

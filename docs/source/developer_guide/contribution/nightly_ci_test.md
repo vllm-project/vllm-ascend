@@ -1,13 +1,14 @@
 # Nightly CI Test
 
 This document explains how to trigger nightly hardware CI tests against your own PR code
-on Ascend NPU hardware (A2/A3), without waiting for the scheduled nightly run.
+on the supported Ascend CI platforms and resource pools (A2, A3, A3-560T, 310P, and A5),
+without waiting for the scheduled nightly run.
 
 ## Background
 
 By default, nightly CI tests run on a fixed schedule using pre-built nightly images.
 Contributors can self-service trigger these tests directly against their PR changes
-by combining a GitHub label with a comment command.
+by posting a `/nightly` command in the PR comments. No label is required.
 
 !!! note
 
@@ -21,16 +22,19 @@ by combining a GitHub label with a comment command.
 ### 1. Post a comment
 
 Post one of the following comments in the PR to specify which tests to run:
-The comment itself triggers the workflow — no label is required.
 
 | Comment | Effect |
 |---------|--------|
-| `/nightly` | Run **all** nightly tests |
-| `/nightly all` | Run **all** nightly tests (same as above) |
+| `/nightly all` | Run the regular nightly matrices on A2, A3, 310P, and A5. A3-560T is separate. |
+| `/nightly all --a3-560t` | Run all A3-560T nightly tests |
 | `/nightly test1 test2 ...` | Run only the **named** tests |
+| `/nightly <tests> --a3-560t` | Run only the named A3-560T tests |
 | `/nightly <tests> --aop_enabled` | Run named tests with AOP bisect / classify enabled |
-| `/presmoke <tests>` | Build only the nightly images (no tests) for the chips the test names select, publishing them to the isolated `*-presmoke` repositories |
+| `/presmoke <chips>` | Build only the nightly images for `a2`, `a3`, `310p`, `a5`, or `all`; no tests are run |
 | `/nightly <tests> --presmoke` | Run the tests on the images previously published by `/presmoke` instead of the standard nightly images |
+
+`/nightly` without arguments does not dispatch tests. Use `/nightly all` or
+provide at least one test name.
 
 !!! note
 
@@ -62,7 +66,8 @@ the active window instead.
 
 ### 2. Wait for results
 
-GitHub Actions will trigger the `Nightly-A2` or `Nightly-A3` workflow. Only tests
+GitHub Actions will dispatch one or more matching workflows: `Nightly-A2`,
+`Nightly-A3`, `Nightly-A3-560T`, `Nightly-310P`, or `Nightly-A5`. Only tests
 matching the filter will be dispatched, which saves hardware resources.
 
 ## AISBench Output Artifacts
@@ -93,9 +98,9 @@ separate from benchmark summary JSON.
 
 | | Scheduled / Manual Dispatch | PR-triggered |
 |---|----------------------------|---|
-| Trigger | Cron (daily) or `workflow_dispatch` | `/nightly` comment |
+| Trigger | External scheduler or manual `workflow_dispatch` | `/nightly` comment |
 | Code tested | Pre-built nightly image | Your PR's HEAD commit (source installed fresh) |
-| Test scope | All tests | Configurable via `/nightly <names>` |
+| Test scope | Scheduled: all; manual: defaults to all and can filter | Configurable via `/nightly <names>` |
 | vLLM + vllm-ascend | From image | Checked out and installed from source |
 | Test matrix | From main branch's matrix YAML | From PR branch's matrix YAML |
 
@@ -125,14 +130,15 @@ declared in a single data file:
 .github/workflows/configs/nightly_config.yaml
 ```
 
-The file is organized as `a2:` and `a3:` top-level keys (one per SoC). Under each
-SoC, tests are grouped by execution shape (single-node, multi-node, double-node,
-multi-card, accuracy) and each group holds a `test_config` (or `nightly` / `pr_only`
-for accuracy) list whose entries carry a `name` plus the fields consumed by the
-downstream reusable workflows (`os`, `tests`, `config_file_path`, `size`, etc.).
+The file is organized into platform-specific top-level keys: `a2:`, `a3:`,
+`a3-560t:`, `310p:`, and `a5:`. Under each platform, tests are grouped by execution
+shape (single-node, multi-node, double-node, multi-card, accuracy), and each group
+holds a `test_config` (or `nightly` / `pr_only` for accuracy) list whose entries
+carry a `name` plus the fields consumed by the downstream reusable workflows
+(`os`, `tests`, `config_file_path`, `size`, etc.).
 
-Both the `Nightly-A2` and `Nightly-A3` workflows dynamically read this file at run
-time — there is no hardcoded test matrix in the workflow YAMLs. The
+The corresponding `Nightly-*` workflows dynamically read this file at run time —
+there is no hardcoded test matrix in the workflow YAMLs. The
 `/nightly <name>` slash command resolves names by walking the same file from the
 PR branch, so newly added entries can be exercised on a PR before they land on
 main.
@@ -144,11 +150,12 @@ To add a new test case (no need to touch the workflow YAMLs):
 1. Append an entry under the appropriate section in
    `.github/workflows/configs/nightly_config.yaml`. Each entry needs at least:
    - `name`: unique identifier used in `/nightly <name>` filters
-   - `os` (for single-node / multi-card pytest+YAML tests) or `runner` is inferred
+   - `os` for single-node / multi-card entries; multi-node runners are inferred
    - one of `tests:` (pytest directory) or `config_file_path:` (YAML-driven model config)
    - `size` (multi-node / double-node only)
-2. Add the actual test files (pytest modules under `tests/e2e/nightly/...` or
-   YAML model configs in `tests/e2e/nightly/.../configs/`).
+2. Add the actual test files under the repository path referenced by `tests` or
+   `config_base_path`. The current matrix uses paths under `tests/e2e/nightly/...`
+   and `tests/SIT/cases/...`.
 3. Open a PR. Once CI is green, you can validate the new entry against real NPU
    hardware **without** merging the PR — see *Examples* below.
 
@@ -158,61 +165,77 @@ The test names you can pass to `/nightly` correspond to the `name` fields under
 the matching section in `.github/workflows/configs/nightly_config.yaml`. The
 tables below mirror the current contents of that file.
 
+For A2 accuracy tests, use the group name to run all models in that group. To run
+one model, use `/nightly <group-name>/<model-name>` as the sole test selector;
+do not combine this form with other test names. `<model-name>` must exactly match
+an entry in that group's `model_list`.
+
 ### A2 workflow (`.github/workflows/schedule_nightly_test_a2.yaml`)
 
 **Single-node tests** (`a2.single_node.test_config`):
 
 | Test name | Description |
 |-----------|-------------|
-| `test_custom_op_multi_card` | Custom operator tests (multi card) |
+| `qwen3-30b-a3b-bf16-a2-performance` | Qwen3-30B-A3B BF16 performance test |
+| `qwen3-30b-a3b-w8a8-a2-performance` | Qwen3-30B-A3B W8A8 performance test |
 | `qwen3-vl-32b-instruct-w8a8` | Qwen3-VL-32B-Instruct W8A8 |
-| `qwen3-32b-int8` | Qwen3-32B INT8 quantization |
+| `qwen3-32b-int8` | Qwen3-32B INT8 |
 | `Qwen3.5-27B-w8a8-A2` | Qwen3.5-27B W8A8 |
-| `Qwen3.5-397B-A17B-w4a8-mtp` | Qwen3.5-397B-A17B W4A8 + MTP |
+| `Qwen3.5-397B-A17B-w4a8-mtp` | Qwen3.5-397B-A17B W4A8 with MTP |
+| `gemma4` | Gemma 4 (`Gemma4.yaml`) |
+| `gemma4-31b-dense` | Gemma 4 31B Dense |
+| `Qwen3.8-27B-w8a8-A2` | Qwen3.8-27B W8A8 |
 
 **Multi-node tests** (`a2.multi_node.test_config`):
 
 | Test name | Description |
 |-----------|-------------|
-| `multi-node-qwen3-235b-dp` | Qwen3-235B-A22B, 2-node DP |
-| `multi-node-GLM-5.1-w8a8-A2` | GLM-5.1 W8A8, 2 nodes |
-| `multi-node-Kimi-K2.5-W4A8-A2` | Kimi-K2.5 W4A8, 2 nodes |
+| `multi-node-qwen3-235b-dp` | Qwen3-235B-A22B, 2-node |
 
 **Accuracy tests** (`a2.accuracy.nightly` and `a2.accuracy.pr_only`):
 
 | Test name | Description | Scope |
 |-----------|-------------|-------|
-| `accuracy-group-1` | Qwen3-VL-8B, Qwen3-8B, Qwen2-Audio-7B, etc. | nightly |
-| `accuracy-group-2` | ERNIE-4.5, Molmo-7B, Llama-3.2-3B, etc. | nightly |
-| `accuracy-group-3` | Qwen3-30B-A3B, Qwen3-VL-30B-A3B, etc. | nightly |
-| `accuracy-group-4` | Qwen3-Next-80B-A3B, Qwen3-Omni-30B-A3B, etc. | nightly |
-| `pr-accuracy-group-1` | gemma-3-4b-it, internlm3-8b-instruct, etc. | pr_only |
-| `pr-accuracy-group-2` | Qwen2.5-Math-RM-72B, Hunyuan-A13B-Instruct | pr_only |
+| `accuracy-group-1` | Qwen3-VL-8B-Instruct-W8A8, Qwen3-8B, Qwen2-Audio-7B-Instruct, Qwen3-8B-W8A8, Qwen3-VL-8B-Instruct, and Minitron-8B-Base | nightly |
+| `accuracy-group-3` | Qwen3-30B-A3B, Qwen3-VL-30B-A3B-Instruct, and Qwen3-30B-A3B-W8A8 | nightly |
+| `accuracy-group-4` | Qwen3-Next-80B-A3B-Instruct, Qwen3-Omni-30B-A3B-Instruct, and Mixtral-8x7B-Instruct-v0.1 | nightly |
+| `pr-accuracy-group-1` | gemma-3-4b-it, internlm3-8b-instruct, Qwen3-ASR-1.7B, InternVL3_5-8B-hf, and llava-onevision-qwen2-0.5b-ov-hf | pr_only |
+| `pr-accuracy-group-2` | Qwen2.5-Math-RM-72B and Hunyuan-A13B-Instruct | pr_only |
 
-The `pr-accuracy-group-*` entries only run on `/nightly` (PR-triggered) runs;
-`/nightly all` on the schedule skips them.
+The `pr-accuracy-group-*` entries run only when explicitly selected by name in a
+PR-triggered `/nightly` command. Both `/nightly all` and scheduled `all` runs skip
+them.
 
 ### A3 workflow (`.github/workflows/schedule_nightly_test_a3.yaml`)
 
-**Multi-node tests** (`a3.multi_node.test_config`, 4-node):
+**Multi-node tests** (`a3.multi_node.test_config`, 3- or 4-node):
 
 | Test name | Description |
 |-----------|-------------|
+| `GLM-5.3-W8A8C8-A3-ALL-COMBINED` | GLM-5.3 W8A8C8 combined test, 4-node |
+| `DeepSeek-V4-Pro-w4a8-prefix-cache-PD` | DeepSeek-V4-Pro W4A8 with prefix cache and PD, 4-node |
+| `QWEN3_235B_PD_3_5K_1_5k` | Qwen3-235B PD test (`QWEN3_235B_PD_3_5K_1_5k.yaml`), 3-node |
+| `MiniMax-M3_1-Flash-w4a8-PP-prefix-PD` | MiniMax-M3.1-Flash W4A8 with PP, prefix cache, and PD, 3-node |
 
 **Double-node tests** (`a3.double_node.test_config`, 2-node):
 
 | Test name | Description |
 |-----------|-------------|
-| `multi-node-qwen-vl-disagg-pd` | Qwen3-VL-235B disaggregated PD, 2-node |
-| `multi-node-deepseek-v3.1` | DeepSeek-V3.1-BF16, 2-node |
-| `multi-node-glm-5.2` | GLM-5.1-W8A8, 2-node |
+| `Kimi-K3-W4A8-E256-A3-PD-Accu-First100` | Kimi-K3 W4A8 E256 PD first-100 accuracy test, 2-node |
+| `Kimi-K3.1-Pro-W4A8-E256-A3-1P1D` | Kimi-K3.1-Pro W4A8 E256 1P1D test, 2-node |
+| `Kimi-K2.6-W4A8-64k-1k-TPOT50-PD` | Kimi-K2.6 W4A8 64k/1k TPOT50 PD test, 2-node |
+| `GLM-5.3-Flash-W8A8-130k-PD` | GLM-5.3-Flash W8A8 130k PD test, 2-node |
+| `multi-node-GLM-5.2-w8a8-A3` | GLM-5.2 W8A8, 2-node |
+| `DeepSeek-V4-flash-w8a8-PD-prefix` | DeepSeek-V4-Flash W8A8 PD prefix test, 2-node |
+| `DeepSeek-V4.1-Flash-w4a8-PD-MRV2` | DeepSeek-V4.1-Flash W4A8 PD MRV2 test, 2-node |
+| `DeepSeek-V4-flash-w8a8-PD-prefix-MRV2` | DeepSeek-V4-Flash W8A8 PD prefix MRV2 test, 2-node |
 
 !!! warning
 
     All multi-node and double-node jobs are submitted at the same time and their LWS
     pods are queued in FIFO order by the `npu-scheduler`, so the A3 pool may hold more
-    pending jobs than can run concurrently. Running `/nightly all` on A3 will queue a
-    large number of jobs — prefer targeting specific test names when possible.
+    pending jobs than can run concurrently. The A3 leg of `/nightly all` will queue
+    a large number of jobs — prefer targeting specific test names when possible.
 
 Multi-node and double-node jobs use the `job_timeout` input of
 `_e2e_nightly_multi_node.yaml`, which defaults to 360 minutes (6h) for nightly
@@ -225,60 +248,106 @@ defaults to 120 minutes (2h).
 
 | Test name | Description |
 |-----------|-------------|
-| `Qwen3.8-27B-w8a8-A3` | Qwen3.8-27B W8A8 + MTP |
-| `MiniMax-M3-W8A8-A3` | MiniMax-M3 W8A8 |
-| `qwen_3_6_27b_w8a8_A3` | Qwen3.6-27B W8A8 + MTP |
-| `DeepSeek-V4-Flash-W8A8-A3` | DeepSeek-V4-Flash W8A8 + MTP |
-| `DeepSeek-V4-Flash-W8A8-A3-MRV2` | DeepSeek-V4-Flash W8A8, MRV2 + DSpark |
-| `Qwen3.5-122B-A10B-W8A8-A3` | Qwen3.5-122B-A10B W8A8 + MTP |
-| `kimi-k2.6_max_model_len` | Kimi-K2.6 W4A8, maximum model length |
-| `Kimi-K2.6-w4a8-A3` | Kimi-K2.6 W4A8 + DFlash |
-| `glm-5.1-w8a8-prefill-mc2` | GLM-5.1 W8A8, prefill MC2 |
+| `singlecard-ops-a3` | Single-card operator pytest suite |
+| `Qwen3.8-27B-w8a8-A3` | Qwen3.8-27B W8A8 |
+| `MiniMax-M3-W8A8-A3-EAGLE3` | MiniMax-M3 W8A8 with EAGLE3 |
+| `qwen_3_6_27b_w8a8_A3` | Qwen3.6-27B W8A8 |
+| `DeepSeek-V4-Flash-W8A8-A3` | DeepSeek-V4-Flash W8A8 |
+| `DeepSeek-V4-Flash-W8A8-A3-MRV2` | DeepSeek-V4-Flash W8A8 MRV2 |
+| `Qwen3.5-122B-A10B-W8A8-A3` | Qwen3.5-122B-A10B W8A8 |
+| `kimi-k2.6_max_model_len` | Kimi-K2.6 maximum-model-length test |
+| `Kimi-K2.6-w4a8-A3` | Kimi-K2.6 W4A8 |
 | `MiniMax-M3-BF16-A3` | MiniMax-M3 BF16 |
-| `Kimi-K2.6-W4A8-PCP-DCP` | Kimi-K2.6 W4A8 + PCP + DCP |
-| `glm-5.2-W4A8C8-DSpark-PCP` | GLM-5.2 W4A8C8 + DSpark + PCP |
-| `DeepSeek-V4.1-Flash-W8A8-DSpark-PCP` | DeepSeek-V4.1-Flash W8A8 + DSpark + PCP |
-| `Qwen3.5-397B-A17B-w8a8-mtp` | Qwen3.5-397B-A17B W8A8 + MTP |
-| `Qwen3-235B-A22B-W8A8_piecewise_fullgraph_A3` | Qwen3-235B-A22B W8A8, PIECEWISE and full graph |
-| `acceptace_rate_deepseekv4-flash-w8a8-mtp` | DeepSeek-V4-Flash W8A8 + MTP acceptance rate |
-| `glm-5.2-w4a8c8-sfa-dcp` | GLM-5.2 W4A8C8, DCP16 |
-| `glm-5.2-w4a8-dspark` | GLM-5.2 W4A8 + DSpark |
-| `glm-5.2-w4a8-mtp` | GLM-5.2 W4A8 + MTP |
-| `glm-5.2-w4a8-dspark-v2` | GLM-5.2 W4A8, MRV2 + DSpark |
-| `glm-5.2-w4a8-mtp-v2` | GLM-5.2 W4A8, MRV2 + MTP |
+| `Kimi-K2.6-W4A8-PCP-DCP` | Kimi-K2.6 W4A8 with PCP and DCP |
+| `glm-5.2-W4A8C8-DSpark-PCP` | GLM-5.2 W4A8C8 with DSpark and PCP |
+| `DeepSeek-V4.1-Flash-W8A8-DSpark-PCP` | DeepSeek-V4.1-Flash W8A8 with DSpark and PCP |
+| `Qwen3.5-397B-A17B-w8a8-mtp` | Qwen3.5-397B-A17B W8A8 with MTP |
+| `Qwen3-235B-A22B-W8A8_piecewise_fullgraph_A3` | Qwen3-235B-A22B W8A8 piecewise/full-graph test |
+| `acceptance_rate_deepseekv4-flash-w8a8-mtp` | DeepSeek-V4-Flash W8A8 with MTP acceptance-rate test |
+| `glm-5.2-w4a8c8-sfa-dcp` | GLM-5.2 W4A8C8 with SFA and DCP |
+| `glm-5.2-w4a8-dspark-v2` | GLM-5.2 W4A8 DSpark V2 |
+| `glm-5.2-w4a8-mtp-v2` | GLM-5.2 W4A8 MTP V2 |
+| `DeepSeek-V4-Flash-w8a8-sleep-wakeup` | DeepSeek-V4-Flash W8A8 sleep/wake-up test |
 
 **Multi-card tests** (`a3-560t.multi_card.test_config`):
 
 | Test name | Description |
 |-----------|-------------|
-| `qwen3-30b-acc` | Qwen3-30B accuracy test |
-| `Qwen3.5-27B-w8a8-A3` | Qwen3.5-27B W8A8 + MTP |
+| `structured_output_qwen3` | Qwen3 structured-output pytest suite |
+| `test_qwen3_grid_exceed_65536` | Qwen3 grid-size-above-65536 pytest |
+| `qwen3-30b-acc` | Qwen3-30B accuracy pytest |
+| `Qwen3.5-27B-w8a8-A3` | Qwen3.5-27B W8A8 |
 | `qwen3-30b-a3b-w8a8` | Qwen3-30B-A3B W8A8 |
 | `Qwen3-30B-A3B-W4A8-llm-compressor` | Qwen3-30B-A3B W4A8 via llm-compressor |
-| `qwen3-32b-int8-prefix-cache` | Qwen3-32B W8A8 QuaRot prefix cache |
-| `qwen3-32b-int8` | Qwen3-32B W8A8 QuaRot |
-| `Qwen3-30B-QuaRot` | Qwen3-30B-A3B W8A8 QuaRot + Eagle3 |
-| `Qwen3-32B-QuaRot` | Qwen3-32B W8A8 QuaRot + Eagle3 |
-| `Qwen3-30B-A3B-VWN-eagle3-PCP` | Qwen3-30B-A3B BF16 + VWN-Eagle3 + PCP |
+| `qwen3-32b-int8-prefix-cache` | Qwen3-32B INT8 with prefix cache |
+| `qwen3-32b-int8` | Qwen3-32B INT8 |
+| `Qwen3-30B-QuaRot` | Qwen3-30B QuaRot with Eagle3 |
+| `Qwen3-32B-QuaRot` | Qwen3-32B QuaRot with Eagle3 |
+| `Qwen3-30B-A3B-VWN-eagle3-PCP` | Qwen3-30B-A3B with VWN-Eagle3 and PCP |
+| `Qwen3.8-27B-w8a8-PP2-TP2` | Qwen3.8-27B W8A8 with PP2 and TP2 |
+
+### 310P workflow (`.github/workflows/schedule_nightly_test_310p.yaml`)
+
+**Single-node tests** (`310p.single_node.test_config`):
+
+| Test name | Description |
+|-----------|-------------|
+| `Qwen3-8B-w8a8sc-310p` | Qwen3-8B W8A8SC on 310P |
+| `Qwen3-14B-w8a8sc-310p` | Qwen3-14B W8A8SC on 310P |
+| `Qwen3-32B-w8a8sc-310p` | Qwen3-32B W8A8SC on 310P |
+| `Qwen3.6-27B-W8A8` | Qwen3.6-27B W8A8 on 310P |
+| `Qwen3.6-35B-A3B-w8a8` | Qwen3.6-35B-A3B W8A8 on 310P |
+| `Qwen3.6-35B-A3B-w8a8-310p-MTP` | Qwen3.6-35B-A3B W8A8 with MTP on 310P |
+| `Qwen3VL-8B-310p` | Qwen3-VL-8B on 310P |
+
+### A5 workflow (`.github/workflows/schedule_nightly_test_a5.yaml`)
+
+**Single-node tests** (`a5.single_node.test_config`):
+
+| Test name | Description |
+|-----------|-------------|
+| `Kimi-K3-W4A8-E256-A5-GSM8K-First100` | Kimi-K3 W4A8 E256 GSM8K first-100 test |
+| `qwen3.6-27B-w8a8c8-A5` | Qwen3.6-27B W8A8C8 |
+| `qwen3.6-35B-W4A8-A5` | Qwen3.6-35B W4A8 |
+| `singlecard-ops-a5` | A5 single-card operator pytest suite |
+| `Qwen3_32b_w8a8_A5` | Qwen3-32B W8A8 |
+| `GLM5_1_W4A4_A5` | GLM-5.1 W4A4 |
+| `glm-5.2-w4a4c8-dspark-gqa-a5-v2` | GLM-5.2 W4A4C8 DSpark GQA V2 |
+| `glm-5.3-w4a4c8-mtp-a5` | GLM-5.3 W4A4C8 with MTP |
+| `Qwen3_6_27b_A5` | Qwen3.6-27B (`Qwen3_6_27b_A5.yaml`) |
+| `Qwen3_6_27B_W8A8_A5` | Qwen3.6-27B W8A8 |
+| `Qwen3_5_35B_A3B_FP8_A5` | Qwen3.5-35B-A3B FP8 |
+| `DeepSeek_V4_Flash_A5` | DeepSeek-V4-Flash |
+| `DeepSeek_V41_Flash_FP8_A5_Mixed` | DeepSeek-V4.1-Flash FP8 mixed test |
+| `Gemma4_26B_A4B_W4A4_A5` | Gemma 4 26B-A4B W4A4 |
+| `Gemma4_31B_W4A4_A5` | Gemma 4 31B W4A4 |
+| `DeepSeek_V4_Flash_K15_dspark_A5` | DeepSeek-V4-Flash K15 DSpark |
+| `Step3_7_Flash_W8A8_A5` | Step-3.7-Flash W8A8 |
 
 ## Examples
 
-Run all available nightly tests against your PR:
+Run the regular nightly matrices on A2, A3, 310P, and A5:
 
 ```text
-/nightly
+/nightly all
 ```
 
-Run only the custom operator multi-card test:
+Run all A3-560T nightly tests:
 
 ```text
-/nightly test_custom_op_multi_card
+/nightly all --a3-560t
 ```
 
-Run two specific tests at once (one per SoC):
+Run one A2 test:
 
 ```text
-/nightly test_custom_op_multi_card mtpx-deepseek-r1-0528-w8a8
+/nightly qwen3-32b-int8
+```
+
+Run two specific tests at once (one each on A2 and A3):
+
+```text
+/nightly qwen3-32b-int8 multi-node-GLM-5.2-w8a8-A3
 ```
 
 Run the MLA, GQA and SFA context-parallel tests on A3-560T:
@@ -299,18 +368,18 @@ Run a single accuracy model (only that model from a group):
 /nightly accuracy-group-1/Qwen3-8B
 ```
 
-Re-trigger after fixing an issue: just push a new commit. The `synchronize` event
-re-runs the workflow and picks up the existing `/nightly` comment automatically — no
-need to post a new comment.
+After pushing a new commit, post the `/nightly` command again to test the new PR
+HEAD. An existing run keeps the PR commit captured when its command was handled.
 
 ## Profiling from PR Comments
 
 ### Overview
 
-Use `/nightly --profile` to capture Ascend PyTorch Profiler data during selected
-YAML-driven AISBench performance benchmarks. Raw traces are uploaded to OBS;
-offline CPU jobs can parse them and publish per-rank results. A GitHub Artifact
-contains manifests, confirmed download links, and a download script.
+Add `--profile` to `/nightly <tests>` to capture Ascend PyTorch Profiler data
+during selected YAML-driven AISBench performance benchmarks. Raw traces are
+uploaded to OBS; offline CPU jobs can parse them and publish per-rank results.
+A GitHub Artifact contains manifests, confirmed download links, and a download
+script.
 
 This section describes the PR comment interface. Profiling is supported by the
 `/nightly` command for YAML-driven AISBench performance benchmarks; it does not
@@ -349,7 +418,7 @@ steady-state report, when available, to choose a capture window. If no suitable
 reference exists, trigger a run without profiling:
 
 ```text
-/nightly DeepSeek-V4-Flash-W8A8-A3
+/nightly DeepSeek-V4-Flash-W8A8-A3 --a3-560t
 ```
 
 Choose `--profile-start-after` and `--profile-duration` from the report. The
@@ -358,7 +427,7 @@ eight-second capture. Adjust both values to fit the desired window; the start
 can be earlier or later than the 60-second default:
 
 ```text
-/nightly DeepSeek-V4-Flash-W8A8-A3 --profile --profile-benchmark-names perf --profile-start-after 60 --profile-duration 8
+/nightly DeepSeek-V4-Flash-W8A8-A3 --a3-560t --profile --profile-benchmark-names perf --profile-start-after 60 --profile-duration 8
 ```
 
 The test name and `perf` key in this example come from the nightly matrix and its
@@ -433,7 +502,7 @@ uses seconds.
 For a capture after 100 successful formal requests:
 
 ```text
-/nightly DeepSeek-V4-Flash-W8A8-A3 --profile --profile-benchmark-names perf --profile-start-after-requests 100 --profile-duration 8
+/nightly DeepSeek-V4-Flash-W8A8-A3 --a3-560t --profile --profile-benchmark-names perf --profile-start-after-requests 100 --profile-duration 8
 ```
 
 Workers periodically publish AISBench's existing success counters outside the
@@ -448,7 +517,7 @@ during a useful capture window; use the time trigger in that case.
 For a raw-only capture with a different offset and duration:
 
 ```text
-/nightly DeepSeek-V4-Flash-W8A8-A3 --profile --profile-benchmark-names perf --profile-start-after 80 --profile-duration 5 --profile-output raw
+/nightly DeepSeek-V4-Flash-W8A8-A3 --a3-560t --profile --profile-benchmark-names perf --profile-start-after 80 --profile-duration 5 --profile-output raw
 ```
 
 ### Choose a Capture Window
@@ -611,8 +680,8 @@ for the underlying service profiling workflow.
 |---------|-------------------------|
 | Throughput drops or the baseline check fails | Compare against a separate run without profiling. Check profiling status independently; successful traces can still be useful. Shorten capture and leave stack collection off when possible. |
 | No benchmarks were captured | Confirm `--profile` is present, the test uses the YAML/AISBench performance path, and selected names exactly match performance benchmark keys. |
-| `benchmark_ended_before_start` | The benchmark finished before its offset elapsed. Reduce `start_after` or increase the workload duration. |
-| `benchmark_ended_before_request_threshold` | Too few successful formal requests completed before the benchmark ended. Lower `start_after_requests`, increase the workload, or use a time trigger. This is an incomplete capture and fails profiling. |
+| `benchmark_ended_before_start` | The benchmark finished before its offset elapsed. Reduce `--profile-start-after` or increase the workload duration. |
+| `benchmark_ended_before_request_threshold` | Too few successful formal requests completed before the benchmark ended. Lower `--profile-start-after-requests`, increase the workload, or use a time trigger. This is an incomplete capture and fails profiling. |
 | Capture ends with `benchmark_ended` | The benchmark ended before the requested interval completed. Choose an earlier/shorter window or run more requests. This is an incomplete capture. |
 | Raw exists but parsed data is missing | In `raw` mode this is expected. Otherwise inspect Plan/Parse/Finalize and the manifest's per-target/per-rank errors; raw data can be downloaded for another analysis attempt. |
 | Manifest status is `partial` | Inspect benchmark, target, and rank errors. Download links include confirmed uploads only and do not imply that all requested data was produced. |
@@ -622,7 +691,8 @@ for the underlying service profiling workflow.
 
 ## AOP Hooks (Bisect)
 
-Add `--aop_enabled` to any `/nightly` command to enable the AOP pipeline:
+Add `--aop_enabled` after the test selector(s) in a `/nightly` command to enable
+the AOP pipeline:
 
 ```text
 /nightly all --aop_enabled
@@ -638,15 +708,15 @@ This is useful for automated root-cause analysis of nightly regressions.
 
 ## Adding a New Test Case — Worked Example
 
-To add `my-new-test` to the A3 multi-card section:
+To add `my-new-test` to the A3-560T multi-card section:
 
 1. Edit `.github/workflows/configs/nightly_config.yaml`, append under
-   `a3.multi_card.test_config`:
+   `a3-560t.multi_card.test_config`:
 
    ```yaml
      - name: my-new-test
-       os: linux-aarch64-nightly-a3-4
-       tests: tests/e2e/nightly/single_node/ops/multicard_ops_a3/test_my_new.py
+       os: linux-aarch64-a3-800i-4
+       tests: tests/SIT/cases/features/test_my_new.py
    ```
 
 2. Commit the new pytest file (`test_my_new.py`) in the same PR.
@@ -654,14 +724,14 @@ To add `my-new-test` to the A3 multi-card section:
 3. Trigger from the PR:
 
    ```text
-   /nightly my-new-test
+   /nightly my-new-test --a3-560t
    ```
 
 The workflow will:
 
 - `pr_nightly_command.yml` reads your PR's `nightly_config.yaml` and resolves
-  `my-new-test` → dispatch A3 only.
-- `Nightly-A3` is dispatched at `main`, but `setup-vars` checks out your
+  `my-new-test` → dispatch A3-560T only.
+- `Nightly-A3-560T` is dispatched at `main`, but `setup-vars` checks out your
   PR commit and reads the new entry from the matrix.
 - `multi-card-tests` runs one matrix job for `my-new-test`, with
   `should_run=true`. The reusable workflow checks out your PR code (via
@@ -673,12 +743,12 @@ The workflow will:
 
 - Check that the comment starts exactly with `/nightly` with no leading spaces or
   extra characters before the slash.
-- Confirm you have at least Triage permission on the repository; unauthorized
-  users' comments are ignored.
-- To re-trigger after fixing an issue, simply push a new commit — the workflow will
-  reuse the existing `/nightly` comment automatically.
+- Confirm you have at least Triage permission on the repository. Unauthorized
+  comments receive a bot error and do not dispatch tests.
+- After pushing a new commit, post the `/nightly` command again so the new run
+  captures the latest PR HEAD.
 
-**My `/nightly` comment was ignored during the maintenance window.**
+**My `/nightly` comment was blocked during the maintenance window.**
 
 - If the repository variable `NIGHTLY_COMMAND_BLOCK_WINDOW` is set and the current
   Beijing time is inside the configured range, `/nightly` and `/weekly` are
@@ -693,20 +763,20 @@ The workflow will:
    `nightly_config.yaml`, not main. If a name isn't in your PR's file, it won't
   be recognized and the dispatch will be skipped.
 - Check the `parse-trigger` job output in GitHub Actions for the resolved
-  `test_filter` value.
+  `filter` value.
 
 **The workflow ran with the scheduled image, not my PR code.**
 
-- Confirm the workflow was triggered by `repository_dispatch` (slash command),
-  not bare `workflow_dispatch`. The `pr_nightly_command.yml` workflow is what
-  actually dispatches `schedule_nightly_test_a2.yaml` / `_a3.yaml` with
-  `vllm_ascend_ref` pointing at your PR SHA.
+- Confirm the run was dispatched by `pr_nightly_command.yml` and that
+  `vllm_ascend_ref` points to your PR SHA. The command handler receives
+  `repository_dispatch` and starts the selected `Nightly-*` workflows through
+  `workflow_dispatch`.
 
 **A new test I added isn't being recognized.**
 
 - Confirm the entry is well-formed YAML under
   `.github/workflows/configs/nightly_config.yaml`. The `name` field is required
-  and must be unique within the SoC's section.
+  and must be unique within the platform's section.
 - The matrix is loaded from your PR branch, so make sure the file is committed
   to the same branch the `/nightly` comment was posted on.
 
