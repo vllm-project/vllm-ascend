@@ -144,6 +144,7 @@ class DyntraLBPolicyMixin(_SchedulerBase):
         self.modifications: dict | None = None
         self.lb_freeze: bool = False
         self._lb_paused_req_ids: set[str] = set()
+        self._pending_lb_paused_req_ids: set[str] = set()
         self._lb_kv_prefetch_enabled: bool = False
         self._lb_admission_candidates: list[Request] = []
         self._lb_admit_req_ids: set[str] | None = None
@@ -356,6 +357,7 @@ class DyntraLBPolicyMixin(_SchedulerBase):
         drop_stale_output: bool = False,
     ) -> None:
         self._lb_paused_req_ids.discard(request.request_id)
+        self._pending_lb_paused_req_ids.discard(request.request_id)
         if hasattr(request, "num_stale_output_tokens"):
             super()._preempt_request(
                 request,
@@ -376,6 +378,7 @@ class DyntraLBPolicyMixin(_SchedulerBase):
         assert request.status == RequestStatus.RUNNING, "Only running requests can be lb-paused"
         request.status = RequestStatus.PREEMPTED
         self._lb_paused_req_ids.add(request.request_id)
+        self._pending_lb_paused_req_ids.add(request.request_id)
         if self._enable_diagnostics:
             logger.info("DYNTRA_LB_PAUSE request_id=%s", request.request_id)
         if self.log_stats:
@@ -389,6 +392,16 @@ class DyntraLBPolicyMixin(_SchedulerBase):
         super()._update_after_schedule(scheduler_output)
         for req_id in scheduler_output.num_scheduled_tokens:
             self._lb_paused_req_ids.discard(req_id)
+        if self._pending_lb_paused_req_ids:
+            # Evict worker-side RequestState slots for LB-paused requests after
+            # KV/EC connector metadata has been built so physical KV blocks stay
+            # retained while replacement requests can claim slots. Assign a new
+            # set rather than mutating in place so connector metadata holding a
+            # reference to preempted_req_ids stays untouched.
+            scheduler_output.preempted_req_ids = (
+                set(scheduler_output.preempted_req_ids or ()) | self._pending_lb_paused_req_ids
+            )
+            self._pending_lb_paused_req_ids = set()
 
     def _free_request(
         self,
@@ -396,6 +409,7 @@ class DyntraLBPolicyMixin(_SchedulerBase):
         delay_free_blocks: bool = False,
     ) -> dict[str, Any] | None | tuple[dict[str, Any] | None, dict[str, Any] | None]:
         self._lb_paused_req_ids.discard(request.request_id)
+        self._pending_lb_paused_req_ids.discard(request.request_id)
         return super()._free_request(request, delay_free_blocks)
 
 
