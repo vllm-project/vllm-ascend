@@ -175,6 +175,12 @@ def release_unshared_target_embedding(target_model, draft_model, vllm_config):
             target_inner.embed_tokens = PPMissingLayer()
 
 
+def _release_target_embedding_after_rotation(target_model, vllm_config):
+    target_inner = _unused_target_embed_owner(target_model, vllm_config, get_pp_group())
+    if target_inner is not None:
+        target_inner.embed_tokens = PPMissingLayer()
+
+
 @torch.no_grad()
 def align_draft_weights(model, projection, vllm_config, *, target_model=None):
     """Align draft inputs with the rotated target without modifying shared weights."""
@@ -219,6 +225,4 @@ def align_draft_weights(model, projection, vllm_config, *, target_model=None):
         setattr(owner, name, layer)
         setattr(model, own_flag, True)
         if name == "embed_tokens" and rotation is not None and target_model is not None:
-            target_inner = _unused_target_embed_owner(target_model, vllm_config, get_pp_group())
-            if target_inner is not None:
-                target_inner.embed_tokens = PPMissingLayer()
+            _release_target_embedding_after_rotation(target_model, vllm_config)
