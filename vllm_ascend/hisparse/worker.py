@@ -9,6 +9,7 @@ from vllm.distributed.kv_transfer.kv_connector.v1.hisparse import worker as _cor
 
 from vllm_ascend.hisparse.backend import initialize_worker_dma
 from vllm_ascend.hisparse.host_pool import AscendHiSparseOffloadManager, uses_memfabric_pd
+from vllm_ascend.utils import vllm_version_is
 
 
 class AscendHiSparseConnectorWorker(_core.HiSparseConnectorWorker):
@@ -23,12 +24,14 @@ class AscendHiSparseConnectorWorker(_core.HiSparseConnectorWorker):
         *,
         shared_host_region=None,
         is_host_writer=True,
+        host_leader_rank=0,
     ):
         pool = cache_handles[0].runtime.host_pool
         manager = None
         if shared_host_region is not None or uses_memfabric_pd(pool.vllm_config.kv_transfer_config):
             manager = AscendHiSparseOffloadManager.from_host_pool(pool)
             is_host_writer = manager.is_host_writer
+        host_leader_kwargs = {} if vllm_version_is("0.34.0") else {"host_leader_rank": host_leader_rank}
         super().initialize(
             cache_handles,
             cache_layer_names,
@@ -38,6 +41,7 @@ class AscendHiSparseConnectorWorker(_core.HiSparseConnectorWorker):
             pinned_host_pools,
             shared_host_region=None,
             is_host_writer=is_host_writer,
+            **host_leader_kwargs,
         )
         self.cache_layer_names = tuple(cache_layer_names)
         self.shared_host_region = manager.shared_region if manager is not None else None
