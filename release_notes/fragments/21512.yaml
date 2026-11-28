@@ -1,0 +1,4 @@
+pr: 21512
+entries:
+  - category: performance
+    text: DFlash input preparation now uses one fixed context tile width instead of a per-step batch-derived one, removing the multi-second JIT compilation stalls that occurred when serving first encountered a new width.
