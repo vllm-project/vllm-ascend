@@ -26,12 +26,13 @@ shared by the backend and the model runner.
 """
 
 import math
-from dataclasses import replace
+from dataclasses import dataclass, replace
 from typing import TYPE_CHECKING
 
 import torch
 import torch_npu
-from vllm.config import VllmConfig
+from vllm.config import CUDAGraphMode, VllmConfig
+from vllm.forward_context import get_forward_context
 from vllm.v1.attention.backend import (  # type: ignore
     AttentionCGSupport,
     AttentionLayer,
@@ -41,6 +42,7 @@ from vllm_ascend.attention.attention_v1 import (
     AscendAttentionBackend,
     AscendAttentionBackendImpl,
     AscendAttentionMetadataBuilder,
+    AscendAttentionState,
     AscendMetadata,
 )
 from vllm_ascend.attention.utils import enable_dcp, enable_pcp, notify_kv_cache_written
@@ -473,6 +475,16 @@ def _build_qfa_cu_seqlens(cumulative_seq_lengths: list[int], device: torch.devic
     return torch.tensor([0, *cumulative_seq_lengths], dtype=torch.int32, device=device)
 
 
+@dataclass(frozen=True)
+class _QFAPartition:
+    name: str
+    token_rows: slice
+    query_offsets: torch.Tensor
+    kv_lengths: torch.Tensor
+    block_table: torch.Tensor
+    max_query_len: int
+
+
 class AscendC8MXFPAttentionBackendImpl(AscendAttentionBackendImpl):
     """MXFP8 KV cache backend computed by the QFA dual-operator interface.
 
@@ -489,7 +501,8 @@ class AscendC8MXFPAttentionBackendImpl(AscendAttentionBackendImpl):
     scales in the PA_NZ 6-D shapes), built once at allocation. The scatter
     writes through the views and QFA reads them directly.
 
-    One QFA call per step for the whole batch (decode and prefill alike); a
+    By default one QFA call per layer covers the whole batch. The eager A/B
+    experiment splits eligible mixed batches into two calls. A
     step whose every query is one row long drops the mask (NO_MASK), which is
     equivalent there and picks a cheaper kernel.
 
@@ -557,6 +570,52 @@ class AscendC8MXFPAttentionBackendImpl(AscendAttentionBackendImpl):
             cache["k_scale_slots"] = slot_index
         return slot_index
 
+    def _mixed_qfa_partitions(
+        self,
+        attn_metadata: AscendMetadata,
+        num_tokens: int,
+        query_offsets: torch.Tensor,
+        kv_lengths: torch.Tensor,
+    ) -> tuple[_QFAPartition, ...]:
+        cache = self._qfa_step_cache(attn_metadata)
+        if "mixed_partitions" in cache:
+            return cache["mixed_partitions"]
+
+        # The builder supplies cumulative ends on the host. Reject padding and
+        # nonstandard ordering without introducing a device-to-host sync.
+        ends = attn_metadata.actual_seq_lengths_q
+        num_decodes = attn_metadata.num_decodes
+        num_reqs = num_decodes + attn_metadata.num_prefills
+        partitions: tuple[_QFAPartition, ...] = ()
+        if ends and len(ends) == num_reqs and ends[-1] == num_tokens:
+            lengths = [end - start for start, end in zip([0] + ends[:-1], ends)]
+            if all(n == 1 for n in lengths[:num_decodes]) and all(n > 1 for n in lengths[num_decodes:]):
+                # One query token per decode request on this path.
+                num_decode_tokens = attn_metadata.num_decode_tokens
+                # The metadata AICPU receives storage shapes for length tensors.
+                # Give each slice its own allocation. Rebasing prefill offsets
+                # below already allocates a tensor of the required size.
+                partitions = (
+                    _QFAPartition(
+                        "decode",
+                        slice(0, num_decode_tokens),
+                        query_offsets[: num_decodes + 1].clone(),
+                        kv_lengths[:num_decodes].clone(),
+                        attn_metadata.block_tables[:num_decodes],
+                        1,
+                    ),
+                    _QFAPartition(
+                        "prefill",
+                        slice(num_decode_tokens, num_tokens),
+                        query_offsets[num_decodes : num_reqs + 1] - num_decode_tokens,
+                        kv_lengths[num_decodes:num_reqs].clone(),
+                        attn_metadata.block_tables[num_decodes:num_reqs],
+                        max(lengths[num_decodes:]),
+                    ),
+                )
+        cache["mixed_partitions"] = partitions
+        return partitions
+
     def _get_qfa_metadata(
         self,
         attn_metadata: AscendMetadata,
@@ -566,6 +625,7 @@ class AscendC8MXFPAttentionBackendImpl(AscendAttentionBackendImpl):
         max_seqlen_q: int,
         mask_mode: int,
         layout_q_descale: str,
+        partition: str = "batch",
     ):
         """Return the QFA metadata plan (AICPU op output), derived once a step.
 
@@ -578,6 +638,7 @@ class AscendC8MXFPAttentionBackendImpl(AscendAttentionBackendImpl):
         """
         cache = self._qfa_step_cache(attn_metadata)
         plan_key = (
+            partition,
             self.num_heads,
             self.num_kv_heads,
             self.head_size,
@@ -664,6 +725,7 @@ class AscendC8MXFPAttentionBackendImpl(AscendAttentionBackendImpl):
         cu_seqlens_q: torch.Tensor,
         seqused_kv: torch.Tensor,
         qfa_metadata,
+        block_table: torch.Tensor,
         max_seqlen_q: int,
         mask_mode: int,
         layout_q_descale: str,
@@ -694,7 +756,7 @@ class AscendC8MXFPAttentionBackendImpl(AscendAttentionBackendImpl):
             key_scale,
             value_scale,
             QFA_QUANT_MODE_MXFP8,
-            block_table=attn_metadata.block_tables,
+            block_table=block_table,
             p_scale=None,
             cu_seqlens_q=cu_seqlens_q,
             cu_seqlens_kv=None,
@@ -731,8 +793,10 @@ class AscendC8MXFPAttentionBackendImpl(AscendAttentionBackendImpl):
         kv_cache: tuple[torch.Tensor, ...],
         attn_metadata: AscendMetadata,
         output: torch.Tensor,
+        *,
+        split_mixed: bool = False,
     ) -> torch.Tensor:
-        """One QFA call per step for the whole batch (decode + prefill alike).
+        """Run QFA over the whole batch or the eager experiment's two partitions.
 
         The causal mask covers decode rows as well, so the per-subset split of
         the FIA-based design is unnecessary. PrefillNoCache is included:
@@ -772,16 +836,71 @@ class AscendC8MXFPAttentionBackendImpl(AscendAttentionBackendImpl):
         # raises it, so an inflated value is never walked back.
         max_seqlen_q = attn_metadata.max_query_len or num_tokens
 
-        # Drop the mask entirely when every request contributes a single query
-        # row. hasAttenMask is one of the tiling-key axes, so NO_MASK selects
-        # a kernel template that never reads the mask; at Q_S == 1 that is
-        # exactly equivalent to CAUSAL (the KV range is bounded by seqused_kv).
-        # MTP verify steps (Q_S = 1 + num_spec) keep CAUSAL.
-        mask_mode = QFA_MASK_MODE_NO_MASK if max_seqlen_q == 1 else QFA_MASK_MODE_CAUSAL
+        if (
+            split_mixed
+            and attn_metadata.attn_state == AscendAttentionState.ChunkedPrefill
+            and attn_metadata.num_decodes > 0
+            and attn_metadata.num_prefills > 0
+            and attn_metadata.num_decodes == attn_metadata.num_decode_tokens
+            # FULL_DECODE_ONLY dispatches mixed batches to NONE. Host-side
+            # partition boundaries must never be baked into a captured graph.
+            and get_forward_context().cudagraph_runtime_mode == CUDAGraphMode.NONE
+        ):
+            partitions = self._mixed_qfa_partitions(attn_metadata, num_tokens, cu_seqlens_q, seqused_kv)
+            if partitions:
+                for part in partitions:
+                    rows = part.token_rows
+                    self._run_mxfp8_partition(
+                        quant_query[rows],
+                        query_scale[rows],
+                        kv_cache,
+                        attn_metadata,
+                        output[rows],
+                        part.query_offsets,
+                        part.kv_lengths,
+                        part.block_table,
+                        part.max_query_len,
+                        part.name,
+                        batch_max_query_len=max_seqlen_q,
+                    )
+                return output
+
+        return self._run_mxfp8_partition(
+            quant_query,
+            query_scale,
+            kv_cache,
+            attn_metadata,
+            output,
+            cu_seqlens_q,
+            seqused_kv,
+            attn_metadata.block_tables,
+            max_seqlen_q,
+            "batch",
+            batch_max_query_len=max_seqlen_q,
+        )
+
+    def _run_mxfp8_partition(
+        self,
+        quant_query: torch.Tensor,
+        query_scale: torch.Tensor,
+        kv_cache: tuple[torch.Tensor, ...],
+        attn_metadata: AscendMetadata,
+        output: torch.Tensor,
+        cu_seqlens_q: torch.Tensor,
+        seqused_kv: torch.Tensor,
+        block_table: torch.Tensor,
+        max_seqlen_q: int,
+        partition: str,
+        *,
+        batch_max_query_len: int,
+    ) -> torch.Tensor:
+        # Preserve the batch mask when comparing decode scale layouts.
+        mask_mode = QFA_MASK_MODE_NO_MASK if batch_max_query_len == 1 else QFA_MASK_MODE_CAUSAL
 
         # Both operators have to agree on the q scale layout: it is what
         # picks the kernel, and the metadata plan is computed for that kernel.
-        query_scale, layout_q_descale = self._qfa_query_scale_for_layout(query_scale, max_seqlen_q)
+        layout_query_len = max_seqlen_q if partition == "decode" else batch_max_query_len
+        query_scale, layout_q_descale = self._qfa_query_scale_for_layout(query_scale, layout_query_len)
 
         qfa_metadata = self._get_qfa_metadata(
             attn_metadata,
@@ -790,6 +909,7 @@ class AscendC8MXFPAttentionBackendImpl(AscendAttentionBackendImpl):
             max_seqlen_q=max_seqlen_q,
             mask_mode=mask_mode,
             layout_q_descale=layout_q_descale,
+            partition=partition,
         )
         return self._run_qfa(
             quant_query,
@@ -799,10 +919,11 @@ class AscendC8MXFPAttentionBackendImpl(AscendAttentionBackendImpl):
             cu_seqlens_q=cu_seqlens_q,
             seqused_kv=seqused_kv,
             qfa_metadata=qfa_metadata,
+            block_table=block_table,
             max_seqlen_q=max_seqlen_q,
             mask_mode=mask_mode,
             layout_q_descale=layout_q_descale,
-            num_tokens=num_tokens,
+            num_tokens=quant_query.shape[0],
             output=output,
         )
 
@@ -926,4 +1047,15 @@ class AscendC8MXFPAttentionBackendImpl(AscendAttentionBackendImpl):
 
         # PA_NZ: QFA reads the packet-packed strided cache views directly
         # (built once at allocation) -- no transpose, no storage copy.
-        return self._forward_mxfp8_attention(query_mxfp8, query_scale, kv_cache, attn_metadata, output)
+        return self._forward_mxfp8_attention(
+            query_mxfp8,
+            query_scale,
+            kv_cache,
+            attn_metadata,
+            output,
+            split_mixed=self.vllm_config.speculative_config is None
+            and (
+                self.vllm_config.model_config.enforce_eager
+                or self.vllm_config.compilation_config.cudagraph_mode == CUDAGraphMode.FULL_DECODE_ONLY
+            ),
+        )

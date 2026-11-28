@@ -1,0 +1,8 @@
+pr: 23558
+entries:
+  - category: performance
+    text: >-
+      Ascend 950 serving with an MXFP8 KV cache runs separate decode and
+      prefill attention calls for eligible mixed batches in eager mode and
+      under FULL_DECODE_ONLY, so their cost can be compared with the
+      combined call in v0.30.0.
