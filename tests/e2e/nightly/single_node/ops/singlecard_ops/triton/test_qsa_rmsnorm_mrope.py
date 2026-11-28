@@ -1,9 +1,14 @@
+from types import SimpleNamespace
+
 import pytest
 import torch
 import torch_npu
+from vllm.config import VllmConfig, set_current_vllm_config
+from vllm.model_executor.layers.layernorm import GemmaRMSNorm
 
 from vllm_ascend.device.device_config import get_ascend_device_type
 from vllm_ascend.device.hardware import AscendDeviceType
+from vllm_ascend.models.qwen4_exp.qsa import AscendQSAIndexer
 from vllm_ascend.ops.triton.linearnorm.qsa_rmsnorm_mrope import (
     triton_qsa_rmsnorm_mrope,
 )
@@ -66,3 +71,29 @@ def test_qsa_rmsnorm_mrope(num_heads: int) -> None:
     torch_npu.npu.synchronize()
 
     torch.testing.assert_close(actual.cpu(), expected, rtol=2e-2, atol=2e-2)
+
+
+@pytest.mark.parametrize("axes", [1, 3])
+@torch.inference_mode()
+def test_qsa_indexer_fused_norm_rope_matches_fallback(axes: int) -> None:
+    torch.manual_seed(17)
+    indexer = object.__new__(AscendQSAIndexer)
+    indexer.index_head_dim = 128
+    cos_sin = torch.randn(16, 64, dtype=torch.bfloat16, device="npu")
+    indexer.rotary_emb = SimpleNamespace(
+        mrope_section=[11, 11, 10],
+        mrope_interleaved=True,
+        rotary_dim=64,
+        is_neox_style=True,
+        _match_cos_sin_cache_dtype=lambda tensor: cos_sin,
+    )
+    with set_current_vllm_config(VllmConfig()):
+        fused_norm = GemmaRMSNorm(128).to(device="npu", dtype=torch.bfloat16)
+        fallback_norm = GemmaRMSNorm(128).to(device="npu", dtype=torch.float32)
+    fused_norm.weight.copy_(torch.randn_like(fused_norm.weight) * 0.05)
+    fallback_norm.weight.copy_(fused_norm.weight)
+    tensor = torch.randn(7, 4, 128, dtype=torch.bfloat16, device="npu")
+    positions = torch.arange(axes * 7, device="npu").view(axes, 7)
+    actual = indexer._norm_rope(tensor, fused_norm, positions)
+    expected = indexer._norm_rope(tensor, fallback_norm, positions)
+    torch.testing.assert_close(actual.cpu(), expected.cpu(), rtol=2e-2, atol=2e-2)

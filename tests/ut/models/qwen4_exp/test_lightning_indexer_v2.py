@@ -10,11 +10,14 @@ from unittest.mock import Mock
 import pytest
 import torch
 
+from vllm_ascend.device.hardware import AscendDeviceType
+from vllm_ascend.device.hardware_profile import get_hardware_profile
+
 
 @pytest.fixture
 def selector(monkeypatch):
-    # Load the real selector without importing vLLM or a Triton NPU runtime.
-    # Only device kernels and the external stride utility are replaced.
+    # Load the selector in its package so it can resolve the C8 cache helpers.
+    # The BF16 device kernels and stride utility are replaced below.
     upstream = ModuleType("cann_ops_transformer")
     bindings = SimpleNamespace(
         lightning_indexer_v2_metadata=Mock(return_value=torch.empty(1024, dtype=torch.int32)),
@@ -43,7 +46,7 @@ def selector(monkeypatch):
     for module in (upstream, packing, utilities):
         monkeypatch.setitem(sys.modules, module.__name__, module)
     source = Path(__file__).resolve().parents[4] / "vllm_ascend/models/qwen4_exp/lightning_indexer.py"
-    spec = importlib.util.spec_from_file_location("qsa_liv2_contract", source)
+    spec = importlib.util.spec_from_file_location("vllm_ascend.models.qwen4_exp.qsa_liv2_contract", source)
     assert spec is not None and spec.loader is not None
     module = importlib.util.module_from_spec(spec)
     spec.loader.exec_module(module)
@@ -69,6 +72,7 @@ def _inputs():
 
 
 @pytest.mark.parametrize("prepared", [False, True])
+@pytest.mark.parametrize("device_type", [AscendDeviceType.A2, AscendDeviceType.A3])
 @pytest.mark.parametrize(
     "rows,starts,expected_starts",
     [
@@ -78,8 +82,11 @@ def _inputs():
     ],
     ids=["trimmed-query", "dummy-query-zero-key", "repeated-terminal"],
 )
-def test_padded_bounds_preserve_output_and_metadata(selector, monkeypatch, rows, starts, expected_starts, prepared):
+def test_padded_bounds_preserve_output_and_metadata(
+    selector, monkeypatch, rows, starts, expected_starts, prepared, device_type
+):
     module, bindings, packing, utilities = selector
+    monkeypatch.setattr(module, "get_current_hardware_profile", lambda: get_hardware_profile(device_type))
     inputs = _inputs()
     inputs["query"] = inputs["query"][:rows]
     inputs["attn_metadata"].query_start_loc = torch.tensor(starts, dtype=torch.int32)
@@ -129,6 +136,11 @@ def test_padded_bounds_preserve_output_and_metadata(selector, monkeypatch, rows,
     torch.testing.assert_close(inputs["attn_metadata"].query_start_loc, torch.tensor(starts, dtype=torch.int32))
     torch.testing.assert_close(kwargs["seqused_k"], torch.tensor([8, 8, 0], dtype=torch.int32))
     torch.testing.assert_close(kwargs["cmp_residual_k"], torch.tensor([1, 2, 0], dtype=torch.int32))
+    assert "cu_seqlens_k" not in metadata_kwargs
+    if device_type == AscendDeviceType.A2:
+        torch.testing.assert_close(kwargs["cu_seqlens_k"], torch.zeros(4, dtype=torch.int32))
+    else:
+        assert kwargs["cu_seqlens_k"] is None
     assert (kwargs["layout_q"], kwargs["layout_k"], kwargs["mask_mode"], kwargs["cmp_ratio"]) == (
         "TND",
         "PA_BBND",

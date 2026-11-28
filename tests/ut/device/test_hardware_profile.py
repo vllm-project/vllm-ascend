@@ -60,6 +60,7 @@ _EXPECTED_CAPABILITIES = {
     | {
         HardwareCapability.CANN_MEGAMOE,
         HardwareCapability.MM_REDUCE_SCATTER_BF16,
+        HardwareCapability.LIGHTNING_INDEXER_V2_PAGED_KEY_OFFSETS,
         HardwareCapability.QWEN4EXP_HC_GATE_MIX_ROW_BLOCK,
         HardwareCapability.RMS_NORM_CAST,
         HardwareCapability.NPU_TOP_K_TOP_P,
@@ -71,6 +72,7 @@ _EXPECTED_CAPABILITIES = {
         HardwareCapability.ENGRAM_LOCAL_HOST_VMM,
         HardwareCapability.ENGRAM_ROTATED_GATE,
         HardwareCapability.KDA_INT8_QUANT_OVERLAP,
+        HardwareCapability.INT8_QLI_V2_REQUEST_BATCHED_DECODE,
         HardwareCapability.NATIVE_INT8_SPARSE,
         HardwareCapability.MINIMAX_M3_GBSA_METADATA_REUSE,
         HardwareCapability.RMS_NORM_DYNAMIC_QUANT,

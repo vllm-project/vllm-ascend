@@ -146,8 +146,13 @@ class HardwareCapability(Enum):
     INDEXER_QUANT_CACHE = auto()
     # Prepare per-token INT8 KDA projection inputs before the BFG stream wait.
     KDA_INT8_QUANT_OVERLAP = auto()
+    # The native TND LightningIndexerV2 kernel requires key offsets for paged K.
+    LIGHTNING_INDEXER_V2_PAGED_KEY_OFFSETS = auto()
     # Native sparse indexer ABI with INT8 Q/K, FP16 scales and FP32 scores.
     NATIVE_INT8_SPARSE = auto()
+    # INT8 QLI v2 supports paged, request-batched compressed causal decode.
+    INT8_QLI_V2_REQUEST_BATCHED_DECODE = auto()
+    INT8_QLI_V2_FOUR_QUERY_HEADS = auto()
     # Reserve host CPUs for interrupt handling when constructing worker CPU pools.
     IRQ_CPU_RESERVATION = auto()
     # Create the local communication resource used by supported KV-transfer deployments.
@@ -437,6 +442,7 @@ _HARDWARE_PROFILES: Mapping[AscendDeviceType, HardwareProfile] = MappingProxyTyp
             capabilities=_STANDARD_CAPABILITIES
             | {
                 HardwareCapability.FLASH_ATTN_NPU_3,
+                HardwareCapability.LIGHTNING_INDEXER_V2_PAGED_KEY_OFFSETS,
                 HardwareCapability.MM_REDUCE_SCATTER_BF16,
                 HardwareCapability.QWEN4EXP_HC_GATE_MIX_ROW_BLOCK,
                 HardwareCapability.RMS_NORM_CAST,
@@ -464,6 +470,8 @@ _HARDWARE_PROFILES: Mapping[AscendDeviceType, HardwareProfile] = MappingProxyTyp
             native_weight_formats=_INT4_WEIGHT_FORMATS,
             capabilities=_A3_CAPABILITIES
             | {
+                HardwareCapability.INT8_QLI_V2_REQUEST_BATCHED_DECODE,
+                HardwareCapability.INT8_QLI_V2_FOUR_QUERY_HEADS,
                 HardwareCapability.CANN_MEGAMOE,
                 HardwareCapability.CANN_MEGAMOE_SHARED_EXPERT_FUSION,
                 HardwareCapability.FLASH_ATTN_NPU_3,

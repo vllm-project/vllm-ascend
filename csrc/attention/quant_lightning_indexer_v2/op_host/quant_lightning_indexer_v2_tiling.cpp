@@ -1115,9 +1115,12 @@ ge::graphStatus QLIV2InfoParser::GetGSize()
                         "The value of (the head num of q divided by the head num of k) must <= 64"),
                     return ge::GRAPH_FAILED);
     } else {
-        // 910b/910_93: 支持 gSize=64/32 (32 参照 v1 quant_lightning_indexer, mBaseSize=4*gSize 推导)
-        OP_CHECK_IF((gSize_ != G_SIZE_LIMIT) && (gSize_ != G_SIZE_LIMIT_32_950),
-                    OP_LOGE(opName_, "N1 is %u, N2 is %u, N1 divided by N2 must equal 64 or 32.", n1Size_, n2Size_),
+        // The four-head weight tile is used by the dense indexer only.
+        const bool denseFourHeads = gSize_ == 4 &&
+            (opParamInfo_.candidateMode == nullptr || *opParamInfo_.candidateMode == CANDIDATE_MODE_OFF);
+        OP_CHECK_IF(!denseFourHeads && (gSize_ != G_SIZE_LIMIT) && (gSize_ != G_SIZE_LIMIT_32_950),
+                    OP_LOGE(opName_, "N1 is %u, N2 is %u, N1 divided by N2 must equal 64, 32, or 4 (candidate mode off).",
+                            n1Size_, n2Size_),
                     return ge::GRAPH_FAILED);
     }
 

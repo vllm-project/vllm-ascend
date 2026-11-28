@@ -1,0 +1,6 @@
+pr: 23497
+entries:
+  - category: bugfix
+    text: Qwen3.8 on Ascend can load per-head static V scales for both target and MTP layers and transfer C8 K scales during disaggregated serving with Mooncake.
+  - category: performance
+    text: Qwen3.8 C8 multi-token decode on A3 shares each request's indexer page table across verification tokens and uses the model's four query heads directly.

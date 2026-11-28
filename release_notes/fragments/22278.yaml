@@ -1,0 +1,20 @@
+pr: 22278
+entries:
+  - category: feature
+    text: >-
+      Added native C8 support for Qwen3.8-Flash-Next ModelSlim W4A8 checkpoints
+      with dynamic INT8 Q/K and calibrated static per-channel INT8 V. Use
+      --quantization ascend --kv-cache-dtype auto with Model Runner V2 on
+      Ascend 910B/A3 and CANN 9.3.0. Main attention uses native INT8 GBSA and
+      the indexer uses INT8 QLI-v2. Dynamic-V checkpoints need re-quantization.
+  - category: performance
+    text: >-
+      Qwen3.8-Flash-Next C8 prefill on Ascend 910B reuses paged INT8 KV within
+      eligible single-request chunks. In a 10,240-token prompt measured on
+      Ascend 910B3, the cumulative prefill GBSA kernel time fell by 50%.
+  - category: bugfix
+    model: Qwen3.8-Flash-Next
+    hardware: [A2]
+    text: >-
+      Fixed a graph warmup failure when serving Qwen3.8-Flash-Next with a BF16
+      sparse indexer on Ascend A2.

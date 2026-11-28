@@ -52,6 +52,7 @@ def _load_adapter(monkeypatch, *, load_wrapper: bool = False):
 class AscendQwen4ExpQSAAttention:
     def __init__(self):
         self.layer_name = "model.layers.0.self_attn"
+        self.c8_enabled = False
         # The adapter attaches this fixed-address buffer before model replay.
         # Keep the annotation uninitialized so the stub matches that lifecycle.
         self._qsa_prepared_cos_sin: torch.Tensor
@@ -61,6 +62,7 @@ class AscendQwen4ExpQSAAttention:
         self.rotary_emb = SimpleNamespace(cos_sin_cache=torch.arange(64 * 8).reshape(64, 8).float())
         self.q_norm = SimpleNamespace(weight=torch.empty(1))
         self.indexer = SimpleNamespace(
+            c8_enabled=False,
             index_n_heads=4,
             index_head_dim=128,
             token_topk=2048,
@@ -76,6 +78,25 @@ class _Model:
 
     def modules(self):
         return iter((self.layer,))
+
+
+@pytest.mark.parametrize("attention_c8", [False, True])
+@pytest.mark.parametrize("indexer_c8", [False, True])
+def test_prepares_bf16_schedules_only_for_bf16_owners(monkeypatch, attention_c8, indexer_c8):
+    adapter_cls, _ = _load_adapter(monkeypatch)
+    layer = AscendQwen4ExpQSAAttention()
+    layer.c8_enabled = attention_c8
+    layer.indexer.c8_enabled = indexer_c8
+    adapter = adapter_cls(_Model(layer))
+    calls = []
+    monkeypatch.setattr(adapter, "_prepare_lightning", lambda *args, **kwargs: calls.append("lightning"))
+    monkeypatch.setattr(adapter, "_prepare_gbsa", lambda *args, **kwargs: calls.append("gbsa"))
+    metadata = {name: SimpleNamespace() for name in (layer.layer_name, "raw", "compressed")}
+
+    adapter.prepare_attention_metadata(metadata, full_graph=True)
+
+    assert ("lightning" in calls) is not indexer_c8
+    assert ("gbsa" in calls) is not attention_c8
 
 
 class _TwoLayerModel:
@@ -133,6 +154,45 @@ def test_rotary_wrapper_preserves_delegate_fallback(monkeypatch):
         torch.zeros((2, 4)),
     ) == ("fallback-q", "fallback-k")
     assert delegate.calls == 1
+
+
+@pytest.mark.parametrize("axes", [1, 3])
+def test_prepared_rotary_preserves_dynamic_token_axis(monkeypatch, axes):
+    from vllm import triton_utils
+
+    monkeypatch.setattr(triton_utils, "HAS_TRITON", True)
+    adapter_cls, _ = _load_adapter(monkeypatch)
+    layer = AscendQwen4ExpQSAAttention()
+    layer.rotary_emb = _RotaryDelegate()
+    adapter = adapter_cls(_Model(layer))
+    rotary = layer.rotary_emb
+    compile_count = 0
+
+    def backend(graph, _inputs):
+        nonlocal compile_count
+        compile_count += 1
+        return graph.forward
+
+    def rotate(positions, query, key):
+        prepared = rotary._prepared_cos_sin.reshape(-1, query.shape[-1])
+        return query + prepared[-query.shape[0] :], key + prepared[-key.shape[0] :]
+
+    monkeypatch.setattr(rotary, "_forward_prepared", rotate)
+    compiled = torch.compile(rotary, backend=backend, fullgraph=True)
+    for num_tokens in (4, 7):
+        positions = torch.arange(num_tokens)
+        if axes == 3:
+            positions = positions.expand(axes, -1)
+        query = torch.ones((num_tokens, 4))
+        key = torch.full_like(query, 2)
+        adapter.prepare_positions(positions, num_tokens)
+        torch._dynamo.mark_dynamic(positions, positions.ndim - 1)
+        torch._dynamo.mark_dynamic(query, 0)
+        torch._dynamo.mark_dynamic(key, 0)
+        query_out, key_out = compiled(positions, query, key)
+        torch.testing.assert_close(query_out, query)
+        torch.testing.assert_close(key_out, key)
+    assert compile_count == 1
 
 
 @pytest.mark.parametrize("tokens", [1, 2, 7])

@@ -200,6 +200,8 @@ def load_builder():
     )
 
     class Base:
+        kv_cache_spec = object()
+
         def build(self, *args, **kwargs):
             return SimpleNamespace(block_table="kept")
 
@@ -215,6 +217,7 @@ def load_builder():
         AttentionCGSupport=SimpleNamespace(UNIFORM_BATCH="uniform"),
         CommonAttentionMetadata=object,
         build_qsa_request_plan=plan,
+        QSAC8Spec=type("QSAC8Spec", (), {}),
     )
     exec(compile(ast.Module(body=[builder], type_ignores=[]), str(source), "exec"), namespace)
     return namespace["AscendQSAMetadataBuilder"](), plans

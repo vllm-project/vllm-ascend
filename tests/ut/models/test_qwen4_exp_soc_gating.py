@@ -12,6 +12,7 @@ from vllm_ascend.models.qwen4_exp import qsa as ascend_qsa
 def _make_indexer() -> ascend_qsa.AscendQSAIndexer:
     indexer = object.__new__(ascend_qsa.AscendQSAIndexer)
     torch.nn.Module.__init__(indexer)
+    indexer.c8_enabled = False
     indexer.compressed_key_cache = SimpleNamespace(kv_cache=torch.zeros(1))
     indexer.token_topk = 2048
     indexer.compress_ratio = 4

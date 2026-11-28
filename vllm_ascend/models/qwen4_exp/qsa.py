@@ -20,7 +20,11 @@ from typing import TYPE_CHECKING, Any, Protocol, TypeAlias, cast
 
 import torch
 from vllm.config import VllmConfig
-from vllm.distributed import get_pcp_group
+from vllm.distributed import (
+    get_pcp_group,
+    get_tensor_model_parallel_rank,
+    get_tensor_model_parallel_world_size,
+)
 from vllm.forward_context import get_forward_context
 from vllm.logger import logger
 
@@ -33,7 +37,7 @@ from vllm.utils.torch_utils import (
     get_dtype_size,
 )
 from vllm.v1.attention.backend import AttentionCGSupport, AttentionImplBase, CommonAttentionMetadata
-from vllm.v1.kv_cache_interface import AttentionSpec
+from vllm.v1.kv_cache_interface import AttentionSpec, KVCacheSpec
 from vllm.v1.kv_cache_layout import KVCacheLayout
 
 from vllm_ascend.attention.context_parallel.sfa_dcp_utils import get_sfa_pcp_global_metadata
@@ -44,6 +48,7 @@ from vllm_ascend.attention.utils import (
 from vllm_ascend.distributed.kv_transfer.kv_pool.ascend_store.attention_fence import attention_transfer_window
 from vllm_ascend.distributed.utils import all_gather_async
 from vllm_ascend.ops.triton.linearnorm import qsa_rmsnorm_mrope as _qsa_rmsnorm_mrope  # noqa: F401
+from vllm_ascend.ops.triton.qwen4_exp.c8 import store_qsa_c8_rows
 from vllm_ascend.ops.triton.qwen4_exp.qsa import (
     qsa_compress_groups_with_ratio as qsa_compress_groups_with_ratio_fused,
 )
@@ -52,8 +57,15 @@ from vllm_ascend.ops.triton.qwen4_exp.qsa import (
 )
 
 from .attention_dispatch import build_qsa_request_plan, dispatch_qsa_attention
+from .c8_attention import C8_PROBABILITY_QUANT_SCALE, c8_prefill_kv_length, qsa_c8_attention
 from .gbsa import GBSA_PAGE_SIZE, qsa_gbsa_attention
-from .lightning_indexer import QSAIndexerMetadataProtocol, qsa_select_paged_tokens_lightning_v2
+from .lightning_indexer import (
+    QSAIndexerMetadataProtocol,
+    qsa_select_paged_tokens_lightning_v2,
+    qsa_select_paged_tokens_quantized,
+    request_batched_decode_width,
+)
+from .quantization import C8_QSA_PER_HEAD, C8_SCALE_BYTES, QSAC8Spec, QSAStaticVParameters, uses_qsa_c8_quantization
 from .topk_buffer import share_topk_buffer
 
 if TYPE_CHECKING:
@@ -82,7 +94,7 @@ else:
 # carries the resulting valid-type/misc ignores.
 UpstreamQSABackend = upstream_qsa.Qwen4ExpQSABackend  # type: ignore[attr-defined]
 
-QSAKVCache: TypeAlias = tuple[torch.Tensor, torch.Tensor]
+QSAKVCache: TypeAlias = tuple[torch.Tensor, torch.Tensor] | tuple[torch.Tensor, torch.Tensor, torch.Tensor]
 
 
 def _gather_pcp_cache_rows(
@@ -147,11 +159,10 @@ def apply_qsa_rope(
     """Apply RoPE using the QSA head width rather than the main Q/K width."""
     rotary_dim = int(rotary_emb.rotary_dim)
     cache = rotary_emb._match_cos_sin_cache_dtype(tensor)  # noqa: SLF001
-    sections = list(getattr(rotary_emb, "mrope_section", []))
+    sections = list(getattr(rotary_emb, "mrope_section", None) or ())
     # Keep the materialized normalization/RoPE boundary portable on Ascend.
     # The CUDA/ROCm variants use a Triton MRoPE gather here; advanced indexing
     # has identical semantics and is graph-capturable by the NPU backend.
-    use_merged_cache = False
     # Compression emits rows for every scheduled token, including rows whose
     # compressed slot is invalid.  Never let such dead-row metadata reach the
     # NPU Index kernel as an out-of-range address.  This materializes only the
@@ -160,7 +171,7 @@ def apply_qsa_rope(
     cos_sin = cache[safe_positions]
     cos, sin = cos_sin.chunk(2, dim=-1)
 
-    if positions.ndim == 2 and not use_merged_cache:
+    if positions.ndim == 2:
         if getattr(rotary_emb, "mrope_interleaved", False):
             merged_cos = cos[0].clone()
             merged_sin = sin[0].clone()
@@ -204,6 +215,19 @@ class AscendQSAIndexer(upstream_indexer.QSAIndexer):
     if TYPE_CHECKING:
         raw_key_cache: QSARawKeyCache
         compressed_key_cache: qsa_indexer.QSACompressedKeyCache
+
+    def __init__(self, *, quant_config: Any = None, prefix: str = "", **kwargs: Any) -> None:
+        self.c8_enabled = uses_qsa_c8_quantization(quant_config, prefix, indexer=True)
+        super().__init__(quant_config=quant_config, prefix=prefix, **kwargs)
+        if self.c8_enabled:
+            if self.index_head_dim != 128 or not 0 < self.index_n_heads <= 64:
+                raise ValueError("QSA INT8 indexer requires head_dim=128 and 1..64 query heads")
+            # Configure the existing registered cache owner in place; the raw
+            # BF16 compression ring and static-context identity stay intact.
+            self.compressed_key_cache.dtype = torch.int8
+            self.compressed_key_cache.head_size = self.index_head_dim + C8_SCALE_BYTES
+            self.indexer_dtype = torch.bfloat16
+            self.use_fused_pre_indexer = False
 
     def configure_pcp_cache_backends(self, vllm_config: VllmConfig) -> None:
         # Only the cache owners need new backends. Keep upstream's indexer
@@ -254,13 +278,14 @@ class AscendQSAIndexer(upstream_indexer.QSAIndexer):
     def _fused_norm_rope_eligible(
         self,
         tensor: torch.Tensor,
+        norm: torch.nn.Module,
         positions: torch.Tensor,
     ) -> bool:
         return bool(
             tensor.dtype == torch.bfloat16
             and tensor.ndim == 3
             and tensor.shape[-1] == self.index_head_dim == 128
-            and self.k_layernorm.weight.dtype == tensor.dtype
+            and norm.weight.dtype == tensor.dtype
             and getattr(self.rotary_emb, "rotary_dim", None) == 64
             and getattr(self.rotary_emb, "is_neox_style", False)
             and (
@@ -293,6 +318,22 @@ class AscendQSAIndexer(upstream_indexer.QSAIndexer):
             rope_dim=self.rotary_emb.rotary_dim,
         )
 
+    def _norm_rope(
+        self,
+        tensor: torch.Tensor,
+        norm: torch.nn.Module,
+        positions: torch.Tensor,
+    ) -> torch.Tensor:
+        # Preserve ordinary RoPE's BF16 rounding before C8 quantization.
+        # Interleaved MRoPE can use the fused path for either position layout.
+        if positions.ndim == 2 and positions.shape[0] == 1:
+            positions = positions[0]
+        if getattr(self.rotary_emb, "mrope_section", None) and self._fused_norm_rope_eligible(tensor, norm, positions):
+            return self._fused_norm_rope(tensor, norm, positions)
+        logger.info_once("QSA indexer is using separate RMSNorm and RoPE.")
+        normalized = norm.forward_native(tensor)
+        return apply_qsa_rope(self.rotary_emb, positions, normalized)
+
     def normalize_compressed_keys(
         self,
         pooled: torch.Tensor,
@@ -306,11 +347,10 @@ class AscendQSAIndexer(upstream_indexer.QSAIndexer):
         else:
             first_positions = first_positions[:, 0]
         pooled = pooled.reshape(-1, 1, self.index_head_dim)
-        if not self._fused_norm_rope_eligible(pooled, first_positions):
-            return super().normalize_compressed_keys(
-                original_pooled,
-                original_positions,
-            )
+        if self.c8_enabled:
+            return self._norm_rope(pooled, self.k_layernorm, first_positions)
+        if not self._fused_norm_rope_eligible(pooled, self.k_layernorm, first_positions):
+            return super().normalize_compressed_keys(original_pooled, original_positions)
         return self._fused_norm_rope(
             pooled,
             self.k_layernorm,
@@ -382,9 +422,12 @@ class AscendQSAIndexer(upstream_indexer.QSAIndexer):
             dim=-1,
         )
         q = q_raw.reshape(-1, self.index_n_heads, self.index_head_dim)
-        if not self._fused_norm_rope_eligible(q, positions):
+        if self.c8_enabled:
+            q = self._norm_rope(q, self.q_layernorm, positions).to(self.indexer_dtype)
+        elif self._fused_norm_rope_eligible(q, self.q_layernorm, positions):
+            q = self._fused_norm_rope(q, self.q_layernorm, positions)
+        else:
             return super().project_qk(hidden_states, positions)
-        q = self._fused_norm_rope(q, self.q_layernorm, positions)
         return q, token_k.reshape(-1, 1, self.index_head_dim)
 
     def _update_and_compress(
@@ -428,11 +471,16 @@ class AscendQSAIndexer(upstream_indexer.QSAIndexer):
             rope_position_cache,
         )
         normalized = self.normalize_compressed_keys(pooled, first_positions)
-        _store_qsa_cache_rows(
-            self.compressed_key_cache.kv_cache,
-            compressed_metadata.slot_mapping,
-            normalized,
-        )
+        if getattr(self, "c8_enabled", False):
+            store_qsa_c8_rows(
+                self.compressed_key_cache.kv_cache, compressed_metadata.slot_mapping, normalized, indexer=True
+            )
+        else:
+            _store_qsa_cache_rows(
+                self.compressed_key_cache.kv_cache,
+                compressed_metadata.slot_mapping,
+                normalized,
+            )
         _store_qsa_cache_rows(raw_key_cache, raw_metadata.slot_mapping, token_k[:num_tokens])
         if rope_position_cache is not None:
             _store_qsa_cache_rows(
@@ -447,6 +495,21 @@ class AscendQSAIndexer(upstream_indexer.QSAIndexer):
         metadata: QSAIndexerMetadataProtocol,
         out: torch.Tensor | None,
     ) -> torch.Tensor:
+        if self.c8_enabled:
+            logger.info_once("QSA is using the INT8 CANN LightningIndexerV2 backend.")
+            return qsa_select_paged_tokens_quantized(
+                query,
+                self.compressed_key_cache.kv_cache,
+                metadata.block_table,
+                metadata.token_to_req,
+                metadata.logical_positions,
+                metadata.seq_lens,
+                metadata.query_start_loc,
+                self.token_topk,
+                self.compress_ratio,
+                out,
+                decode_width=request_batched_decode_width(metadata, query.shape[0]),
+            )
         logger.info_once("QSA is using native request-batched LightningIndexerV2 through the CANN Torch interface.")
         return qsa_select_paged_tokens_lightning_v2(
             query,
@@ -491,8 +554,14 @@ class AscendQSAImpl(AttentionImplBase[Any]):
         kv_cache: QSAKVCache,
         slot_mapping: torch.Tensor,
     ) -> None:
-        del layer
-        key_cache, value_cache = kv_cache
+        key_cache, value_cache = kv_cache[:2]
+        if getattr(layer, "c8_enabled", False):
+            if len(kv_cache) != 3:
+                raise ValueError("QSA C8 cache requires K, V and K scales")
+            scales = kv_cache[2]
+            store_qsa_c8_rows(key_cache, slot_mapping, key, key_scales=scales)
+            store_qsa_c8_rows(value_cache, slot_mapping, value, v_scale=layer.fa_v.scale)
+            return
         _store_qsa_cache_rows(key_cache, slot_mapping, key)
         _store_qsa_cache_rows(value_cache, slot_mapping, value)
 
@@ -543,12 +612,35 @@ class AscendQSAImpl(AttentionImplBase[Any]):
         if num_tokens == 0:
             return output
         selected_indices = layer.topk_indices_buffer[:num_tokens]
-        key_cache, value_cache = kv_cache
+        key_cache, value_cache = kv_cache[:2]
         key_cache = canonicalize_singleton_dim_strides(key_cache)
         value_cache = canonicalize_singleton_dim_strides(value_cache)
         packed_width = layer.indexer.token_topk // layer.indexer.compress_ratio + layer.indexer.compress_ratio - 1
         compact_indices = selected_indices[:, :packed_width]
         request_plan = getattr(attn_metadata, "qsa_request_plan", None)
+        if getattr(layer, "c8_enabled", False):
+            if len(kv_cache) != 3:
+                raise ValueError("QSA C8 cache requires K, V and K scales")
+            prefill_kv_length = (
+                getattr(attn_metadata, "c8_prefill_kv_length", None)
+                if num_tokens == attn_metadata.num_actual_tokens
+                else None
+            )
+            return qsa_c8_attention(
+                query[:num_tokens],
+                key_cache,
+                value_cache,
+                compact_indices,
+                attn_metadata.block_table,
+                token_to_req[:num_tokens],
+                logical_positions[:num_tokens],
+                seq_lens,
+                output[:num_tokens],
+                layer.fa_v.scale,
+                layer.c8_p_scale,
+                key_scales=kv_cache[2],
+                prefill_kv_length=prefill_kv_length,
+            )
         if request_plan is None:
             logger.info_once("QSA attention is using the CANN GBSA backend.")
             result = qsa_gbsa_attention(
@@ -619,7 +711,7 @@ class AscendQSAMetadataBuilder(upstream_qsa.Qwen4ExpQSAMetadataBuilder):
         if request_plan is None:
             return
         layer = self.vllm_config.compilation_config.static_forward_context.get(layer_names[0])
-        if not hasattr(layer, "indexer"):
+        if not hasattr(layer, "indexer") or getattr(layer, "c8_enabled", False):
             return
         compressed_metadata = attn_metadata.get(layer.indexer.compressed_key_cache.prefix)
         if compressed_metadata is None:
@@ -684,6 +776,12 @@ class AscendQSAMetadataBuilder(upstream_qsa.Qwen4ExpQSAMetadataBuilder):
                 common_attn_metadata.num_actual_tokens,
                 phases,
             )
+            if isinstance(self.kv_cache_spec, QSAC8Spec) and metadata.block_table.shape[0] == 1:
+                metadata.c8_prefill_kv_length = c8_prefill_kv_length(
+                    metadata.qsa_request_plan,
+                    common_attn_metadata.num_actual_tokens,
+                    common_attn_metadata.seq_lens_cpu_upper_bound,
+                )
         return metadata
 
     def build_for_cudagraph_capture(self, common_attn_metadata: CommonAttentionMetadata):
@@ -727,7 +825,8 @@ class AscendQSABackend(UpstreamQSABackend):  # type: ignore[valid-type, misc]
         """Store main K/V in two page-major slots of one descriptor page."""
         if spec.head_size != spec.head_size_v:
             raise ValueError("QSA page-major K/V slots require symmetric head sizes")
-        slot_bytes = spec.num_kv_heads * spec.head_size * get_dtype_size(spec.dtype)
+        storage_head_size = spec.storage_head_size if isinstance(spec, QSAC8Spec) else spec.head_size
+        slot_bytes = spec.num_kv_heads * storage_head_size * get_dtype_size(spec.dtype)
         if spec.num_head_slots == 2 and spec.state_content_bytes == slot_bytes:
             return spec
         return replace(
@@ -833,20 +932,53 @@ class AscendPCPQSACompressedKeyCache(qsa_indexer.QSACompressedKeyCache):
 class AscendQwen4ExpQSAAttention(upstream_qsa.Qwen4ExpQSAAttention):
     """Qwen4Exp QSA owner bound to the Ascend implementation."""
 
-    def __init__(self, *, vllm_config: VllmConfig, **kwargs) -> None:
-        if vllm_config.parallel_config.prefill_context_parallel_size == 1:
-            super().__init__(vllm_config=vllm_config, **kwargs)
-            # Rebind as each layer is constructed to limit live allocations.
+    def __init__(self, *, vllm_config: VllmConfig, quant_config: Any = None, prefix: str = "", **kwargs: Any) -> None:
+        self.c8_enabled = uses_qsa_c8_quantization(quant_config, prefix)
+        use_pcp = vllm_config.parallel_config.prefill_context_parallel_size > 1
+        if use_pcp:
+            # PCP capture includes padded query rows and uses separate local read
+            # and global write metadata. The INT8 kernels use the non-PCP layout.
+            if self.c8_enabled or uses_qsa_c8_quantization(quant_config, f"{prefix}.indexer", indexer=True):
+                raise NotImplementedError("Qwen4Exp QSA C8 requires prefill context parallel size 1")
+            # Upstream constructs token-local projections and cache owners.
+            local_config = copy(vllm_config)
+            local_config.parallel_config = copy(vllm_config.parallel_config)
+            local_config.parallel_config.prefill_context_parallel_size = 1
+            super().__init__(vllm_config=local_config, quant_config=quant_config, prefix=prefix, **kwargs)
+            self.indexer.configure_pcp_cache_backends(vllm_config)
+        else:
+            super().__init__(vllm_config=vllm_config, quant_config=quant_config, prefix=prefix, **kwargs)
             share_topk_buffer(self)
-            return
-        # Upstream constructs token-local projections and cache owners. The
-        # Ascend forward and metadata builders handle the PCP layout.
-        local_config = copy(vllm_config)
-        local_config.parallel_config = copy(vllm_config.parallel_config)
-        local_config.parallel_config.prefill_context_parallel_size = 1
-        super().__init__(vllm_config=local_config, **kwargs)
-        # The raw/compressed cache owners were built by the same local constructor.
-        self.indexer.configure_pcp_cache_backends(vllm_config)
+        if self.c8_enabled:
+            if self.head_dim % C8_SCALE_BYTES or self.kv_cache_dtype != "auto":
+                raise ValueError("Native QSA C8 requires aligned heads and --kv-cache-dtype auto")
+            self.fa_v = QSAStaticVParameters(
+                self.total_num_kv_heads,
+                self.head_dim,
+                get_tensor_model_parallel_world_size(),
+                get_tensor_model_parallel_rank(),
+                per_head=quant_config.quant_description[f"{prefix}.quant_type"] == C8_QSA_PER_HEAD,
+            )
+            self.register_buffer(
+                "c8_p_scale",
+                torch.full((1,), C8_PROBABILITY_QUANT_SCALE, dtype=torch.float32),
+                persistent=False,
+            )
+            # Upstream fused prepare writes BF16 cache records directly.
+            self.use_fused_qsa_prepare = False
+
+    def get_kv_cache_spec(self, vllm_config: VllmConfig) -> KVCacheSpec:
+        if not getattr(self, "c8_enabled", False):
+            return super().get_kv_cache_spec(vllm_config)
+        return QSAC8Spec(
+            block_size=vllm_config.cache_config.block_size,
+            num_kv_heads=self.num_kv_heads,
+            head_size=self.head_dim,
+            head_size_v=self.head_dim,
+            dtype=torch.int8,
+            num_head_slots=2,
+            state_content_bytes=self.num_kv_heads * (self.head_dim + C8_SCALE_BYTES),
+        )
 
     def bind_kv_cache(self, kv_cache: QSAKVCache) -> None:
         self.kv_cache = kv_cache

@@ -235,7 +235,9 @@ __aicore__ inline void QLIV2Matmul<QLIV2T>::ProcessWs(uint64_t s1gL0RealSize, ui
     const uint64_t avoidSlot = (mmInfo.s2L0LoopId + 1) % K_L0B_SLOT_NUM;
     // W 行号按块递增，除法只在循环外做一次（原来每块一次 DIV）。
     uint64_t wRowIdx = static_cast<uint64_t>(s1gL1Offset / static_cast<int64_t>(constInfo_.gSize));
-    for (int64_t s1gOffset = 0; s1gOffset < s1gL0RealSize; s1gOffset += constInfo_.gSize) {
+    // Four rows of four heads share one 16x16 block-diagonal weight tile.
+    const uint64_t groupStep = constInfo_.gSize == 4 ? BLOCK_CUBE : constInfo_.gSize;
+    for (int64_t s1gOffset = 0; s1gOffset < s1gL0RealSize; s1gOffset += groupStep) {
         uint64_t sSlot = sL0BufIdx_ % S_L0B_SLOT_NUM;
         if (sSlot == avoidSlot) {
             sSlot = (sSlot + 1) % S_L0B_SLOT_NUM;
@@ -603,7 +605,7 @@ __aicore__ inline void QLIV2Matmul<QLIV2T>::WeightDmaCopy(uint64_t s1gL1RealSize
 {
     DataCopyParams copyInParams;
     copyInParams.blockCount = 1;
-    copyInParams.blockLen = s1gL1RealSize;
+    copyInParams.blockLen = constInfo_.gSize == 4 ? BLOCK_CUBE : s1gL1RealSize;
     copyInParams.srcStride = 0;
     copyInParams.dstStride = 0;
     DataCopy(weightL1_[((qwL1Mte2BufIdx_ & (DOUBLE_BUF_NUM - 1))) * WEIGHT_BUFFER_OFFSET],
@@ -683,7 +685,7 @@ __aicore__ inline void QLIV2Matmul<QLIV2T>::LoadSToL0b(uint64_t s1gL1RealSize, u
     loadData3DParams.padList[3] = 255; // 尾部数据不影响滑窗的结果
 
     // SetLoadToA0Params
-    loadData3DParams.mExtension = constInfo_.gSize;                    // M height维度目的
+    loadData3DParams.mExtension = constInfo_.gSize == 4 ? BLOCK_CUBE : constInfo_.gSize;                    // M height维度目的
     loadData3DParams.kExtension = CeilAlign(s2L0RealSize, BLOCK_CUBE); // K   width维度目的
     loadData3DParams.kStartPt = 0;
     loadData3DParams.strideW = 1;
@@ -721,6 +723,10 @@ __aicore__ inline void QLIV2Matmul<QLIV2T>::LoadWeightToL0a(uint64_t l1ElemOffse
 template <typename QLIV2T>
 __aicore__ inline void QLIV2Matmul<QLIV2T>::LoadAllWeightRowsToL0a()
 {
+    if (constInfo_.gSize == 4) {
+        LoadWeightToL0a(0, W_SLOT_HALF_BASE);
+        return;
+    }
     for (uint64_t j = 0; j < (S1G_BASIC_BLOCK_L0 * 2 / constInfo_.gSize); j++) {
         LoadWeightToL0a(j * constInfo_.gSize * BLOCK_CUBE, W_SLOT_HALF_BASE + j * W_ROW_STRIDE_HALF);
     }
@@ -750,7 +756,7 @@ __aicore__ inline void QLIV2Matmul<QLIV2T>::ComputeWs(uint64_t s1gL0RealSize, ui
     MmadParams mmadParams;
     mmadParams.m = BLOCK_CUBE;
     mmadParams.n = s2L0RealSize;
-    mmadParams.k = constInfo_.gSize;
+    mmadParams.k = constInfo_.gSize == 4 ? BLOCK_CUBE : constInfo_.gSize;
     mmadParams.cmatrixInitVal = true;
     mmadParams.cmatrixSource = false;
     Mmad(cL0_.template ReinterpretCast<float>()[((l0cBufIdx_ & (DOUBLE_BUF_NUM - 1))) * L0C_BUFFER_OFFSET +
@@ -807,7 +813,7 @@ __aicore__ inline void QLIV2Matmul<QLIV2T>::FixpResToGm(uint64_t s1L0RealCount, 
     WaitFlag<HardEvent::M_FIX>(M_FIX_EVENT);
 
     AscendC::DataCopyCO12DstParams intriParams;
-    intriParams.mSize = 1;
+    intriParams.mSize = constInfo_.gSize == 4 ? s1L0RealCount : 1;
     intriParams.nSize = s2L0RealSize;
     intriParams.dstStride = constInfo_.s2BaseSize;
     intriParams.srcStride = 16;
@@ -815,7 +821,7 @@ __aicore__ inline void QLIV2Matmul<QLIV2T>::FixpResToGm(uint64_t s1L0RealCount, 
     intriParams.quantPre = QuantMode_t::NoQuant;
     intriParams.nz2ndEn = true;
     intriParams.reluPre = 0;
-    AscendC::SetFixpipeNz2ndFlag(s1L0RealCount, CeilDiv(constInfo_.gSize, BLOCK_CUBE) * S2_BASIC_BLOCK_L0 / BLOCK_CUBE,
+    AscendC::SetFixpipeNz2ndFlag(constInfo_.gSize == 4 ? 1 : s1L0RealCount, CeilDiv(constInfo_.gSize, BLOCK_CUBE) * S2_BASIC_BLOCK_L0 / BLOCK_CUBE,
                                  2048);
     if (candMode_) {
         // D3b: 候选分数区 —— 每个 (token, tile) 一行 256 float，由调用方给出基址
