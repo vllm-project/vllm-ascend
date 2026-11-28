@@ -651,6 +651,45 @@ def test_single_token_replay_keeps_configured_split_and_buffer_addresses(runtime
     torch.testing.assert_close(flash.schedule, torch.cat((flash.cache_lens, flash.cu, flash.used_q)))
 
 
+@pytest.mark.parametrize("pcp_size", [1, 2])
+@pytest.mark.parametrize("masked", [False, True])
+def test_history_mask_reaches_exchange_before_current_merge(runtime, monkeypatch, pcp_size, masked):
+    impl = runtime.bind(
+        SimpleNamespace(
+            dcp_size=2,
+            tp_group=SimpleNamespace(world_size=1, unique_name="tp"),
+            dcp_group=SimpleNamespace(unique_name="dcp"),
+            pcp_group=SimpleNamespace(world_size=pcp_size, unique_name="pcp"),
+        )
+    )
+    history = torch.full((2, 2, 512), 18.0)
+    lse = torch.zeros(2, 2, 1)
+    mask = torch.tensor([True, False]) if masked else None
+
+    def exchange(output, stats, size, dim, group, pcp=None, *, defer_combine, output_mask=None):
+        assert defer_combine and dim == 1
+        assert (size, group, pcp) == ((1, "tp", "pcp") if pcp_size == 2 else (2, "dcp", None))
+        output, stats = output[:, : 2 // size], stats[:, : 2 // size]
+        if output_mask is not None:
+            stats = stats.masked_fill(output_mask[:, None, None], -torch.inf)
+        # The other source rank supplies valid history for both tokens.
+        return [output, torch.full_like(output, 8.0)], [stats, torch.zeros_like(stats)]
+
+    fused = Mock(side_effect=exchange)
+    monkeypatch.setattr(torch.ops.vllm, "dcp_a2a_fused", fused, raising=False)
+    recv = impl._merge_dcp_attention_output(history, lse, defer_combine=True, output_mask=mask)
+    current = torch.full_like(recv[0][0], 4.0)
+    actual = combine_outputs(
+        recv, 512, scatter_dim=1, local_output=current, local_lse=torch.zeros_like(current[..., :1])
+    )
+    # Equal finite LSEs give each valid contribution equal weight.
+    expected = torch.full_like(actual, 10.0)
+    if masked:
+        expected[0] = 6.0
+    torch.testing.assert_close(actual, expected)
+    assert fused.call_args.kwargs.get("output_mask") is mask
+
+
 def test_current_pages_cross_physical_blocks_and_eager_does_not_retain(runtime):
     builder = runtime.builder()
     flash = builder.build(common([260, 133], [130, 129]), 2, 259, True)
@@ -1212,3 +1251,73 @@ def test_quant_adapter_class_constraints_and_native_abi(runtime, heads):
     assert output.shape == (heads, 2, 512) and lse.shape == (heads, 2)
     assert operation.call_args.args[6] == 1
     assert operation.call_args.kwargs["return_softmax_lse"]
+
+
+@pytest.mark.parametrize("kind", ["HISTORY", "CURRENT"])
+@pytest.mark.parametrize("split", [False, True])
+@pytest.mark.parametrize("masked", [False, True])
+def test_dcp_query_layout_is_independent_of_output_mask(runtime, kind, split, masked):
+    flash = runtime.builder(size=8, heads=8).build(common([3], [2]), 1, 2, False)
+    batch = flash.current if kind == "CURRENT" else flash
+    q_nope, q_pe = torch.ones_like(batch.query[..., :512]), torch.full_like(batch.query[..., 512:], 2)
+    if split:
+        batch.query = None
+    else:
+        batch.query.fill_(float("nan"))
+    mask = torch.tensor([False, True]) if masked else None
+    batch.output_mask = mask
+    batch.adapter = Mock()
+    batch.adapter.attention.return_value = (q_nope.transpose(0, 1), q_nope[..., 0].T)
+    impl = runtime.bind(SimpleNamespace(use_quant_flashmla=False, kv_lora_rank=512, qk_rope_head_dim=64))
+    k_nope, k_pe = q_nope[:, :1], q_pe[:, :1]
+    if kind == "CURRENT":
+        impl._prepare_dcp_flashmla_current(flash, q_nope, q_pe, k_nope, k_pe)
+    impl._run_dcp_flashmla_attention(flash, q_nope, q_pe, k_nope, k_pe, attention_kind=runtime.scope["CPKVScope"][kind])
+    call = batch.adapter.attention.call_args
+    query = call.args[0]
+    if split:
+        assert isinstance(query, tuple) and query[0] is q_nope and query[1] is q_pe
+    else:
+        assert query is batch.query
+        torch.testing.assert_close(query, torch.cat((q_nope, q_pe), dim=-1))
+    assert call.kwargs.get("output_mask") is mask
+
+
+def test_split_current_allocates_component_pages_without_fused_query(runtime):
+    adapter = Mock()
+    prepared = adapter.for_capacity.return_value
+    prepared.allocate_cache.return_value = (torch.empty(5, 128, 1, 512), torch.empty(5, 128, 1, 64))
+    current = runtime.api.FlashMLACurrent.allocate_split(adapter, 129, 3, 2, torch.device("cpu"))
+    adapter.for_capacity.assert_called_once_with(2, 129)
+    prepared.allocate_cache.assert_called_once_with(5, device=torch.device("cpu"))
+    assert current.query is None and current.schedule is None
+    assert current.cache is prepared.allocate_cache.return_value
+    assert current.block_table.shape == (3, 2)
+    assert current.slots.tolist() == [-1] * 129
+    assert current.output_mask.shape == (129,) and current.output_mask.dtype == torch.bool
+
+
+def test_split_current_and_history_masks_refresh_independently(runtime, monkeypatch):
+    builder = runtime.builder(size=8, rank=1, heads=8)
+    allocate = builder._allocate
+
+    def allocate_split(tokens, rows, columns, causal):
+        batch = allocate(tokens, rows, columns, causal)
+        # Supply the split buffer contract without installing an attention provider.
+        batch.query = None
+        batch.output_mask = torch.empty(tokens, dtype=torch.bool)
+        batch.current.output_mask = torch.empty(tokens, dtype=torch.bool)
+        batch.current.schedule = None
+        return batch
+
+    monkeypatch.setattr(builder, "_allocate", allocate_split)
+    batch = builder.build(common([1, 5], [1, 1], tokens=3), 2, 2, False, retain_for_graph=True)
+    assert batch.output_mask.tolist() == [True, False, True]
+    assert batch.current.output_mask.tolist() == [False, False, True]
+    assert batch.current.slots.tolist() == [0, 128, -1]
+    schedule = batch.current.schedule
+    replay = builder.build(common([5, 0], [1, 1], tokens=3), 2, 2, False)
+    assert replay is batch and replay.current.schedule is schedule
+    assert replay.output_mask.tolist() == [False, True, True]
+    assert replay.current.output_mask.tolist() == [False, True, True]
+    assert replay.current.slots.tolist() == [0, -1, -1]

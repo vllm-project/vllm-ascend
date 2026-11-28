@@ -1710,3 +1710,8 @@ msgstr ""
 "> `--max-model-len 1048576` 是提示词和生成 token 的总上下文预算，而不是在 1M token 提示词之上额外的输出预算。如果内存不足，请减小 `--max-num-seqs` 或实际输入长度。\n"
 ">\n"
 "> 完整的启动命令和参数说明，请参考[第 5 节](#5-online-service-deployment)中的部署示例。"
+
+msgid ""
+"{% include \"getting_started/installation/ascend_docker_runtime.inc.md\" %}"
+msgstr ""
+"{% include \"getting_started/installation/ascend_docker_runtime.inc.md\" %}"
