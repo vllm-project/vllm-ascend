@@ -1,0 +1,4 @@
+pr: 22784
+entries:
+  - category: performance
+    text: Reduced layerwise GVA pool memory usage for KV cache groups with a single pipeline stage and decode context shard.
