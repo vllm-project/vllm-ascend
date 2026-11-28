@@ -33,7 +33,7 @@ jobs:
       vars.RECIPES_PREVIEW_ENABLED == 'true'
     runs-on: linux-amd64-cpu-2-hk
     container:
-      image: quay.io/ascend-ci/vllm-ascend:lint
+      image: swr.ap-southeast-1.myhuaweicloud.com/base_image/ascend-ci/vllm-ascend/vllm-ascend:lint
     timeout-minutes: 5
     environment:
       name: recipes-preview
