@@ -14,11 +14,15 @@
 
 """Ascend QSA owner for Qwen3.8-Flash-Next."""
 
+from collections.abc import Iterator
+from contextlib import contextmanager
+from contextvars import ContextVar
 from copy import copy
 from dataclasses import replace
 from typing import TYPE_CHECKING, Any, Protocol, TypeAlias, cast
 
 import torch
+import torch_npu
 from vllm.config import VllmConfig
 from vllm.distributed import get_pcp_group
 from vllm.forward_context import get_forward_context
@@ -50,15 +54,25 @@ from vllm_ascend.ops.triton.qwen4_exp.qsa import (
 from vllm_ascend.ops.triton.qwen4_exp.qsa import (
     qsa_store_cache_rows as qsa_store_cache_rows_fused,
 )
+from vllm_ascend.ops.triton.qwen4_exp.union_cache import materialize_prepared_pages
+from vllm_ascend.quantization.methods.kv_cache.mxfp_c8 import _quant_weight_loader, normalize_mxfp_v_scale
 
 from .attention_dispatch import build_qsa_request_plan, dispatch_qsa_attention
+from .cache_config import QSAMXFP8Spec
 from .gbsa import GBSA_PAGE_SIZE, qsa_gbsa_attention
-from .lightning_indexer import QSAIndexerMetadataProtocol, qsa_select_paged_tokens_lightning_v2
+from .lightning_indexer import (
+    QSAIndexerMetadataProtocol,
+    indexer_cache_views,
+    qsa_select_paged_tokens_lightning_v2,
+    quantize_indexer_rows,
+)
 from .topk_buffer import share_topk_buffer
+from .union_layout import fits_dense_page_budget, prepare_union_layout
 
 if TYPE_CHECKING:
     import vllm.models.qwen4_exp.amd.qsa_indexer as upstream_indexer
     import vllm.models.qwen4_exp.common.qsa_indexer as qsa_indexer
+    from vllm.models.qwen4_exp.common.qsa import Qwen4ExpQSAMetadata
     from vllm.models.qwen4_exp.common.qsa_indexer import (
         QSAIndexerBackend,
         QSAIndexerMetadataBuilder,
@@ -82,7 +96,7 @@ else:
 # carries the resulting valid-type/misc ignores.
 UpstreamQSABackend = upstream_qsa.Qwen4ExpQSABackend  # type: ignore[attr-defined]
 
-QSAKVCache: TypeAlias = tuple[torch.Tensor, torch.Tensor]
+QSAKVCache: TypeAlias = tuple[torch.Tensor, ...]
 
 
 def _gather_pcp_cache_rows(
@@ -105,6 +119,11 @@ def _store_qsa_cache_rows(
         cache = cache.view(cache.shape[0], cache.shape[1], 1, -1)
         rows = rows.flatten(1)
     flat_slots = slot_mapping.reshape(-1)
+    # Quantized values are already encoded; copy bytes so the Triton store
+    # never casts padding literals to an unsupported FP8 arithmetic type.
+    if cache.dtype == torch.float8_e4m3fn:
+        cache = cache.view(torch.uint8)
+        rows = rows.view(torch.uint8)
     qsa_store_cache_rows_fused(cache, flat_slots, rows)
 
 
@@ -428,11 +447,14 @@ class AscendQSAIndexer(upstream_indexer.QSAIndexer):
             rope_position_cache,
         )
         normalized = self.normalize_compressed_keys(pooled, first_positions)
-        _store_qsa_cache_rows(
-            self.compressed_key_cache.kv_cache,
-            compressed_metadata.slot_mapping,
-            normalized,
-        )
+        compressed = self.compressed_key_cache.kv_cache
+        if compressed.dtype == torch.uint8:
+            keys, scales = indexer_cache_views(compressed)
+            key_rows, scale_rows = quantize_indexer_rows(normalized)
+            _store_qsa_cache_rows(keys, compressed_metadata.slot_mapping, key_rows)
+            _store_qsa_cache_rows(scales.unsqueeze(-1), compressed_metadata.slot_mapping, scale_rows)
+        else:
+            _store_qsa_cache_rows(compressed, compressed_metadata.slot_mapping, normalized)
         _store_qsa_cache_rows(raw_key_cache, raw_metadata.slot_mapping, token_k[:num_tokens])
         if rope_position_cache is not None:
             _store_qsa_cache_rows(
@@ -447,15 +469,18 @@ class AscendQSAIndexer(upstream_indexer.QSAIndexer):
         metadata: QSAIndexerMetadataProtocol,
         out: torch.Tensor | None,
     ) -> torch.Tensor:
-        logger.info_once("QSA is using native request-batched LightningIndexerV2 through the CANN Torch interface.")
-        return qsa_select_paged_tokens_lightning_v2(
+        keys = self.compressed_key_cache.kv_cache
+        selected = qsa_select_paged_tokens_lightning_v2(
             query,
-            self.compressed_key_cache.kv_cache,
+            keys,
             metadata,
             self.token_topk,
             self.compress_ratio,
             out,
         )
+        if keys.dtype == torch.uint8:
+            logger.info_once("QSA QuantLightningIndexerV2 executed: FP8 E4M3, per-token FP32 scale, mode 1.")
+        return selected
 
 
 class AscendQSAImpl(AttentionImplBase[Any]):
@@ -491,8 +516,13 @@ class AscendQSAImpl(AttentionImplBase[Any]):
         kv_cache: QSAKVCache,
         slot_mapping: torch.Tensor,
     ) -> None:
-        del layer
-        key_cache, value_cache = kv_cache
+        key_cache, value_cache = kv_cache[:2]
+        if self.kv_cache_dtype == "mxfp8":
+            key, key_scale = torch_npu.npu_dynamic_mx_quant(key.contiguous(), dst_type=torch.float8_e4m3fn)
+            value = torch_npu.npu_quantize(
+                value.flatten(1), layer.v_cache_scale_reciprocal, None, torch.float8_e4m3fn, -1, False
+            ).view_as(value)
+            _store_qsa_cache_rows(kv_cache[2], slot_mapping, key_scale.view(torch.uint8).flatten(-2))
         _store_qsa_cache_rows(key_cache, slot_mapping, key)
         _store_qsa_cache_rows(value_cache, slot_mapping, value)
 
@@ -501,12 +531,13 @@ class AscendQSAImpl(AttentionImplBase[Any]):
         layer: torch.nn.Module,
         query: torch.Tensor,
         kv_cache: QSAKVCache,
-        attn_metadata: QSAIndexerMetadataProtocol,
+        attn_metadata: "Qwen4ExpQSAMetadata",
         output: torch.Tensor,
         *,
         token_to_req: torch.Tensor,
         logical_positions: torch.Tensor | None = None,
         seq_lens: torch.Tensor | None = None,
+        current_kv: tuple[torch.Tensor, torch.Tensor] | None = None,
     ) -> torch.Tensor:
         # The base ABI forwards only `token_to_req`; the GBSA kernel also
         # needs the indexer-side positions/lengths, supplied by the Ascend
@@ -524,6 +555,7 @@ class AscendQSAImpl(AttentionImplBase[Any]):
             token_to_req,
             logical_positions,
             seq_lens,
+            current_kv,
         )
 
     def _dispatch_qsa(
@@ -531,47 +563,71 @@ class AscendQSAImpl(AttentionImplBase[Any]):
         layer: torch.nn.Module,
         query: torch.Tensor,
         kv_cache: QSAKVCache,
-        attn_metadata: QSAIndexerMetadataProtocol,
+        attn_metadata: "Qwen4ExpQSAMetadata",
         output: torch.Tensor,
         token_to_req: torch.Tensor,
         logical_positions: torch.Tensor,
         seq_lens: torch.Tensor,
+        current_kv: tuple[torch.Tensor, torch.Tensor] | None = None,
     ) -> torch.Tensor:
-        """Run the GBSA attention path selected for this step."""
+        """Dispatch prefill with a request plan and decode through ordinary GBSA."""
         num_tokens = attn_metadata.num_actual_tokens
         output.zero_()
         if num_tokens == 0:
             return output
         selected_indices = layer.topk_indices_buffer[:num_tokens]
-        key_cache, value_cache = kv_cache
+        key_cache, value_cache = kv_cache[:2]
         key_cache = canonicalize_singleton_dim_strides(key_cache)
         value_cache = canonicalize_singleton_dim_strides(value_cache)
         packed_width = layer.indexer.token_topk // layer.indexer.compress_ratio + layer.indexer.compress_ratio - 1
         compact_indices = selected_indices[:, :packed_width]
         request_plan = getattr(attn_metadata, "qsa_request_plan", None)
-        if request_plan is None:
-            logger.info_once("QSA attention is using the CANN GBSA backend.")
-            result = qsa_gbsa_attention(
+        if request_plan is not None:
+            table = attn_metadata.block_table
+            if self.kv_cache_dtype == "mxfp8":
+                if current_kv is None:
+                    raise ValueError("C8 Union prefill requires current K/V")
+                layout = prepare_union_layout(
+                    kv_cache[0].shape[0],
+                    attn_metadata.slot_mapping,
+                    compact_indices,
+                    logical_positions[:num_tokens],
+                    seq_lens,
+                    token_to_req[:num_tokens],
+                    table,
+                    request_plan,
+                    getattr(attn_metadata, "qsa_dense_page_layouts", None),
+                )
+                table, request_plan = layout.block_table, layout.request_plan
+                key_cache, value_cache = materialize_prepared_pages(
+                    kv_cache, current_kv, layout.pages, layout.current_rows
+                )
+                logger.info_once("QSA Union prefill uses step-local BF16 pages from the C8 cache.")
+            return dispatch_qsa_attention(
                 query[:num_tokens],
                 key_cache,
                 value_cache,
                 compact_indices,
-                attn_metadata.block_table,
+                table,
                 token_to_req[:num_tokens],
                 logical_positions[:num_tokens],
                 seq_lens,
                 output[:num_tokens],
-                prepared_metadata=getattr(
-                    attn_metadata,
-                    "qsa_gbsa_metadata",
-                    None,
-                ),
+                request_plan,
             )
-            if getattr(attn_metadata, "pcp_full_graph", False):
-                result.masked_fill_(logical_positions[:num_tokens, None, None] < 0, 0)
-            return result
-        return dispatch_qsa_attention(
-            query[:num_tokens],
+
+        scales = {}
+        query = query[:num_tokens]
+        if self.kv_cache_dtype == "mxfp8":
+            query, q_scale = torch_npu.npu_dynamic_mx_quant(query.contiguous(), dst_type=torch.float8_e4m3fn)
+            scales = dict(
+                q_scale=q_scale.view(torch.float8_e8m0fnu),
+                k_scale=kv_cache[2].view(torch.float8_e8m0fnu).unflatten(-1, (self.head_size // 64, 2)),
+                v_scale=kv_cache[3].view(torch.float8_e8m0fnu).unflatten(-1, (self.head_size, 2)),
+            )
+        cu_q = getattr(attn_metadata, "qsa_request_cu_q", None)
+        result = qsa_gbsa_attention(
+            query,
             key_cache,
             value_cache,
             compact_indices,
@@ -580,8 +636,18 @@ class AscendQSAImpl(AttentionImplBase[Any]):
             logical_positions[:num_tokens],
             seq_lens,
             output[:num_tokens],
-            request_plan,
+            query_start_loc=cu_q,
+            max_query_len=max(attn_metadata.max_query_len, 1) if cu_q is not None else 1,
+            prepared_metadata=getattr(
+                attn_metadata, "qsa_mxfp8_gbsa_metadata" if scales else "qsa_gbsa_metadata", None
+            ),
+            **scales,
         )
+        if getattr(attn_metadata, "pcp_full_graph", False):
+            result.masked_fill_(logical_positions[:num_tokens, None, None] < 0, 0)
+        if scales and getattr(layer, "is_mtp_qsa", False):
+            logger.info_once("MTP QSA executed ordinary GBSA with MXFP8 KV, mode 6.")
+        return result
 
     @staticmethod
     def update_graph_params(
@@ -593,6 +659,19 @@ class AscendQSAImpl(AttentionImplBase[Any]):
         draft_attn_metadatas=None,
     ):
         """QSA replay parameters live in persistent buffers; nothing to rebind."""
+
+
+_qsa_full_graph_replay = ContextVar("qsa_full_graph_replay", default=False)
+
+
+@contextmanager
+def qsa_metadata_build_scope(*, full_graph: bool) -> Iterator[None]:
+    """Expose the Qwen model state's replay mode during the parent metadata build."""
+    token = _qsa_full_graph_replay.set(full_graph)
+    try:
+        yield
+    finally:
+        _qsa_full_graph_replay.reset(token)
 
 
 class AscendQSAMetadataBuilder(upstream_qsa.Qwen4ExpQSAMetadataBuilder):
@@ -661,6 +740,7 @@ class AscendQSAMetadataBuilder(upstream_qsa.Qwen4ExpQSAMetadataBuilder):
         *,
         for_capture: bool = False,
     ):
+        full_graph_mode = _qsa_full_graph_replay.get()
         pcp_context = getattr(common_attn_metadata, "pcp_context", None)
         full_pcp_graph = pcp_context is not None and common_attn_metadata.graph_pad_size >= 0
         if full_pcp_graph:
@@ -673,17 +753,64 @@ class AscendQSAMetadataBuilder(upstream_qsa.Qwen4ExpQSAMetadataBuilder):
             num_write_tokens = batch.num_tokens_after_padding if full_pcp_graph else batch.num_tokens
             metadata.slot_mapping = pcp_context.global_slot_mappings[group, :num_write_tokens]
         metadata.qsa_request_plan = None
+        if pcp_context is None and (for_capture or full_graph_mode):
+            if for_capture:
+                metadata.qsa_graph_query_offsets = common_attn_metadata.query_start_loc
+            else:
+                n = common_attn_metadata.num_reqs
+                starts = common_attn_metadata.query_start_loc_cpu[: n + 1].tolist()
+                if (
+                    n > 0
+                    and n == metadata.block_table.shape[0]
+                    and len(starts) == n + 1
+                    and starts[0] == 0
+                    and starts[-1] == metadata.num_actual_tokens
+                    and all(end >= start for start, end in zip(starts, starts[1:]))
+                ):
+                    metadata.qsa_graph_query_offsets = common_attn_metadata.query_start_loc
         if for_capture or full_pcp_graph:
             return metadata
         phases = common_attn_metadata.is_prefilling
         if phases is None or phases.device.type != "cpu":
             raise ValueError("QSA phase dispatch requires scheduler CPU is_prefilling metadata")
-        if any(phases.tolist()):
+        if any(phases.tolist()) and (
+            not isinstance(self.kv_cache_spec, QSAMXFP8Spec) or self.kv_cache_spec.use_prefill_union
+        ):
             metadata.qsa_request_plan = build_qsa_request_plan(
                 common_attn_metadata.query_start_loc_cpu,
                 common_attn_metadata.num_actual_tokens,
                 phases,
             )
+            if not isinstance(self.kv_cache_spec, QSAMXFP8Spec):
+                return metadata
+            # For dense prefill, materialize a bounded superset of the selected
+            # pages. The indexer and the Union mask still select the exact groups.
+            n = common_attn_metadata.num_reqs
+            lengths_bound = common_attn_metadata.seq_lens_cpu_upper_bound
+            if (
+                pcp_context is None
+                and n == metadata.block_table.shape[0]
+                and len(metadata.qsa_request_plan.requests) == n
+                and not metadata.qsa_request_plan.decode_spans
+                and lengths_bound is not None
+                and lengths_bound.device.type == "cpu"
+                and fits_dense_page_budget(n, metadata.num_actual_tokens, int(lengths_bound[:n].sum()))
+            ):
+                metadata.qsa_dense_page_layouts = {}
+        # A packed query segment is the causal suffix of its request. Graph
+        # padding and PCP sharding can break that relationship.
+        elif not full_graph_mode and pcp_context is None and common_attn_metadata.graph_pad_size < 0:
+            n = common_attn_metadata.num_reqs
+            starts = common_attn_metadata.query_start_loc_cpu[: n + 1].tolist()
+            if (
+                n > 0
+                and n == metadata.block_table.shape[0]
+                and len(starts) == n + 1
+                and starts[0] == 0
+                and starts[-1] == metadata.num_actual_tokens
+                and all(end > start for start, end in zip(starts, starts[1:]))
+            ):
+                metadata.qsa_request_cu_q = common_attn_metadata.query_start_loc[: n + 1].to(torch.int64)
         return metadata
 
     def build_for_cudagraph_capture(self, common_attn_metadata: CommonAttentionMetadata):
@@ -727,6 +854,8 @@ class AscendQSABackend(UpstreamQSABackend):  # type: ignore[valid-type, misc]
         """Store main K/V in two page-major slots of one descriptor page."""
         if spec.head_size != spec.head_size_v:
             raise ValueError("QSA page-major K/V slots require symmetric head sizes")
+        if isinstance(spec, QSAMXFP8Spec):
+            return spec
         slot_bytes = spec.num_kv_heads * spec.head_size * get_dtype_size(spec.dtype)
         if spec.num_head_slots == 2 and spec.state_content_bytes == slot_bytes:
             return spec
@@ -833,22 +962,103 @@ class AscendPCPQSACompressedKeyCache(qsa_indexer.QSACompressedKeyCache):
 class AscendQwen4ExpQSAAttention(upstream_qsa.Qwen4ExpQSAAttention):
     """Qwen4Exp QSA owner bound to the Ascend implementation."""
 
-    def __init__(self, *, vllm_config: VllmConfig, **kwargs) -> None:
-        if vllm_config.parallel_config.prefill_context_parallel_size == 1:
-            super().__init__(vllm_config=vllm_config, **kwargs)
-            # Rebind as each layer is constructed to limit live allocations.
+    def __init__(self, *, vllm_config: VllmConfig, config, layer_id, quant_config=None, reduce_results=True, prefix=""):
+        use_mxfp8 = upstream_qsa.qsa_kv_cache_dtype(vllm_config.cache_config, prefix) == "mxfp8"
+        use_pcp = vllm_config.parallel_config.prefill_context_parallel_size > 1
+        construction_config = copy(vllm_config) if use_mxfp8 or use_pcp else vllm_config
+        if use_pcp:
+            construction_config.parallel_config = copy(vllm_config.parallel_config)
+            construction_config.parallel_config.prefill_context_parallel_size = 1
+        if use_mxfp8:
+            if int(config.head_dim) not in (192, 256):
+                raise ValueError("QSA MXFP8 GBSA supports only D192/D256")
+            # Upstream constructs projections and BF16 indexer state. Only the main
+            # Ascend QSA cache changes representation; do not mutate global config.
+            construction_config.cache_config = copy(vllm_config.cache_config)
+            construction_config.cache_config.cache_dtype = "auto"
+        super().__init__(
+            vllm_config=construction_config,
+            config=config,
+            layer_id=layer_id,
+            quant_config=quant_config,
+            reduce_results=reduce_results,
+            prefix=prefix,
+        )
+        if not use_pcp:
             share_topk_buffer(self)
-            return
-        # Upstream constructs token-local projections and cache owners. The
-        # Ascend forward and metadata builders handle the PCP layout.
-        local_config = copy(vllm_config)
-        local_config.parallel_config = copy(vllm_config.parallel_config)
-        local_config.parallel_config.prefill_context_parallel_size = 1
-        super().__init__(vllm_config=local_config, **kwargs)
-        # The raw/compressed cache owners were built by the same local constructor.
-        self.indexer.configure_pcp_cache_backends(vllm_config)
+        if use_mxfp8:
+            # The indexer dtype was resolved at construction. Cache planning
+            # later updates the shared block size after sizing the GDN state.
+            self.indexer.raw_key_cache.cache_config = vllm_config.cache_config
+            self.indexer.compressed_key_cache.cache_config = vllm_config.cache_config
+            recipe = getattr(quant_config, "quant_description", {})
+            recipe_key = f"{prefix}.indexer.quant_type"
+            if recipe.get(recipe_key, recipe.get(f"model.{recipe_key}")) == "QK_FP8_DYNAMIC":
+                compressed = self.indexer.compressed_key_cache
+                compressed.dtype = torch.uint8
+                compressed.head_size = self.indexer.index_head_dim + torch.float32.itemsize
+            if self.num_kv_heads != 1:
+                raise ValueError("QSA cache store currently requires one KV head per TP rank")
+            self._qsa_model_dtype = vllm_config.model_config.dtype
+            self.kv_cache_dtype = "mxfp8"
+            self.kv_cache_torch_dtype = torch.float8_e4m3fn
+            self.impl.kv_cache_dtype = "mxfp8"
+            # Match ModelSlim's existing fa_v.scale -> attn.v_cache_scale mapper.
+            self.attn = torch.nn.Module()
+            # MTP checkpoints may omit calibration. E8M0 byte 127 means scale 1.
+            # Keep the missing-weight sentinel for calibrated target layers.
+            self.is_mtp_qsa = "mtp" in prefix.split(".")
+            initial_scale = 127 if self.is_mtp_qsa else 255
+            scale = torch.nn.Parameter(
+                torch.full((self.num_kv_heads * self.head_dim,), initial_scale, dtype=torch.uint8), requires_grad=False
+            )
+            scale.weight_loader = _quant_weight_loader
+            self.attn.register_parameter("v_cache_scale", scale)
+
+        if use_pcp:
+            self.indexer.configure_pcp_cache_backends(vllm_config)
+
+    def process_weights_after_loading(self) -> None:
+        super().process_weights_after_loading()
+        if self.kv_cache_dtype == "mxfp8":
+            scale = self.attn.v_cache_scale
+            if bool((scale == 255).any()):
+                raise ValueError("QSA MXFP8 requires loaded finite static E8M0 fa_v.scale for every KV channel")
+            normalize_mxfp_v_scale(scale)
+            self.register_buffer(
+                "v_cache_scale_reciprocal", torch.exp2(127 - scale.float()).to(self._qsa_model_dtype), persistent=False
+            )
+
+    def get_kv_cache_spec(self, vllm_config):
+        if self.kv_cache_dtype != "mxfp8":
+            return super().get_kv_cache_spec(vllm_config)
+        transfer = getattr(vllm_config, "kv_transfer_config", None)
+        producer = transfer is not None and transfer.kv_role == "kv_producer"
+        spec = QSAMXFP8Spec(
+            use_prefill_union=producer,
+            block_size=vllm_config.cache_config.block_size,
+            num_kv_heads=self.num_kv_heads,
+            head_size=self.head_dim,
+            head_size_v=self.head_dim,
+            dtype=torch.float8_e4m3fn,
+            num_head_slots=2,
+            state_content_bytes=self.num_kv_heads * (self.head_dim + self.head_dim // 32),
+        )
+        return spec
+
+    def get_mxfp_v_scale_cache_entry(self):
+        """Expose the GBSA scale storage in the axis order used by the page restorer."""
+        if self.kv_cache_dtype != "mxfp8":
+            return None
+        cache = self.kv_cache[3].unflatten(-1, (self.head_dim // 16, 16, 2))
+        return self.attn.v_cache_scale, cache.permute(0, 2, 3, 1, 4, 5)
 
     def bind_kv_cache(self, kv_cache: QSAKVCache) -> None:
+        if self.kv_cache_dtype == "mxfp8":
+            if len(kv_cache) != 4:
+                raise ValueError("QSA MXFP8 requires K/V and two scale caches")
+            scale = self.attn.v_cache_scale.view(1, 1, self.num_kv_heads, self.head_dim, 1)
+            kv_cache[3].unflatten(-1, (self.head_dim, 2)).copy_(scale)
         self.kv_cache = kv_cache
 
     def _run_qsa(
@@ -932,6 +1142,7 @@ class AscendQwen4ExpQSAAttention(upstream_qsa.Qwen4ExpQSAAttention):
                 token_to_req=side_metadata.token_to_req,
                 logical_positions=side_metadata.logical_positions,
                 seq_lens=side_metadata.seq_lens,
+                current_kv=(write_key, write_value),
             )
         maybe_save_kv_layer_to_connector(self.layer_name, list(self.kv_cache))
 

@@ -200,8 +200,13 @@ def load_builder():
     )
 
     class Base:
-        def build(self, *args, **kwargs):
-            return SimpleNamespace(block_table="kept")
+        kv_cache_spec = None
+
+        def build(self, _, common, *args, **kwargs):
+            return SimpleNamespace(
+                block_table=getattr(common, "block_table_tensor", "kept"),
+                num_actual_tokens=getattr(common, "num_actual_tokens", 0),
+            )
 
     plans = []
 
@@ -211,9 +216,12 @@ def load_builder():
 
     namespace: dict[str, Any] = dict(
         Any=Any,
+        _qsa_full_graph_replay=SimpleNamespace(get=lambda: False),
         upstream_qsa=SimpleNamespace(Qwen4ExpQSAMetadataBuilder=Base),
         AttentionCGSupport=SimpleNamespace(UNIFORM_BATCH="uniform"),
         CommonAttentionMetadata=object,
+        QSAMXFP8Spec=SimpleNamespace,
+        torch=torch,
         build_qsa_request_plan=plan,
     )
     exec(compile(ast.Module(body=[builder], type_ignores=[]), str(source), "exec"), namespace)
@@ -223,7 +231,9 @@ def load_builder():
 def test_metadata_builder_keeps_decode_capture_on_gbsa():
     builder, plans = load_builder()
     assert builder._cudagraph_support == "uniform"
-    common = SimpleNamespace(is_prefilling=torch.tensor([False]))
+    common = SimpleNamespace(
+        is_prefilling=torch.tensor([False]), graph_pad_size=4, query_start_loc=torch.tensor([0, 4])
+    )
     assert builder.build(0, common).qsa_request_plan is None
     # Capture dummy inputs can look like prefills; the decode capture contract
     # must not freeze the prefill request plan into the graph.
@@ -236,6 +246,7 @@ def test_metadata_builder_uses_phase_flags_for_prefill():
     builder, plans = load_builder()
     common = SimpleNamespace(
         is_prefilling=torch.tensor([True]),
+        graph_pad_size=4096,
         query_start_loc_cpu=torch.tensor([0, 4096]),
         num_actual_tokens=4096,
     )
@@ -248,3 +259,87 @@ def test_metadata_builder_rejects_unknown_phase_instead_of_guessing():
     builder, _ = load_builder()
     with pytest.raises(ValueError, match="is_prefilling"):
         builder.build(0, SimpleNamespace(is_prefilling=None))
+
+
+@pytest.mark.parametrize(
+    "pad_size,starts,grouped",
+    [
+        (-1, [0, 3, 5], True),
+        (5, [0, 3, 5], False),
+        (-1, [0, 5, 5], False),
+        (-1, [1, 3, 5], False),
+        (-1, [0, 3, 4], False),
+        (-1, [0, 5], False),
+    ],
+)
+def test_request_page_table_requires_packed_queries(pad_size, starts, grouped):
+    builder, _ = load_builder()
+    boundaries = torch.tensor(starts, dtype=torch.int32)
+    common = SimpleNamespace(
+        is_prefilling=torch.tensor([False, False]),
+        num_reqs=2,
+        num_actual_tokens=5,
+        graph_pad_size=pad_size,
+        block_table_tensor=torch.zeros(2, 4, dtype=torch.int32),
+        query_start_loc_cpu=boundaries,
+        query_start_loc=boundaries,
+    )
+    meta = builder.build(0, common)
+    if grouped:
+        torch.testing.assert_close(meta.qsa_request_cu_q, boundaries.long())
+    else:
+        assert not hasattr(meta, "qsa_request_cu_q")
+    assert not hasattr(builder.build_for_cudagraph_capture(common), "qsa_request_cu_q")
+
+
+@pytest.mark.parametrize(
+    "starts,valid",
+    [
+        ([0, 3, 6], True),
+        ([0, 6, 6], True),
+        ([0, 3, 5], False),
+        ([1, 3, 6], False),
+        ([0, 4, 3], False),
+    ],
+)
+def test_full_graph_query_offsets_require_padded_request_span(starts, valid):
+    source = MODEL_DIR / "qsa.py"
+    builder_cls = next(
+        n
+        for n in ast.parse(source.read_text(encoding="utf-8")).body
+        if isinstance(n, ast.ClassDef) and n.name == "AscendQSAMetadataBuilder"
+    )
+
+    class Base:
+        def build(self, _, common, *args, **kwargs):
+            return SimpleNamespace(
+                block_table=common.block_table_tensor,
+                num_actual_tokens=common.num_actual_tokens,
+            )
+
+    namespace: dict[str, Any] = dict(
+        Any=Any,
+        _qsa_full_graph_replay=SimpleNamespace(get=lambda: True),
+        upstream_qsa=SimpleNamespace(Qwen4ExpQSAMetadataBuilder=Base),
+        AttentionCGSupport=SimpleNamespace(UNIFORM_BATCH="uniform"),
+        CommonAttentionMetadata=object,
+        torch=torch,
+        build_qsa_request_plan=lambda *args: ("prefill-plan",),
+    )
+    exec(compile(ast.Module(body=[builder_cls], type_ignores=[]), str(source), "exec"), namespace)
+    builder = namespace["AscendQSAMetadataBuilder"]()
+    boundaries = torch.tensor(starts, dtype=torch.int32)
+    common = SimpleNamespace(
+        is_prefilling=torch.tensor([False, False]),
+        num_reqs=2,
+        num_actual_tokens=6,
+        graph_pad_size=-1,
+        block_table_tensor=torch.zeros(2, 4, dtype=torch.int32),
+        query_start_loc_cpu=boundaries,
+        query_start_loc=boundaries,
+    )
+    meta = builder.build(0, common)
+    if valid:
+        assert meta.qsa_graph_query_offsets is boundaries
+    else:
+        assert not hasattr(meta, "qsa_graph_query_offsets")

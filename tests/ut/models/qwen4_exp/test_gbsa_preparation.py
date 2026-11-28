@@ -204,3 +204,18 @@ def test_pack_wide_positions_and_strided_buffers(dtype):
                 if offset < (position + 1) - start and start + offset < length:
                     expected[row, 512 + offset] = start + offset
         torch.testing.assert_close(storage, expected, rtol=0, atol=0)
+
+
+def test_request_layout_reuses_pages_and_preserves_per_token_tail():
+    prepare = load_cpu_preparation()
+    positions = torch.tensor([3, 4, 5, 7, 8])
+    lengths = torch.tensor([6, 9], dtype=torch.int32)
+    requests = torch.tensor([0, 0, 0, 1, 1])
+    boundaries = torch.tensor([0, 3, 5], dtype=torch.int64)
+    table = torch.tensor([[17], [3]], dtype=torch.int32)
+    indices = torch.tensor([[0, 1, -1, -1, -1]] * 5)
+    old = prepare(indices, positions, lengths, requests, table, 1)
+    idx, count, kv_lens, cu_q, pages = prepare(indices, positions, lengths, requests, table, 1, boundaries)
+    torch.testing.assert_close(idx, old[0])
+    torch.testing.assert_close(count, old[1])
+    assert kv_lens is lengths and cu_q is boundaries and pages is table
