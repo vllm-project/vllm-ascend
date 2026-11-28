@@ -1,0 +1,4 @@
+pr: 22795
+entries:
+  - category: bugfix
+    text: Preserved MXFP8 scale_alg (such as CEIL scale_alg=1) in AddRMSNorm and RMSNorm dynamic MX quant graph fusion passes instead of silently reverting to schema default 0.

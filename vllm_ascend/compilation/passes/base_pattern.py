@@ -44,6 +44,9 @@ class BasePattern(ABC):
     def get_extra_stream_scope_check(self):
         return extra_stream_scope_check
 
+    def get_extra_check(self) -> Callable[[pm.Match], bool] | None:
+        return None
+
     def pattern_key(self) -> str:
         return f"{self.__class__.__name__}_{self.eps}"
 
@@ -65,21 +68,42 @@ class BasePattern(ABC):
         pattern_fn = self.get_pattern()
         replacement_fn = self.get_replacement()
         example_inputs = self.get_inputs()
+        extra_check = self.get_extra_check()
 
         # The two registries are independent, so they are guarded and recorded
         # separately: a pattern that fails to register must stay retryable, and a
         # failure in one registry must not suppress the other. Record the key only
         # after the registration actually succeeded.
         if pattern_id not in registered:
-            pm.register_replacement(pattern_fn, replacement_fn, example_inputs, pm.fwd_only, pm_pass)
+            if extra_check is None:
+                pm.register_replacement(pattern_fn, replacement_fn, example_inputs, pm.fwd_only, pm_pass)
+            else:
+                pm.register_replacement(
+                    pattern_fn,
+                    replacement_fn,
+                    example_inputs,
+                    pm.fwd_only,
+                    pm_pass,
+                    extra_check=extra_check,
+                )
             registered.add(pattern_id)
 
         if pattern_id not in _registered_patterns:
+            stream_check = self.get_extra_stream_scope_check()
+            if extra_check is None:
+                nge_extra_check = stream_check
+            else:
+
+                def _combined_extra_check(match: pm.Match) -> bool:
+                    return stream_check(match) and extra_check(match)
+
+                nge_extra_check = _combined_extra_check
+
             nge.register_replacement(
                 search_fn=pattern_fn,
                 replace_fn=replacement_fn,
                 example_inputs=example_inputs,
-                extra_check=self.get_extra_stream_scope_check(),
+                extra_check=nge_extra_check,
             )
             # Mark this pattern as registered in the global backend registry
             _registered_patterns.add(pattern_id)
