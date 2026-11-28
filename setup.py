@@ -396,6 +396,31 @@ class cmake_build_ext(build_ext):
             shutil.copytree(src_cann_ops_custom, dst_cann_ops_custom)
             print(f"Copy: {src_cann_ops_custom} -> {dst_cann_ops_custom}")
 
+        # Fail fast when the extension was requested but not produced, instead
+        # of shipping a package whose torch.ops._C_ascend.* registrations are
+        # missing (they only surface at model load time, e.g. the v0.26.0rc2
+        # 310P release image failing with "'_C_ascend' object has no attribute
+        # 'npu_causal_conv1d_310'").
+        for ext in self.extensions:
+            ext_module, _, ext_name = ext.name.rpartition(".")
+            ext_dir = os.path.join(self.build_lib, ext_module)
+            # Accept both the plain "{name}.so" and the ABI-tagged
+            # "{name}.cpython-XXX-...so", but not names that merely share a
+            # prefix (e.g. "{name}_ops.so" must not satisfy this check).
+            produced = os.path.isdir(ext_dir) and any(
+                f == f"{ext_name}.so" or (f.startswith(f"{ext_name}.") and f.endswith(".so"))
+                for f in os.listdir(ext_dir)
+            )
+            if not produced:
+                raise RuntimeError(
+                    f"COMPILE_CUSTOM_KERNELS is enabled but the C extension "
+                    f"'{ext.name}' was not built. Check the CMake output above "
+                    f"(a common cause is building without the CANN environment "
+                    f"sourced, e.g. 'source /usr/local/Ascend/ascend-toolkit/set_env.sh'). "
+                    f"Set COMPILE_CUSTOM_KERNELS=0 only if you intentionally "
+                    f"want a build without the custom kernels."
+                )
+
     def run(self):
         if envs.COMPILE_CUSTOM_KERNELS:
             # First, ensure ACLNN custom-ops is built and installed.
