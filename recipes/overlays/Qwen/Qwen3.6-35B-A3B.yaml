@@ -119,7 +119,6 @@ variants:
       ascend_910b:
         docker_image: quay.io/ascend/vllm-ascend:v0.32.0rc1
         docker_serve_command: "vllm serve"
-        docker_shm_size: 1g
         install:
           pip: false
 
