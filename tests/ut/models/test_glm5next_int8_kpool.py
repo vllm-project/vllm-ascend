@@ -21,6 +21,10 @@ def test_unsupported_dtype_fails_before_layer_construction(dtype):
 @pytest.mark.parametrize("dtype", [torch.bfloat16, torch.int8])
 def test_int8_kpool_cache_tensor_count(monkeypatch, dtype):
     monkeypatch.setattr(Glm5NextKPoolIndexerBackend, "_init_cann_ops", lambda self: None)
+    monkeypatch.setattr(
+        "vllm_ascend.attention.indexer_kpool.get_ascend_config",
+        lambda: SimpleNamespace(enable_indexer_tail_kg_cat=False),
+    )
     indexer = SimpleNamespace(
         vllm_config=SimpleNamespace(
             parallel_config=SimpleNamespace(prefill_context_parallel_size=1, decode_context_parallel_size=1)

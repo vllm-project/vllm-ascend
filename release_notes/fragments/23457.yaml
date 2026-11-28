@@ -1,0 +1,11 @@
+pr: 23457
+entries:
+  - category: performance
+    text: >-
+      GLM-5.3-Flash can fuse the KPool indexer's MTP rollback tail key and gate
+      projections into a single GEMM by setting `enable_indexer_tail_kg_cat` to
+      `true` in `--additional-config`. The option is off by default, only affects
+      GLM-5.3-Flash KPool indexing with speculative decoding, and leaves other
+      models and the non-MTP path unchanged.
+    model: GLM-5.3-Flash
+    hardware: [A2, A3, A5]

@@ -542,6 +542,7 @@ class AscendConfig:
             "msmonitor_use_daemon": false,
             "enable_transpose_kv_cache_by_block": true,
             "weight_nz_mode": 1,
+            "enable_indexer_tail_kg_cat": false,
             "enable_shared_expert_dp": false,
             "enable_sparse_sfa_c8": false,
             "enable_sparse_li_c8": false,
@@ -710,6 +711,12 @@ class AscendConfig:
     msmonitor_use_daemon: bool = False
     enable_transpose_kv_cache_by_block: bool = True
     weight_nz_mode: int = 1
+    # Fuse the GLM-5.3-Flash KPool indexer tail projections: the MTP rollback
+    # tail key and gate consume the same hidden rows, so their two
+    # [head_dim, hidden] weights are stacked once after loading into one
+    # [2 * head_dim, hidden] GEMM. The tail writeback Triton kernel gains
+    # key/gate row strides to read the fused buffer in place.
+    enable_indexer_tail_kg_cat: bool = False
 
     # ---- sub-configs (no vllm_config dep): pydantic dict→dataclass coercion ----
     ascend_compilation_config: AscendCompilationConfig = dataclasses.field(default_factory=AscendCompilationConfig)

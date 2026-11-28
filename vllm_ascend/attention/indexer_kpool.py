@@ -31,6 +31,7 @@ from vllm.v1.attention.backend import (
 )
 from vllm.v1.kv_cache_interface import MLAAttentionSpec
 
+from vllm_ascend.ascend_config import get_ascend_config
 from vllm_ascend.attention.context_parallel.sfa_dcp_utils import get_sfa_pcp_global_metadata
 from vllm_ascend.attention.utils import AscendCommonAttentionMetadata, has_requests_to_run_as_prefill
 from vllm_ascend.core.kv_cache_interface import (
@@ -807,7 +808,9 @@ class Glm5NextKPoolIndexerBackend(nn.Module):
     Keep execution independent of the standard SFA indexer and its operators.
     """
 
-    _head_weight_f32: torch.Tensor | None
+    _head_weight_f32: torch.Tensor | None = None
+    _kg_weight: torch.Tensor | None = None
+    tail_kg_cat: bool = False
 
     def __init__(self, vllm_indexer: nn.Module, qk_rope_head_dim: int) -> None:
         super().__init__()
@@ -857,6 +860,8 @@ class Glm5NextKPoolIndexerBackend(nn.Module):
             )
         self._init_cann_ops()
         self._head_weight_f32 = None
+        self._kg_weight = None
+        self.tail_kg_cat = get_ascend_config().enable_indexer_tail_kg_cat
 
     @property
     def topk_output_width(self) -> int:
@@ -876,7 +881,7 @@ class Glm5NextKPoolIndexerBackend(nn.Module):
         return 2 if self.enable_sparse_li_c8 or self.kpool_int8 else 1
 
     def process_weights_after_loading(self) -> None:
-        """Refill the sole derived weight without moving its captured address."""
+        """Refill the derived weights without moving their captured addresses."""
         head_weight = (
             self.wk_weights_proj.weight[self.head_dim :].detach().to(dtype=torch.float32, copy=True).contiguous()
         )
@@ -886,6 +891,55 @@ class Glm5NextKPoolIndexerBackend(nn.Module):
             self._head_weight_f32 = head_weight
         else:
             self._head_weight_f32.copy_(head_weight)
+        if self.tail_kg_cat:
+            # The tail key and gate projections share their input, so stacking
+            # the two [head_dim, hidden] weights along N yields one
+            # [2 * head_dim, hidden] GEMM with no input reshuffle. Concatenate
+            # once here rather than per forward, and refresh in place so the
+            # captured address survives layerwise reloads and refits.
+            kg_weight = torch.cat(
+                (
+                    self.wk_weights_proj.weight[: self.head_dim].detach(),
+                    self.index_kpool_compress_gate.detach().to(self.wk_weights_proj.weight.dtype),
+                ),
+                dim=0,
+            ).contiguous()
+            if self._kg_weight is None:
+                self._kg_weight = kg_weight
+            else:
+                self._kg_weight.copy_(kg_weight)
+
+    def _project_tail_key_gate(
+        self,
+        tail_hidden: torch.Tensor,
+        norm_weight: torch.Tensor | None,
+        norm_bias: torch.Tensor | None,
+        norm_eps: float,
+    ) -> tuple[torch.Tensor, torch.Tensor]:
+        """Project the MTP rollback rows into the tail key and gate halves.
+
+        With ``enable_indexer_tail_kg_cat`` one N-concatenated GEMM replaces the
+        two launches. The tail writeback consumes the result through per-row
+        key/gate strides and the gate pointer already points at the second
+        half: without a norm both halves are views of the fused buffer, with a
+        norm the key is a contiguous slice and the gate stays a strided view
+        into the tail of the same buffer.
+        """
+        if self._kg_weight is None:
+            tail_key = F.linear(tail_hidden, self.wk_weights_proj.weight[: self.head_dim]).float()
+            if norm_weight is not None:
+                tail_key = F.layer_norm(tail_key, (self.head_dim,), norm_weight, norm_bias, norm_eps)
+            return tail_key, F.linear(tail_hidden, self.index_kpool_compress_gate).float()
+        fused = F.linear(tail_hidden, self._kg_weight).float()
+        # The kernel adds `cols - head_dim` to the gate pointer, so it must
+        # start at the second half rather than at the row start.
+        tail_gate = fused[:, self.head_dim :]
+        if norm_weight is None:
+            return fused, tail_gate
+        tail_key = F.layer_norm(
+            fused[:, : self.head_dim].contiguous(), (self.head_dim,), norm_weight, norm_bias, norm_eps
+        )
+        return tail_key, tail_gate
 
     @staticmethod
     def _bound_caches(layer: Any) -> tuple[torch.Tensor, ...]:
@@ -1121,10 +1175,7 @@ class Glm5NextKPoolIndexerBackend(nn.Module):
         if tail_metadata.cann_inputs.retained_indices is not None:
             # Re-project the live MTP rollback window missing from CANN state.
             tail_hidden = self._gather_retained_hidden(hidden_states, tail_metadata.cann_inputs.retained_indices)
-            tail_key = F.linear(tail_hidden, key_weight).float()
-            if norm_weight is not None:
-                tail_key = F.layer_norm(tail_key, (self.head_dim,), norm_weight, norm_bias, norm_eps)
-            tail_gate = F.linear(tail_hidden, gate_weight).float()
+            tail_key, tail_gate = self._project_tail_key_gate(tail_hidden, norm_weight, norm_bias, norm_eps)
         self._write_keypool_caches(
             tail_cache,
             indexer_cache,

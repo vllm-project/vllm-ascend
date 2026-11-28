@@ -196,6 +196,11 @@ def test_kpool_weight_postprocessing_keeps_nd_before_fp32_cast(monkeypatch, weig
     for module in (backend_module, linear_module, utils_module):
         monkeypatch.setattr(module, "get_current_hardware_profile", lambda: profile)
     monkeypatch.setattr(utils_module, "get_ascend_config", lambda: SimpleNamespace(weight_nz_mode=weight_nz_mode))
+    monkeypatch.setattr(
+        backend_module,
+        "get_ascend_config",
+        lambda: SimpleNamespace(weight_nz_mode=weight_nz_mode, enable_indexer_tail_kg_cat=False),
+    )
     monkeypatch.setattr(Glm5NextKPoolIndexerBackend, "_init_cann_ops", lambda self: None)
 
     source = SimpleNamespace(
@@ -308,6 +313,9 @@ def test_fp8_backend_initialization_does_not_gate_on_device_capability(monkeypat
         attention_backend_family=profile.attention_backend_family, supports=MagicMock(wraps=profile.supports)
     )
     monkeypatch.setattr(backend_module, "get_current_hardware_profile", lambda: hardware)
+    monkeypatch.setattr(
+        backend_module, "get_ascend_config", lambda: SimpleNamespace(enable_indexer_tail_kg_cat=False)
+    )
     init = MagicMock()
     monkeypatch.setattr(Glm5NextKPoolIndexerBackend, "_init_cann_ops", init)
     Glm5NextKPoolIndexerBackend(source, qk_rope_head_dim=0)

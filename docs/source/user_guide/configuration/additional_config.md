@@ -75,6 +75,7 @@ The following table lists additional configuration options available in vLLM Asc
 | `multistream_dsv4_dsa_overlap`      | bool | `True`  | Whether to enable DSA multi-stream overlap for DeepSeek V4. For PCP batches with global prefill, this option controls overlap of local Q projection with global cache preparation on nonempty query shards. Set it to `false` to run these operations serially.  |
 | `rl_config`                        | dict | `{}`    | One-click RL mode configuration. See <a href="#rl_config">rl_config</a> for all fields, the two deployment modes, usage examples, and the migration guide. |
 | `combine_quant_mode`                | int  | `0`     | Controls communication quantization for the MC2 combine operation. The default (`0`) lets the runtime select the mode. Set `2`, `3`, or `4` to override the `comm_quant_mode` argument to `torch_npu.npu_moe_distribute_combine_v2`. |
+| `enable_indexer_tail_kg_cat`        | bool | `False` | GLM-5.3-Flash KPool indexer only. Fuses the MTP rollback tail key/gate projections into one GEMM by concatenating the two weights along the output dimension once after loading, and the tail cache write consumes the fused buffer through per-row key/gate strides. No effect when the model has no KPool indexer tail. See [GLM-5.3-Flash](../../tutorials/models/GLM5.3-Flash.md). |
 
 The details of each configuration option are as follows:
 
