@@ -14,6 +14,9 @@ from collections.abc import Callable
 import torch
 from vllm.triton_utils import tl, triton
 
+# Shared with the KDA kernels; re-exported here so both trees keep one implementation.
+from vllm_ascend.ops.triton.triton_utils import prepare_chunk_indices_dev as prepare_chunk_indices_dev
+
 
 def prepare_lens(cu_seqlens: torch.LongTensor) -> torch.LongTensor:
     return cu_seqlens[1:] - cu_seqlens[:-1]

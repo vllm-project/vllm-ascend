@@ -14,7 +14,7 @@ from vllm.triton_utils import tl, triton
 
 from vllm_ascend.ops.triton.triton_utils import get_aicore_num
 
-from .utils import prepare_chunk_indices, safe_exp
+from .utils import prepare_chunk_indices_dev, safe_exp
 
 
 @triton.heuristics(
@@ -124,7 +124,7 @@ def chunk_scaled_dot_kkt_fwd(
     H = beta.shape[-1]
     BT = chunk_size
     if cu_seqlens is not None and chunk_indices is None:
-        chunk_indices = prepare_chunk_indices(cu_seqlens, BT)
+        chunk_indices = prepare_chunk_indices_dev(cu_seqlens, T, BT)
     NT = triton.cdiv(T, BT) if cu_seqlens is None else len(chunk_indices)
     A = torch.empty(B, T, H, BT, device=k.device, dtype=output_dtype)
 

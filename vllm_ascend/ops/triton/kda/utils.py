@@ -17,6 +17,9 @@ from typing import Any
 import torch
 from vllm.triton_utils import triton
 
+# Shared with the FLA kernels; re-exported here so both trees keep one implementation.
+from vllm_ascend.ops.triton.triton_utils import prepare_chunk_indices_dev as prepare_chunk_indices_dev
+
 # Default chunk size used across FLA Triton kernels.
 FLA_CHUNK_SIZE = 64
 

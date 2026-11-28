@@ -12,7 +12,7 @@
 import torch
 from vllm.triton_utils import tl, triton
 
-from .utils import prepare_chunk_indices, prepare_chunk_offsets, prepare_update_chunk_offsets, safe_exp
+from .utils import prepare_chunk_offsets, prepare_update_chunk_offsets, safe_exp
 
 _CONDITIONS = ("seq7168",)
 
@@ -174,8 +174,11 @@ def chunk_gated_delta_rule_fwd_hupdate(
     H = u.shape[-2]
     BT = chunk_size
 
-    if cu_seqlens is not None and chunk_indices is None:
-        chunk_indices = prepare_chunk_indices(cu_seqlens, chunk_size)
+    # This kernel never receives ``chunk_indices`` - only its row count is used - and the row
+    # count has a closed form, so building the tensor would be pure overhead.
+    num_chunks = None
+    if cu_seqlens is not None:
+        num_chunks = len(chunk_indices) if chunk_indices is not None else T // BT + len(cu_seqlens) - 1
     # N: the actual number of sequences in the batch with either equal or variable lengths
     if cu_seqlens is None:
         N, NT, chunk_offsets = B, triton.cdiv(T, BT), None
@@ -184,7 +187,7 @@ def chunk_gated_delta_rule_fwd_hupdate(
             chunk_offsets = prepare_chunk_offsets(cu_seqlens, BT)
         N, NT, chunk_offsets = (
             len(cu_seqlens) - 1,
-            len(chunk_indices),
+            num_chunks,
             chunk_offsets,
         )
     assert K <= 256, "current kernel does not support head dimension larger than 256."
