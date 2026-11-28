@@ -101,6 +101,7 @@
     | Qwen3-Embedding | 🔴 | FP16 | Atlas 300I Duo |🟡| [Qwen3-Embedding](../../tutorials/models/Qwen3-Embedding.md) |
     | Qwen3-VL-Embedding | 🔴 | FP16 | Atlas 300I Duo |🔵| [Qwen3-VL-Embedding](../../tutorials/models/Qwen3-VL-Embedding.md) |
     | SigLIP2 | ✅ | FP16; text/image embedding | Atlas 300I Duo |🔵| [SigLIP2](../../tutorials/models/SigLIP2.md) |
+    | EmbeddingGemma2 | 🔵 | FP16; text/image/video/audio embedding; MRL 768/512/256/128 | Atlas 300I Duo |🔵| [EmbeddingGemma2](../../tutorials/models/EmbeddingGemma2.md) |
     | Qwen3-Reranker  | 🔴 | FP16 | Atlas 300I Duo |🟡| [Qwen3-Reranker](../../tutorials/models/Qwen3-Reranker.md) |
     | Qwen3-VL-Reranker | 🔴 | FP16 | Atlas 300I Duo |🔵| [Qwen3-VL-Reranker](../../tutorials/models/Qwen3-VL-Reranker.md) |
 
