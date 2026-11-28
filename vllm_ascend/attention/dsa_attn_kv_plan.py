@@ -74,6 +74,13 @@ def is_a5_bf16_kv_enabled(vllm_config) -> bool:
 DSA_COMPRESSOR_SLOT_MAPPING_FLAT = 1
 DSA_COMPRESSOR_SLOT_MAPPING_BLOCK_OFFSET = 2
 
+_DSA_CACHE_INT_VIEW_DTYPES: dict[int, torch.dtype] = {
+    1: torch.int8,
+    2: torch.int16,
+    4: torch.int32,
+    8: torch.int64,
+}
+
 
 @triton.jit(do_not_specialize=["tokens", "width"])
 def _write_dsa_cache(
@@ -124,6 +131,13 @@ def write_dsa_cache(cache: torch.Tensor, updates: torch.Tensor, slots: torch.Ten
     tokens = updates.shape[0]
     if tokens == 0:
         return
+    # _write_dsa_cache copies raw element bits without arithmetic; reinterpreting
+    # sub-int32/floating point storage (such as A5 float8_e4m3fn) as equal-width
+    # signed integers avoids Ascend Triton's `int32 -> fp8e4nv` masked-load cast
+    # error while preserving exact strides, addresses, and caller dtypes.
+    int_dtype = _DSA_CACHE_INT_VIEW_DTYPES.get(cache.element_size())
+    if int_dtype is not None and cache.dtype != int_dtype:
+        cache, updates = cache.view(int_dtype), updates.view(int_dtype)
     _write_dsa_cache[(min(get_vectorcore_num(), tokens),)](
         cache,
         updates,

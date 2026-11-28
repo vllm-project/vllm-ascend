@@ -14,6 +14,7 @@ from vllm_ascend.attention.dsa_attn_kv_plan import (
     get_dsa_attn_kv_plan,
     is_a5_bf16_kv_enabled,
     resolve_dsv4_cache_dtype,
+    write_dsa_cache,
 )
 from vllm_ascend.attention.sparse_flash_mla import sparse_flash_mla
 from vllm_ascend.device.hardware_profile import get_hardware_profile
@@ -239,3 +240,113 @@ def test_a5_pins_the_bfloat16_layout_and_keeps_other_requests_apart():
         for launch in ("auto", "bfloat16", "bf16"):
             assert resolve_dsv4_cache_dtype(launch, "bfloat16") == "bfloat16"
         assert resolve_dsv4_cache_dtype("fp8", "bfloat16") == "auto"
+
+
+@pytest.mark.parametrize(
+    ("dtype", "expected_int_dtype"),
+    [
+        (torch.int8, torch.int8),
+        (torch.uint8, torch.int8),
+        (torch.float8_e4m3fn, torch.int8),
+        (torch.bfloat16, torch.int16),
+        (torch.float16, torch.int16),
+        (torch.float32, torch.int32),
+    ],
+)
+@pytest.mark.parametrize("paired_slots", [False, True])
+def test_write_dsa_cache_reinterprets_equal_width_integers_and_preserves_strided_bytes(
+    dtype: torch.dtype,
+    expected_int_dtype: torch.dtype,
+    paired_slots: bool,
+):
+    pages, page_size, width = 3, 4, 20
+    el_bytes = torch.empty((), dtype=dtype).element_size()
+    canary_bytes = 64
+    page_stride_bytes = canary_bytes + page_size * width * el_bytes + canary_bytes
+    backing = torch.full((pages * page_stride_bytes,), 0x5A, dtype=torch.uint8)
+    typed_storage = backing.view(dtype)
+    cache = torch.as_strided(
+        typed_storage,
+        size=(pages, page_size, 1, width),
+        stride=(page_stride_bytes // el_bytes, width, width, 1),
+        storage_offset=canary_bytes // el_bytes,
+    )
+    # Zero only the active component slots while keeping 0x5A canary guards intact.
+    cache.view(expected_int_dtype).zero_()
+
+    raw_update_bytes = torch.arange(4 * (width + 4) * el_bytes, dtype=torch.uint8).reshape(4, (width + 4) * el_bytes)
+    updates_full = raw_update_bytes.view(dtype)
+    updates = updates_full[:, :width]  # Non-contiguous row stride (`update_stride > width`)
+    assert not updates.is_contiguous()
+
+    if paired_slots:
+        slots = torch.tensor([[0, 2], [-1, -1], [2, 3], [5, 0]], dtype=torch.int32)
+    else:
+        slots = torch.tensor([2, -1, 2 * page_size + 3, pages * page_size + 1], dtype=torch.int64)
+
+    captured: dict[str, Any] = {}
+
+    class _FakeKernelLauncher:
+        def __getitem__(self, grid):
+            captured["grid"] = grid
+
+            def _launch(
+                k_cache,
+                k_updates,
+                k_slots,
+                tokens,
+                k_width,
+                k_pages,
+                k_page_size,
+                page_stride,
+                row_stride,
+                update_stride,
+                slot_stride,
+                slot_col_stride,
+                paired,
+                columns,
+                multibuffer=False,
+            ):
+                captured["cache_dtype"] = k_cache.dtype
+                captured["updates_dtype"] = k_updates.dtype
+                captured["cache_ptr"] = k_cache.data_ptr()
+                captured["updates_ptr"] = k_updates.data_ptr()
+                captured["cache_stride"] = k_cache.stride()
+                captured["updates_stride"] = k_updates.stride()
+                captured["columns"] = columns
+                captured["multibuffer"] = multibuffer
+                flat_updates = k_updates.reshape(-1) if k_updates.is_contiguous() else k_updates
+                for tok in range(tokens):
+                    first = int(k_slots[tok, 0] if paired else k_slots[tok])
+                    blk = first if paired else first // k_page_size
+                    off = int(k_slots[tok, 1]) if paired else first % k_page_size
+                    if first >= 0 and blk < k_pages and 0 <= off < k_page_size:
+                        k_cache[blk, off, 0, :k_width].copy_(flat_updates[tok, :k_width])
+
+            return _launch
+
+    with (
+        mock.patch("vllm_ascend.attention.dsa_attn_kv_plan.get_vectorcore_num", return_value=24),
+        mock.patch("vllm_ascend.attention.dsa_attn_kv_plan._write_dsa_cache", new=_FakeKernelLauncher()),
+    ):
+        write_dsa_cache(cache, updates, slots)
+
+    # Caller-visible tensors retain their original dtype, address, and strides.
+    assert cache.dtype == dtype
+    assert updates.dtype == dtype
+    assert captured["cache_dtype"] == expected_int_dtype
+    assert captured["updates_dtype"] == expected_int_dtype
+    assert captured["cache_ptr"] == cache.data_ptr()
+    assert captured["updates_ptr"] == updates.data_ptr()
+    assert captured["cache_stride"] == cache.stride()
+    assert captured["updates_stride"] == updates.stride()
+    assert captured["grid"] == (4,)
+    assert captured["columns"] == 32
+
+    # Valid slots match raw update bytes bit-for-bit; negative and OOB slots are untouched; canaries stay 0x5A.
+    assert torch.equal(cache[0, 2, 0].view(torch.uint8), updates[0].contiguous().view(torch.uint8))
+    assert torch.equal(cache[2, 3, 0].view(torch.uint8), updates[2].contiguous().view(torch.uint8))
+    assert bool((cache[0, 0, 0].view(torch.uint8) == 0).all())
+    pages_u8 = backing.view(pages, page_stride_bytes)
+    assert bool((pages_u8[:, :canary_bytes] == 0x5A).all())
+    assert bool((pages_u8[:, canary_bytes + page_size * width * el_bytes :] == 0x5A).all())
