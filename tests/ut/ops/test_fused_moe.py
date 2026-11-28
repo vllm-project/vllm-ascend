@@ -1375,9 +1375,9 @@ def test_w4a8_mxfp_shared_situ_uses_situ_mx_quant(monkeypatch):
         raising=False,
     )
     monkeypatch.setattr(
-        shared_experts_module.torch.ops,
-        "_C_ascend",
-        SimpleNamespace(situ_mx_quant=situ_mx_quant),
+        shared_experts_module,
+        "situ_mx_quant",
+        situ_mx_quant,
     )
 
     output = shared_experts.forward(
@@ -1426,9 +1426,9 @@ def test_w4a8_mxfp_gate_up_waits_for_router_output(monkeypatch):
         raising=False,
     )
     monkeypatch.setattr(
-        shared_experts_module.torch.ops,
-        "_C_ascend",
-        SimpleNamespace(situ_mx_quant=MagicMock(return_value=(quantized_act, act_scale))),
+        shared_experts_module,
+        "situ_mx_quant",
+        MagicMock(return_value=(quantized_act, act_scale)),
     )
 
     output = shared_experts.forward(
@@ -1755,9 +1755,9 @@ def test_k3_w4a8_mxfp_multistream_schedule_on_a3_and_a5(monkeypatch, parallel_mo
     monkeypatch.setattr(shared_experts_module, "_EXTRA_CTX", SimpleNamespace(num_tokens=4))
     monkeypatch.setattr(shared_experts_module.torch_npu, "npu_dynamic_mx_quant", dynamic_quant, raising=False)
     monkeypatch.setattr(
-        shared_experts_module.torch.ops,
-        "_C_ascend",
-        SimpleNamespace(situ_mx_quant=MagicMock(side_effect=activation)),
+        shared_experts_module,
+        "situ_mx_quant",
+        MagicMock(side_effect=activation),
     )
 
     result = shared_experts.forward(

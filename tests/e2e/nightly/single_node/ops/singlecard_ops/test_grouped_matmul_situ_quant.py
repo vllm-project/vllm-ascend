@@ -8,6 +8,7 @@ import torch_npu
 
 from vllm_ascend.device.device_config import get_ascend_device_type
 from vllm_ascend.device.hardware import AscendDeviceType
+from vllm_ascend.ops.situ_mx_quant import situ_mx_quant
 from vllm_ascend.utils import enable_custom_op
 
 
@@ -88,9 +89,7 @@ def test_small_expert_gmm_situ_graph(experts, group_list_type):
             weight_dtype=torch_npu.float4_e2m1fn_x2,
             output_dtype=torch.bfloat16,
         )[0]
-        return torch.ops._C_ascend.situ_mx_quant(
-            intermediate[:rows], beta=4.0, linear_beta=25.0, activate_left=True, dst_type=36
-        )
+        return situ_mx_quant(intermediate[:rows], beta=4.0, linear_beta=25.0, activate_left=True, dst_type=36)
 
     def check(actual, expected):
         for a, b in zip(actual, expected):

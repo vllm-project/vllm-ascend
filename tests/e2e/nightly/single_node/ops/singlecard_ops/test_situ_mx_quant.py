@@ -10,6 +10,7 @@ import torch_npu  # noqa: F401
 
 from vllm_ascend.device.device_config import get_ascend_device_type
 from vllm_ascend.device.hardware import AscendDeviceType
+from vllm_ascend.ops.situ_mx_quant import situ_mx_quant
 
 SITU_BETA = 4.0
 SITU_LINEAR_BETA = 25.0
@@ -58,7 +59,7 @@ def test_shared_situ_mx_quant_shapes_single_op(
     assert phase in {"decode", "prefill"}
     assert input_width == 12288 // tp_size
     x = _bf16_input(rows, input_width)
-    y, mxscale = torch.ops._C_ascend.situ_mx_quant(
+    y, mxscale = situ_mx_quant(
         x.npu(),
         beta=SITU_BETA,
         linear_beta=SITU_LINEAR_BETA,
@@ -84,7 +85,7 @@ def test_routed_situ_mx_quant_shapes_single_op(phase: str, rows: int):
     """A5 routed-expert shape is TP-invariant."""
     assert phase in {"decode_max_local", "prefill_max_local"}
     x = _routed_input(rows)
-    y, mxscale = torch.ops._C_ascend.situ_mx_quant(
+    y, mxscale = situ_mx_quant(
         x.npu(),
         beta=SITU_BETA,
         linear_beta=SITU_LINEAR_BETA,

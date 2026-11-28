@@ -1635,44 +1635,6 @@ std::tuple<at::Tensor, at::Tensor> dequant_situ_quant_meta(
     return {y, scale};
 }
 
-std::tuple<at::Tensor, at::Tensor> situ_mx_quant_meta(
-    const at::Tensor& x,
-    double beta,
-    double linear_beta,
-    bool activate_left,
-    int64_t dst_type)
-{
-    constexpr int64_t DST_TYPE_E5M2 = 35;
-    constexpr int64_t DST_TYPE_E4M3FN = 36;
-    constexpr int64_t MX_BLOCK_SPAN = 64;
-    constexpr int64_t MX_SCALE_ALIGN = 2;
-
-    TORCH_CHECK(x.dim() >= 1,
-                "situ_mx_quant: x must be at least 1-dimensional, but got ",
-                x.dim());
-    TORCH_CHECK(x.scalar_type() == at::kBFloat16,
-                "situ_mx_quant: x must be bfloat16, but got ", x.scalar_type());
-    TORCH_CHECK(beta > 0.0,
-                "situ_mx_quant: beta must be greater than 0, but got ", beta);
-    TORCH_CHECK(dst_type == DST_TYPE_E4M3FN || dst_type == DST_TYPE_E5M2,
-                "situ_mx_quant: dst_type must be 36 (E4M3FN) or 35 (E5M2), but got ",
-                dst_type);
-
-    (void)linear_beta;
-    (void)activate_left;
-
-    c10::SymDimVector y_shape(x.sym_sizes().begin(), x.sym_sizes().end());
-    y_shape.back() = y_shape.back() / 2;
-    c10::SymDimVector mxscale_shape(y_shape.begin(), y_shape.end());
-    mxscale_shape.back() = (mxscale_shape.back() + MX_BLOCK_SPAN - 1) / MX_BLOCK_SPAN;
-    mxscale_shape.emplace_back(MX_SCALE_ALIGN);
-
-    auto y_dtype = dst_type == DST_TYPE_E5M2 ? at::kFloat8_e5m2 : at::kFloat8_e4m3fn;
-    at::Tensor y = at::empty_symint(y_shape, x.options().dtype(y_dtype));
-    at::Tensor mxscale = at::empty_symint(mxscale_shape, x.options().dtype(at::kFloat8_e8m0fnu));
-    return {y, mxscale};
-}
-
 std::tuple<at::Tensor, at::Tensor> make_grouped_matmul_situ_quant_meta_output(
     const at::Tensor &x, const c10::SymInt &n)
 {
@@ -1866,7 +1828,6 @@ TORCH_LIBRARY_IMPL_EXPAND(CONCAT(_C, _ascend), Meta, ops) {
     //Gemma rmsnorm meta implementation
     ops.impl("npu_gemma_rms_norm", &vllm_ascend::meta::npu_gemma_rms_norm_meta);
     ops.impl("dequant_situ_quant", &vllm_ascend::meta::dequant_situ_quant_meta);
-    ops.impl("situ_mx_quant", &vllm_ascend::meta::situ_mx_quant_meta);
 
     ops.impl("grouped_matmul_situ_quant", &vllm_ascend::meta::grouped_matmul_situ_quant_meta);
     ops.impl("grouped_matmul_situ_quant.list", &vllm_ascend::meta::grouped_matmul_situ_quant_list_meta);

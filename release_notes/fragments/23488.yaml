@@ -1,0 +1,7 @@
+pr: 23488
+entries:
+  - category: breaking
+    text: >-
+      A5 W4A8 MXFP inference now requires a CANN installation exposing
+      `cann_ops_nn.situ_mx_quant`. Calls to the removed private
+      `torch.ops._C_ascend.situ_mx_quant` binding must use the CANN interface instead.

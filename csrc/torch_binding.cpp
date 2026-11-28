@@ -58,7 +58,6 @@
 #include "attention/k2q_csr/k2q_csr_torch_adpt.h"
 #include "attention/hisparse_resolve_residency/hisparse_resolve_residency_torch_adpt.h"
 #include "moe/dequant_situ_quant/dequant_situ_quant_torch_adpt.h"
-#include "moe/situ_mx_quant/situ_mx_quant_torch_adpt.h"
 #include "moe/grouped_matmul_situ_quant/grouped_matmul_situ_quant_torch_adpt.h"
 #include "moe/grouped_matmul_situ_quant_msd/grouped_matmul_situ_quant_msd_torch_adpt.h"
 #include <c10/core/Device.h>
@@ -3017,14 +3016,6 @@ TORCH_LIBRARY_EXPAND(CONCAT(_C, _ascend), ops)
         "                   bool activate_left=True, "
         "                   str quant_mode=\"dynamic\") -> (Tensor y, Tensor scale)");
     ops.impl("dequant_situ_quant", torch::kPrivateUse1, &vllm_ascend::dequant_situ_quant);
-
-    ops.def(
-        "situ_mx_quant(Tensor x, "
-        "              float beta=1.0, "
-        "              float linear_beta=0.0, "
-        "              bool activate_left=False, "
-        "              int dst_type=36) -> (Tensor y, Tensor mxscale)");
-    ops.impl("situ_mx_quant", torch::kPrivateUse1, &vllm_ascend::situ_mx_quant);
 
     ops.def(
         "grouped_matmul_situ_quant(Tensor x, Tensor weight, Tensor weight_scale, Tensor? weight_assist_matrix, "

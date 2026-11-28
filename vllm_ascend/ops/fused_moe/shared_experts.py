@@ -47,6 +47,7 @@ from vllm_ascend.ops.fused_moe.dataclass.shared_experts import (
 )
 from vllm_ascend.ops.fused_moe.moe_utils import _pad_tokens_with_cat
 from vllm_ascend.ops.linear_op import SharedExpertColumnParallelOp, SharedExpertRowParallelOp
+from vllm_ascend.ops.situ_mx_quant import situ_mx_quant
 from vllm_ascend.quantization.prepared_linear_input import PreparedLinearInput
 from vllm_ascend.quantization.quant_type import QuantType
 from vllm_ascend.utils import (
@@ -1166,7 +1167,7 @@ class AscendSharedExperts:
             "shared_activation_overlap_start",
         )
         if self.situ_activation is not None:
-            quantized_x, swiglu_out_scale = torch.ops._C_ascend.situ_mx_quant(
+            quantized_x, swiglu_out_scale = situ_mx_quant(
                 x=submitted_gate_up.gate_up,
                 beta=self.situ_activation.beta,
                 linear_beta=self.situ_activation.linear_beta or 0.0,
