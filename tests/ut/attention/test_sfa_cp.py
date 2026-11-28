@@ -26,6 +26,7 @@ from vllm_ascend.attention.context_parallel.sfa_cp import (
     resolve_sfa_impl,
     resolve_sfa_metadata_builder,
 )
+from vllm_ascend.attention.context_parallel.sfa_dcp_utils import build_sfa_dcp_compact_kv_metadata
 from vllm_ascend.attention.sfa_v1 import (
     AscendSFAImpl,
     AscendSFAMetadata,
@@ -47,7 +48,8 @@ def test_sfa_pcp_dcp_compact_kv_selects_only_allocated_blocks(first_block_id):
     builder = AscendSFAPCPDCPMetadataBuilder.__new__(AscendSFAPCPDCPMetadataBuilder)
     builder.device = torch.device("cpu")
     builder.max_local_block_table_cols = 3
-    builder.arange_buffer = torch.arange(3, dtype=torch.int32)
+    builder.arange_buffer = torch.arange(6, dtype=torch.int32)
+    builder.kernel_block_size = builder.cp_kv_cache_interleave_size = 128
     builder.dcp_size = 2
     builder.dcp_collective_rank_order = torch.tensor([0, 1], dtype=torch.int32)
     global_table = torch.tensor([[first_block_id, 91, 92], [4, 5, 93]], dtype=torch.int32)
@@ -89,6 +91,52 @@ def test_sfa_pcp_dcp_compact_kv_selects_only_allocated_blocks(first_block_id):
     torch.testing.assert_close(remapped[0, :2], torch.tensor([0, 3], dtype=torch.int32))
     torch.testing.assert_close(remapped[1, :4], torch.tensor([1, 4, 2, 5], dtype=torch.int32))
     torch.testing.assert_close(global_table, original_table)
+
+
+@pytest.mark.parametrize("interleave", [128, 768])
+@pytest.mark.parametrize("world", [2, 8])
+def test_sfa_pcp_dcp_compact_kv_respects_interleave(interleave, world):
+    builder = AscendSFAPCPDCPMetadataBuilder.__new__(AscendSFAPCPDCPMetadataBuilder)
+    builder.kernel_block_size = 128
+    builder.cp_kv_cache_interleave_size = interleave
+    builder.arange_buffer = torch.arange(12 * world, dtype=torch.int32)
+    builder.dcp_size = world
+    order = [0, 1] if world == 2 else [0, 4, 1, 5, 2, 6, 3, 7]
+    builder.dcp_collective_rank_order = torch.tensor(order, dtype=torch.int32)
+    # Requests share a physical prefix page, but have different history and
+    # stale tails. Each PCP receiver can have a different request-row order.
+    global_table = torch.tensor(
+        [list(range(18, 24)) + list(range(42, 48)) + [999], list(range(18, 24)) + list(range(60, 66)) + [998]],
+        dtype=torch.int32,
+    )
+    local_table = global_table[[1, 0], :12]
+    ids, table = builder._build_compact_kv_gather_metadata(
+        local_table,
+        global_dcp_block_table=global_table,
+        global_dcp_num_blocks=torch.tensor([12, 12], dtype=torch.int32),
+    )
+    assert ids.tolist() == list(range(18, 24)) + list(range(42, 48)) + list(range(60, 66))
+    for request in range(2):
+        expected = []
+        for global_block in range(12 * world):
+            position = global_block * 128
+            owner = (position // interleave) % world
+            local_position = position // (world * interleave) * interleave + position % interleave
+            block_id = local_table[request, local_position // 128].item()
+            expected.append(order[owner] * len(ids) + ids.tolist().index(block_id))
+        assert table[request].tolist() == expected
+
+
+@pytest.mark.parametrize("interleave", [1, 192])
+def test_sfa_compact_history_rejects_interleave_inside_kernel_blocks(interleave):
+    with pytest.raises(NotImplementedError, match="multiple of the kernel block size"):
+        build_sfa_dcp_compact_kv_metadata(
+            torch.tensor([[0, 1]], dtype=torch.int32),
+            torch.arange(4, dtype=torch.int32),
+            torch.arange(2, dtype=torch.int32),
+            128,
+            interleave,
+        )
 
 
 @pytest.mark.parametrize("num_input_tokens", [12, 16])
@@ -467,7 +515,8 @@ def test_sfa_dcp_compact_kv_table_uses_logical_dcp_rank_order(with_global_view) 
     builder_cls = AscendSFAPCPDCPMetadataBuilder if with_global_view else AscendSFADCPMetadataBuilder
     builder = builder_cls.__new__(builder_cls)
     builder.device = torch.device("cpu")
-    builder.arange_buffer = torch.arange(2, dtype=torch.int32)
+    builder.arange_buffer = torch.arange(16, dtype=torch.int32)
+    builder.kernel_block_size = builder.cp_kv_cache_interleave_size = 128
     builder.dcp_size = 8
     builder.dcp_collective_rank_order = torch.tensor(
         [0, 4, 1, 5, 2, 6, 3, 7],
@@ -507,7 +556,8 @@ def test_sfa_dcp_compact_kv_table_uses_logical_dcp_rank_order(with_global_view) 
 def test_sfa_pcp_dcp_compact_kv_uses_global_request_blocks(local_rows, expected_rows) -> None:
     builder = AscendSFAPCPDCPMetadataBuilder.__new__(AscendSFAPCPDCPMetadataBuilder)
     builder.device = torch.device("cpu")
-    builder.arange_buffer = torch.arange(2, dtype=torch.int32)
+    builder.arange_buffer = torch.arange(4, dtype=torch.int32)
+    builder.kernel_block_size = builder.cp_kv_cache_interleave_size = 128
     builder.dcp_size = 2
     builder.dcp_collective_rank_order = torch.arange(2, dtype=torch.int32)
     # Actual [8, 1] prefill layout: the second PCP rank has no row for
@@ -615,9 +665,11 @@ def test_sfa_pcp_dcp_empty_local_prefill_joins_dcp_kv_gather() -> None:
     impl.dcp_group = object()
     impl.enable_sparse_sfa_c8 = True
     impl.enable_sparse_sfa_turboquant = False
-    impl._start_dcp_gather = Mock(return_value="gathered")
+    handle = Mock()
+    impl._start_dcp_gather = Mock(return_value=SimpleNamespace(handle=handle))
     metadata = AscendSFADCPMetadata.__new__(AscendSFADCPMetadata)
     metadata.num_prefills = 0
+    metadata.num_actual_tokens = 0
     metadata.pcp_has_global_prefill = True
     metadata.dcp_context = SimpleNamespace(
         kv_gather_block_ids=torch.tensor([0, 2]),
@@ -631,7 +683,10 @@ def test_sfa_pcp_dcp_empty_local_prefill_joins_dcp_kv_gather() -> None:
     gather_input = impl._start_dcp_gather.call_args.args[0]
     torch.testing.assert_close(gather_input, kv_cache[0][[0, 2]])
     assert impl._start_dcp_gather.call_args.kwargs == {"dim": 0, "split_sizes": (4,)}
-    assert metadata.dcp_context.gather_context == "gathered"
+    # An empty sender still supplies its cache blocks, then joins the gather
+    # before clearing the context so the collective stays symmetric.
+    handle.wait.assert_called_once()
+    assert metadata.dcp_context.gather_context is None
     with patch.object(impl, "_start_dcp_query_gather") as query_gather:
         impl._record_query_gather_context(torch.zeros(1, 2), torch.zeros(1, 2), metadata)
     query_gather.assert_not_called()
@@ -1297,7 +1352,9 @@ def test_sfa_dcp_prefill_passes_contiguous_gathered_cache() -> None:
     packed = torch.randn(2, 128, 1, 576)
     gathered = packed.split((512, 64), dim=-1)
     assert all(not tensor.is_contiguous() for tensor in gathered)
-    context = SimpleNamespace(gather_context=object(), kv_gather_block_table=object())
+    context = SimpleNamespace(
+        gather_context=object(), kv_gather_block_table=object(), kv_gather_block_ids=torch.arange(2)
+    )
     metadata = SimpleNamespace(dcp_context=context)
     output = object()
     with (
@@ -1710,7 +1767,22 @@ def test_dsa_dcp_indexer_attn_q_gather_handle(has_prefill, has_handle):
         handle.wait.assert_not_called()
 
 
-@pytest.mark.parametrize("impl_cls", [AscendSFAImpl, AscendSFADSACPImpl, AscendSFADCPImpl, AscendSFAPCPDCPImpl])
+@pytest.mark.parametrize("history_gather", [False, True])
+@pytest.mark.parametrize("pending", [False, True])
+def test_pcp_dcp_indexer_joins_history_gather_before_pcp_writes(history_gather, pending):
+    impl = AscendSFAPCPDCPImpl.__new__(AscendSFAPCPDCPImpl)
+    handle = Mock()
+    metadata = SimpleNamespace(
+        dcp_context=SimpleNamespace(
+            kv_gather_block_ids=torch.arange(2) if history_gather else None,
+            gather_context=SimpleNamespace(handle=handle) if pending else None,
+        )
+    )
+    assert impl._get_indexer_attn_q_gather_handle(metadata) is (handle if history_gather and pending else None)
+    handle.wait.assert_not_called()
+
+
+@pytest.mark.parametrize("impl_cls", [AscendSFAImpl, AscendSFADSACPImpl, AscendSFADCPImpl])
 def test_other_sfa_layouts_have_no_indexer_attn_q_gather_handle(impl_cls):
     impl = impl_cls.__new__(impl_cls)
     assert impl._get_indexer_attn_q_gather_handle(Mock()) is None

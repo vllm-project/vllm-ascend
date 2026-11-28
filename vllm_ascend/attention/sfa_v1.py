@@ -2119,7 +2119,7 @@ class AscendSFAImpl(MLAAttentionImpl):
                 q_c,
                 k_hidden_states,
                 indexer_attn_metadata,
-                compute_topk=not self.skip_topk and has_local_query,
+                compute_topk=not self.skip_topk,
                 attn_q_gather_handle=self._get_indexer_attn_q_gather_handle(attn_metadata),
             )
             if self.skip_topk:

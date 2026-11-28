@@ -265,18 +265,16 @@ class AscendDSparkSpeculator(LmheadTPDraftSamplingMixin, DSparkSpeculator):
     ) -> tuple[torch.Tensor | None, torch.Tensor]:
         is_prefilling = torch.zeros(num_reqs_padded, dtype=torch.bool)
         if not self.use_dcp:
-            if self.attn_architecture == "MLA" and not self._draft_mla_uses_device_lengths:
-                # FIA consumes a host list of *valid* KV lengths. The target's
-                # optimistic upper bound includes rejected/lookahead tokens;
-                # adding the draft width again exposes unwritten cache slots
-                # to the non-causal block. Read the lengths produced alongside
-                # the actual draft positions instead. One batched blocking
-                # transfer is required until FIA accepts device-side lengths;
-                # this runs before forward/graph replay, not inside capture.
-                seq_lens_cpu = torch.zeros(num_reqs_padded, dtype=torch.int32)
-                seq_lens_cpu[:num_reqs].copy_(self.input_buffers.seq_lens[:num_reqs])
-                return seq_lens_cpu, is_prefilling
-            return None, is_prefilling
+            # Always materialize seq_lens on CPU via copy_.  The target's
+            # optimistic upper bound (seq_lens_cpu_upper_bound) includes
+            # rejected/lookahead tokens; the device-side seq_lens produced
+            # alongside the actual draft positions is the authoritative
+            # source regardless of attention backend or DCP mode.  One
+            # batched blocking transfer runs before forward/graph replay,
+            # not inside capture.
+            seq_lens_cpu = torch.zeros(num_reqs_padded, dtype=torch.int32)
+            seq_lens_cpu[:num_reqs].copy_(self.input_buffers.seq_lens[:num_reqs])
+            return seq_lens_cpu, is_prefilling
         assert self.dcp_manager is not None
         return self.dcp_manager.prepare_draft_dcp_metadata_inputs(
             target_seq_lens_cpu=self.target_input_buffers.seq_lens_cpu,

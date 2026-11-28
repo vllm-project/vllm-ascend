@@ -255,9 +255,11 @@ def test_non_dcp_uses_per_request_length_bounds(monkeypatch, kind, architecture,
         # Non-causal MLA consumes the initialized draft KV lengths, not the
         # target's optimistic bound plus another query block.
         assert common.seq_lens_cpu.tolist() == device_lengths[:2].tolist()
-    elif kind == "dspark" and architecture == "SFA" and not full_rebuild:
-        # Upstream derives its CPU view from the device lengths; the deprecated
-        # seq_lens_cpu property was removed in vLLM main.
+    elif kind == "dspark":
+        # Every architecture and entry point now materializes the exact draft
+        # lengths on the CPU; upstream derives its CPU view from them.
+        if full_rebuild:
+            assert common.seq_lens_cpu.tolist() == device_lengths[:2].tolist()
         torch.testing.assert_close(common.seq_lens, device_lengths[:2])
     else:
         # The first request uses its own bound after advancing the draft step;
@@ -365,9 +367,10 @@ def test_dspark_propose_passes_cpu_lengths_through_existing_factory(monkeypatch,
     monkeypatch.setattr(DSparkSpeculator, "propose", propose)
     result = spec.propose(spec.input_batch, {}, {}, None, None, None, None, None, None, None, None)
     common = result["draft.layer"].common
-    expected = (
-        device_lengths[:padded].tolist() if architecture == "MLA" and not use_dcp else [34, 128] + [0] * (padded - 2)
-    )
+    # Non-DCP builds always materialize the exact draft lengths on the CPU,
+    # regardless of the attention architecture; only the DCP path derives its
+    # view from the target's optimistic bound.
+    expected = device_lengths[:padded].tolist() if not use_dcp else [34, 128] + [0] * (padded - 2)
     assert common.seq_lens_cpu.tolist() == expected
     if use_dcp:
         torch.testing.assert_close(common.dcp_local_seq_lens_cpu, _local(expected))

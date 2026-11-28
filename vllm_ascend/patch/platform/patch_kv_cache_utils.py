@@ -24,6 +24,13 @@ from vllm.v1.kv_cache_interface import (
 )
 
 from vllm_ascend.core.kv_cache_interface import is_prefix_cacheable
+from vllm_ascend.core.paired_sfa_cache import (
+    is_paired_sfa_cache,
+    paired_sfa_cache_config,
+    paired_sfa_cache_groups,
+    paired_sfa_max_memory,
+    paired_sfa_pool_bytes,
+)
 from vllm_ascend.models.deepseek_v41.cache_config import (
     get_deepseek_v41_kv_cache_config,
     get_deepseek_v41_pool_bytes_per_block,
@@ -98,6 +105,23 @@ def _ascend_resolve_kv_cache_block_sizes(
     cache_config = vllm_config.cache_config
     dcp = vllm_config.parallel_config.decode_context_parallel_size
     groups = kv_cache_config.kv_cache_groups
+    if is_paired_sfa_cache(groups):
+        # DCP scales token-history attention only; recurrent checkpoints keep
+        # the TP-local state for the complete logical sequence.
+        specs = [
+            next(iter(g.kv_cache_spec.kv_cache_specs.values()))
+            if isinstance(g.kv_cache_spec, UniformTypeKVCacheSpecs)
+            else g.kv_cache_spec
+            for g in groups
+        ]
+        effective = [s.block_size if isinstance(s, MambaSpec) else s.block_size * dcp for s in specs]
+        scheduler = math.lcm(*effective)
+        if not cache_config.enable_prefix_caching:
+            return scheduler, scheduler
+        unit = getattr(cache_config, "prefix_match_unit", None) or math.gcd(*(s.block_size for s in specs))
+        if any(size % unit for size in effective):
+            raise ValueError("Prefix match unit must divide every effective cache block size.")
+        return scheduler, unit
     cacheable_groups = [group for group in groups if is_prefix_cacheable(group.kv_cache_spec)]
     filtered_private_groups = bool(cacheable_groups) and len(cacheable_groups) != len(groups)
     if filtered_private_groups and not is_deepseek_v41_cache(groups):
@@ -546,6 +570,8 @@ def _ascend_pool_bytes_per_block(kv_cache_groups: list[KVCacheGroupSpec]) -> int
     layout, so using the upstream value changes ``num_blocks`` during the
     re-plan and leaves ranks inconsistent.
     """
+    if is_paired_sfa_cache(kv_cache_groups):
+        return paired_sfa_pool_bytes(kv_cache_groups)
     if tq_cache.uses_turboquant_groups(kv_cache_groups):
         return tq_cache.pool_bytes_per_block(kv_cache_groups)
     if is_deepseek_v41_cache(kv_cache_groups):
@@ -564,6 +590,8 @@ def _ascend_max_memory_usage_bytes_from_groups(
     kv_cache_groups: list[KVCacheGroupSpec],
 ) -> int:
     """Keep the pre-#51718 DSV4 admission formula for its shared tuples."""
+    if is_paired_sfa_cache(kv_cache_groups):
+        return paired_sfa_max_memory(vllm_config, kv_cache_groups)
     if tq_cache.uses_turboquant_groups(kv_cache_groups):
         return tq_cache.max_memory_usage(vllm_config, kv_cache_groups)
     if _get_glm5_next_cache_layout(kv_cache_groups) is not None:
@@ -591,6 +619,14 @@ def _get_glm5_next_kv_cache_groups(
     vllm_config: VllmConfig,
     kv_cache_spec: dict[str, KVCacheSpec],
 ) -> list[KVCacheGroupSpec]:
+    # DSpark keeps its own target/draft block-sharing planner: it resolves the
+    # draft layers by name prefix, so paired SFA planning must not claim those
+    # layouts first.
+    kimi_k3_groups = _get_kimi_k3_dspark_mixed_kv_cache_groups(kv_cache_spec)
+    if kimi_k3_groups is not None:
+        return kimi_k3_groups
+    if is_paired_sfa_cache(kv_cache_spec):
+        return paired_sfa_cache_groups(vllm_config, kv_cache_spec)
     if any(is_glm5_next_cache_spec(spec) for spec in kv_cache_spec.values()):
         return get_glm5_next_kv_cache_groups(vllm_config, kv_cache_spec)
     return _orig_get_kv_cache_groups(vllm_config, kv_cache_spec)
@@ -611,7 +647,9 @@ def _ascend_get_kv_cache_config_from_groups(
     ``copy.deepcopy`` in ``generate_scheduler_kv_cache_config`` and is
     dropped by worker pickle IPC, which never reads it.
     """
-    if is_deepseek_v41_cache(kv_cache_groups):
+    if is_paired_sfa_cache(kv_cache_groups):
+        kv_cache_config = paired_sfa_cache_config(vllm_config, kv_cache_groups, available_memory)
+    elif is_deepseek_v41_cache(kv_cache_groups):
         kv_cache_config = get_deepseek_v41_kv_cache_config(vllm_config, kv_cache_groups, available_memory)
     elif _get_glm5_next_cache_layout(kv_cache_groups) is not None:
         kv_cache_config = get_glm5_next_kv_cache_config(vllm_config, kv_cache_groups, available_memory)

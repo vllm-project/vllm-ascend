@@ -135,6 +135,8 @@ class TestAscendSFAIndexerBackend(TestBase):
         return SimpleNamespace(
             slot_mapping=MagicMock(name="slot_mapping"),
             num_decode_tokens=0,
+            num_actual_tokens=2,
+            kv_gather_block_ids=None,
             actual_seq_lengths_query=MagicMock(),
             actual_seq_lengths_key=MagicMock(),
             cos=MagicMock(name="cos"),

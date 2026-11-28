@@ -7,7 +7,7 @@ import torch
 import torch_npu
 from torch import nn
 from vllm.config import VllmConfig, get_current_vllm_config
-from vllm.distributed import get_tp_group
+from vllm.distributed import get_dcp_group, get_tp_group
 from vllm.triton_utils import HAS_TRITON
 from vllm.utils.platform_utils import is_pin_memory_available
 from vllm.utils.torch_utils import kv_cache_dtype_str_to_dtype
@@ -30,6 +30,9 @@ from vllm_ascend.attention.context_parallel.common_cp import (
     is_pcp_decode_sharding_enabled,
 )
 from vllm_ascend.attention.context_parallel.sfa_dcp_utils import (
+    _index_select_kv_blocks,
+    as_byte_view,
+    build_sfa_dcp_compact_kv_metadata,
     build_sfa_dcp_replicated_block_table,
     build_sfa_dcp_replicated_slot_mapping,
     get_sfa_dcp_local_block_table,
@@ -84,6 +87,9 @@ class AscendSFAIndexerMetadata:
     # The PCP cache-write gather splits the local prefill region on this
     # independently computed decode-token count.
     num_decode_tokens: int = 0
+    # Present only for a temporary full-history read; writes remain sharded.
+    # When set, ``block_table`` already addresses the gathered cache.
+    kv_gather_block_ids: torch.Tensor | None = None
     # Optional selection supplied by the owning attention implementation.
     # Projection, rope and cache writes continue to use this backend.
     # The selector receives ``(q_li, weights, indexer, metadata, q_li_scale)``;
@@ -430,6 +436,26 @@ class AscendSFAIndexerBackend(nn.Module, AttentionBackend):
         if not compute_topk:
             return None
 
+        kv_cache = self.k_cache.kv_cache
+        # The gather dictionary is identical on every rank (it is derived
+        # from the gathered global block table), so an empty dictionary skips
+        # the collective symmetrically on all senders.
+        if indexer_metadata.kv_gather_block_ids is not None and indexer_metadata.kv_gather_block_ids.numel() > 0:
+            gathered_cache, handles = [], []
+            for cache in kv_cache:
+                blocks = _index_select_kv_blocks(cache, indexer_metadata.kv_gather_block_ids)
+                gathered, handle = all_gather_async(as_byte_view(blocks).contiguous(), get_dcp_group())
+                gathered_cache.append(gathered.view(cache.dtype))
+                handles.append(handle)
+            for handle in handles:
+                if handle is not None:
+                    handle.wait()
+            kv_cache = tuple(gathered_cache)
+        # Empty PCP receivers still supply their cache above. Shared-index
+        # layers instead return before gathering because no rank selects Q.
+        if indexer_metadata.num_actual_tokens == 0:
+            return None
+
         assert self.wk_weights_proj is not None
         assert self.wq_b is not None
         assert indexer_metadata.actual_seq_lengths_query is not None
@@ -499,7 +525,7 @@ class AscendSFAIndexerBackend(nn.Module, AttentionBackend):
             q_li_scale,
             q_li_shape_ori,
             weights,
-            self.k_cache.kv_cache,
+            kv_cache,
             INDEXER_K_CACHE_SLOT,
             INDEXER_SCALE_CACHE_SLOT,
             indexer_metadata,
@@ -608,6 +634,17 @@ class AscendSFAIndexerMetadataBuilder(AttentionMetadataBuilder[AscendSFAIndexerM
         self._dcp_block_table_shape = (max_num_reqs, max_replicated_block_table_cols)
         self.replicated_col_idx_buf = torch.arange(
             max_replicated_block_table_cols,
+            dtype=torch.int32,
+            device=device,
+        )
+        dcp_group = get_dcp_group()
+        collective_ranks = sorted(dcp_group.ranks)
+        # AllGather writes payload segments in sorted ProcessGroup order while
+        # logical DCP ranks follow the PCP-first group order; store the
+        # permutation so compact KV block tables can address the gathered
+        # tensor in HCCL order (see AscendSFAPCPDCPMetadataBuilder).
+        self.dcp_collective_rank_order = torch.tensor(
+            [collective_ranks.index(rank) for rank in dcp_group.ranks],
             dtype=torch.int32,
             device=device,
         )
@@ -1059,6 +1096,34 @@ class AscendSFAIndexerMetadataBuilder(AttentionMetadataBuilder[AscendSFAIndexerM
         seq_lens = common_attn_metadata.seq_lens[:num_reqs]
         actual_seq_lengths_query = cum_query_lens
         actual_seq_lengths_key = seq_lens
+        kv_gather_block_ids = None
+        pcp_context = kwargs.get("pcp_context")
+        if self.use_dcp and pcp_context is not None and bool(pcp_context.global_batch.is_prefilling_np.any()):
+            group_idx = kwargs.get("pcp_cache_group_idx")
+            if group_idx is None:
+                raise RuntimeError("PCP+DCP indexer metadata requires the PCP cache-group index.")
+            global_table = get_sfa_dcp_local_block_table(
+                pcp_context.global_block_tables[group_idx],
+                pcp_context.global_batch.num_reqs,
+                self.max_local_block_table_cols,
+            )
+            # The compact history gather addresses each sender's raw local
+            # blocks, not the replicated decode view built above.
+            local_table = get_sfa_dcp_local_block_table(
+                common_attn_metadata.block_table_tensor,
+                num_reqs,
+                self.max_local_block_table_cols,
+            )
+            counts = pcp_context.global_block_table_num_blocks
+            kv_gather_block_ids, block_table = build_sfa_dcp_compact_kv_metadata(
+                local_table,
+                self.replicated_col_idx_buf,
+                self.dcp_collective_rank_order,
+                self.kernel_block_size,
+                self.vllm_config.parallel_config.cp_kv_cache_interleave_size,
+                global_dcp_block_table=global_table,
+                global_dcp_num_blocks=None if counts is None else counts[group_idx],
+            )
         if self.use_dsa_cp and not self.use_pcp:
             (
                 cos,
@@ -1097,6 +1162,7 @@ class AscendSFAIndexerMetadataBuilder(AttentionMetadataBuilder[AscendSFAIndexerM
             block_table=block_table,
             sin=sin,
             cos=cos,
+            kv_gather_block_ids=kv_gather_block_ids,
             block_size=block_size,
             actual_seq_lengths_query=actual_seq_lengths_query,
             actual_seq_lengths_key=actual_seq_lengths_key,

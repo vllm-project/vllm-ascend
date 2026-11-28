@@ -25,6 +25,9 @@ from vllm_ascend.attention.context_parallel.common_cp import (
     get_pcp_num_replicated_tokens,
 )
 from vllm_ascend.attention.context_parallel.sfa_dcp_utils import (
+    _index_select_kv_blocks,
+    as_byte_view,
+    build_sfa_dcp_compact_kv_metadata,
     build_sfa_dcp_replicated_block_table,
     build_sfa_dcp_replicated_slot_mapping,
     get_sfa_dcp_local_block_table,
@@ -378,18 +381,6 @@ class AscendSFAPCPImpl(OProjWeightSwitchMixin, AscendSFAImpl):
         )
 
         return super().exec_kv(kv_no_split, cos, sin, kv_cache, slots, attn_metadata)
-
-
-def as_byte_view(x: torch.Tensor) -> torch.Tensor:
-    """Return a byte view for FP8 tensors, preserving their bit patterns."""
-    if x.dtype in (torch.float8_e4m3fn, torch.float8_e5m2):
-        return x.view(torch.uint8)
-    return x
-
-
-def _index_select_kv_blocks(cache: torch.Tensor, indices: torch.Tensor) -> torch.Tensor:
-    # FP8 block movement must preserve bytes, including NaN bit patterns.
-    return torch.index_select(as_byte_view(cache), 0, indices).view(cache.dtype)
 
 
 @dataclass
@@ -1148,15 +1139,15 @@ class AscendSFADCPMetadataBuilder(
         global_dcp_num_blocks: torch.Tensor | None = None,
     ) -> tuple[torch.Tensor, torch.Tensor]:
         """Build the compact cross-DCP KV view used by prefill attention."""
-        valid_block_ids, compact_block_table = dcp_block_table.flatten().unique(return_inverse=True)
-        compact_block_table = compact_block_table.view_as(dcp_block_table)
-        num_blocks = valid_block_ids.shape[0]
-        dcp_collective_rank_order = self.dcp_collective_rank_order[: self.dcp_size]
-        remapped_block_table = (
-            compact_block_table.unsqueeze(-1)
-            + (dcp_collective_rank_order * num_blocks).view(1, 1, -1).to(dcp_block_table)
-        ).reshape(dcp_block_table.shape[0], -1)
-        return valid_block_ids, remapped_block_table.to(torch.int32)
+        return build_sfa_dcp_compact_kv_metadata(
+            dcp_block_table,
+            self.arange_buffer,
+            self.dcp_collective_rank_order,
+            self.kernel_block_size,
+            self.cp_kv_cache_interleave_size,
+            global_dcp_block_table=global_dcp_block_table,
+            global_dcp_num_blocks=global_dcp_num_blocks,
+        )
 
     def _build_with_metadata_view(
         self,
@@ -1283,28 +1274,17 @@ class AscendSFAPCPDCPMetadataBuilder(AscendSFADCPMetadataBuilder):
         global_dcp_block_table: torch.Tensor | None = None,
         global_dcp_num_blocks: torch.Tensor | None = None,
     ) -> tuple[torch.Tensor, torch.Tensor]:
-        if global_dcp_block_table is None:
-            return super()._build_compact_kv_gather_metadata(dcp_block_table)
-
         # PCP ranks can have different local request rows, even with zeroed
-        # block-table tails. Use the global request view so every DCP sender
-        # packs the same block IDs in the same order.
-        if global_dcp_num_blocks is None:
+        # block-table tails; the shared helper packs the global dictionary
+        # so every DCP sender selects the same block IDs in the same order
+        # and remaps addresses with the interleave-aware owner mapping.
+        if global_dcp_block_table is not None and global_dcp_num_blocks is None:
             raise ValueError("PCP+DCP compact KV metadata requires valid block counts for the global block table.")
-        valid_mask = self.arange_buffer[: global_dcp_block_table.shape[1]].unsqueeze(
-            0
-        ) < global_dcp_num_blocks.unsqueeze(1)
-        # Select allocated entries without modifying shared tables or
-        # introducing a block-0 placeholder for unused columns.
-        valid_block_ids = global_dcp_block_table[valid_mask].unique()
-        compact_block_table = torch.searchsorted(valid_block_ids, dcp_block_table.contiguous())
-        num_blocks = valid_block_ids.shape[0]
-        dcp_collective_rank_order = self.dcp_collective_rank_order[: self.dcp_size]
-        remapped_block_table = (
-            compact_block_table.unsqueeze(-1)
-            + (dcp_collective_rank_order * num_blocks).view(1, 1, -1).to(dcp_block_table)
-        ).reshape(dcp_block_table.shape[0], -1)
-        return valid_block_ids, remapped_block_table.to(torch.int32)
+        return super()._build_compact_kv_gather_metadata(
+            dcp_block_table,
+            global_dcp_block_table=global_dcp_block_table,
+            global_dcp_num_blocks=global_dcp_num_blocks,
+        )
 
     def _build_pcp_ordered_indexer_slot_mapping(
         self,
@@ -1498,15 +1478,17 @@ class AscendSFADCPImpl(DCPImplMixin, AscendSFAImpl):
         attn_metadata: M,
     ) -> None:
         """Start the compact KV all-gather used by prefill/mixed DCP batches."""
-        if not self._has_prefill(attn_metadata):
-            return
         assert isinstance(attn_metadata, AscendSFADCPMetadata)
         assert attn_metadata.dcp_context is not None, "DCP SFA requires attn_metadata.dcp_context."
+        valid_block_ids = attn_metadata.dcp_context.kv_gather_block_ids
+        # An empty dictionary is identical on every rank (it is derived from
+        # the gathered global block table), so skipping stays collective-safe.
+        if valid_block_ids is None or valid_block_ids.numel() == 0:
+            return
         assert self.dcp_group is not None, "DCP SFA requires dcp_group when dcp_size > 1."
 
-        valid_block_ids = attn_metadata.dcp_context.kv_gather_block_ids
         block_table = attn_metadata.dcp_context.kv_gather_block_table
-        assert valid_block_ids is not None and block_table is not None
+        assert block_table is not None
         kv = _index_select_kv_blocks(kv_cache[0], valid_block_ids)
         split_sizes: tuple[int, ...]
         if self.uses_packed_sfa_main_cache:
@@ -1531,6 +1513,12 @@ class AscendSFADCPImpl(DCPImplMixin, AscendSFAImpl):
             dim=0,
             split_sizes=split_sizes,
         )
+        if attn_metadata.num_actual_tokens == 0:
+            # This sender has no attention consumer to join its gather.
+            context = attn_metadata.dcp_context.gather_context
+            if context.handle is not None:
+                context.handle.wait()
+            attn_metadata.dcp_context.gather_context = None
 
     def _start_dcp_gather(
         self,
@@ -1745,12 +1733,12 @@ class AscendSFADCPImpl(DCPImplMixin, AscendSFAImpl):
         attn_metadata: M,
     ) -> None:
         assert isinstance(attn_metadata, AscendSFADCPMetadata)
+        assert attn_metadata.dcp_context is not None, "DCP SFA requires attn_metadata.dcp_context."
         # Prefill/mixed batches gather compact KV after its cache write instead.
         # Keeping Q local avoids a full query all-gather and the subsequent LSE
         # output merge in the all-KV attention path.
-        if self._has_prefill(attn_metadata):
+        if attn_metadata.dcp_context.kv_gather_block_ids is not None:
             return
-        assert attn_metadata.dcp_context is not None, "DCP SFA requires attn_metadata.dcp_context."
         attn_metadata.dcp_context.gather_context = self._start_dcp_query_gather(ql_nope, q_pe)
 
     def _get_sfa_kv_slot_mapping(
@@ -1793,7 +1781,12 @@ class AscendSFADCPImpl(DCPImplMixin, AscendSFAImpl):
         )
         # Prefill DCP gathers referenced blocks after the current layer writes
         # its SFA KV cache and before indexer/top-k work begins.
-        if kv_cache is not None:
+        if (
+            kv_cache is not None
+            and isinstance(attn_metadata, AscendSFADCPMetadata)
+            and attn_metadata.dcp_context is not None
+            and attn_metadata.dcp_context.kv_gather_block_ids is not None
+        ):
             self._record_dcp_kv_gather_context(kv_cache, attn_metadata)
         return result
 
@@ -1811,7 +1804,7 @@ class AscendSFADCPImpl(DCPImplMixin, AscendSFAImpl):
         # softmax LSE so decode can merge partial results across CP ranks.
         dcp_context = attn_metadata.dcp_context
 
-        if self._has_prefill(attn_metadata):
+        if dcp_context.kv_gather_block_ids is not None:
             # Prefill keeps Q local and attends over the gathered KV, so no LSE.
             gather_context = dcp_context.gather_context
             dcp_context.gather_context = None
@@ -1981,6 +1974,15 @@ class AscendSFADCPImpl(DCPImplMixin, AscendSFAImpl):
 
 class AscendSFAPCPDCPImpl(AscendSFADCPImpl, AscendSFAPCPImpl):
     """Composes DCP attention with PCP gathered-token cache writes."""
+
+    def _get_indexer_attn_q_gather_handle(self, attn_metadata: M) -> torch.distributed.Work | None:
+        # Reuse the indexer's existing communication dependency: join the
+        # DCP history gather before its PCP cache-write gather uses AIV.
+        context = cast(AscendSFADCPMetadata, attn_metadata).dcp_context
+        assert context is not None
+        if context.kv_gather_block_ids is None or context.gather_context is None:
+            return None
+        return context.gather_context.handle
 
     def exec_kv(
         self,

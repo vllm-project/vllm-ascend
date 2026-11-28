@@ -20,7 +20,9 @@ import torch
 from vllm.triton_utils import tl, triton
 from vllm.utils.math_utils import next_power_of_2
 
-from vllm_ascend.ops.triton.triton_utils import get_element
+from vllm_ascend.ops.triton.triton_utils import _resolve_triton_ascend_op, get_element
+
+_a5_sort = _resolve_triton_ascend_op("sort")
 
 
 @triton.jit(do_not_specialize=["topk_count", "dcp_size", "interleave_size", "dcp_rank"])
