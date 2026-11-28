@@ -1,0 +1,6 @@
+pr: 23233
+entries:
+  - category: bugfix
+    text: >-
+      Fixed a transient completion-notification timeout that could leave Decode waiting
+      during Mooncake V2 layerwise Push. Prefill now retries the notification automatically.

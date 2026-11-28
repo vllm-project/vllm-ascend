@@ -231,7 +231,7 @@ def test_invalid_done_does_not_stop_listener_or_finish_request(worker, frames):
     assert not result.failed_recving
 
 
-def test_done_ack_send_error_reports_request_failure(worker):
+def test_done_ack_send_error_preserves_successful_receive(worker):
     worker.start_load_kv(metadata())
 
     def fail_send(frames):
@@ -241,7 +241,8 @@ def test_done_ack_send_error_reports_request_failure(worker):
         SimpleNamespace(send_multipart=fail_send), [b"producer", b"", msgspec.msgpack.encode(completion())]
     )
     result = finish(worker)
-    assert result.finished_recving == result.failed_recving == {"d-request"}
+    assert result.finished_recving == {"d-request"}
+    assert not result.failed_recving
 
 
 def test_push_thread_start_failure_is_reported_and_stopped(worker, monkeypatch):
