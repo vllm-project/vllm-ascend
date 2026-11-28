@@ -8,7 +8,6 @@ from vllm.model_executor.layers.linear import RowParallelLinear
 
 from tests.ut.base import TestBase
 from tests.ut.quantization.conftest_quantization import (
-    create_mock_ascend_config,
     create_mock_vllm_config,
     create_mxfp_moe_layer,
 )
@@ -384,10 +383,8 @@ class TestAscendW8A8MXFP8MoEMethod(TestBase):
     intermediate_size = 256
 
     @patch("vllm_ascend.quantization.methods.w8a8.w8a8_mxfp8.get_current_vllm_config")
-    @patch("vllm_ascend.quantization.methods.w8a8.w8a8_mxfp8.get_ascend_config")
-    def setUp(self, mock_ascend, mock_vllm):
+    def setUp(self, mock_vllm):
         mock_vllm.return_value = create_mock_vllm_config()
-        mock_ascend.return_value = create_mock_ascend_config()
         mx_profile = allow_mx_weight_format()
         mx_profile.start()
         self.addCleanup(mx_profile.stop)
@@ -412,10 +409,6 @@ class TestAscendW8A8MXFP8MoEMethod(TestBase):
                     patch(
                         "vllm_ascend.quantization.methods.w8a8.w8a8_mxfp8.get_current_vllm_config",
                         return_value=config,
-                    ),
-                    patch(
-                        "vllm_ascend.quantization.methods.w8a8.w8a8_mxfp8.get_ascend_config",
-                        return_value=create_mock_ascend_config(),
                     ),
                     allow_mx_weight_format(),
                 ):
@@ -502,10 +495,6 @@ class TestAscendW8A8MXFP8MoEMethod(TestBase):
             patch(
                 "vllm_ascend.quantization.methods.w8a8.w8a8_mxfp8.get_current_vllm_config",
                 return_value=vllm_config,
-            ),
-            patch(
-                "vllm_ascend.quantization.methods.w8a8.w8a8_mxfp8.get_ascend_config",
-                return_value=create_mock_ascend_config(),
             ),
             allow_mx_weight_format(),
         ):
@@ -723,14 +712,22 @@ class TestAscendW8A8MXFP8MoEMethod(TestBase):
         )
         mock_comm.fused_experts.assert_called_once()
 
-    def _make_swiglu_oai_compute_input(self, num_tokens: int, num_experts: int = 2):
-        layer = nn.Module()
-        layer.w13_weight = nn.Parameter(
-            torch.empty((num_experts, 128, 128), dtype=torch.float8_e4m3fn), requires_grad=False
-        )
-        layer.w13_weight_scale = nn.Parameter(
-            torch.empty((num_experts, 2, 128, 2), dtype=torch.uint8), requires_grad=False
-        )
+    def _make_swiglu_oai_compute_input(
+        self,
+        num_tokens: int,
+        num_experts: int = 2,
+        *,
+        layer: nn.Module | None = None,
+        swiglu_limit: float = 7.0,
+    ):
+        if layer is None:
+            layer = nn.Module()
+            layer.w13_weight = nn.Parameter(
+                torch.empty((num_experts, 128, 128), dtype=torch.float8_e4m3fn), requires_grad=False
+            )
+            layer.w13_weight_scale = nn.Parameter(
+                torch.empty((num_experts, 2, 128, 2), dtype=torch.uint8), requires_grad=False
+            )
         return SimpleNamespace(
             hidden_states=torch.empty((num_tokens, 128), dtype=torch.bfloat16),
             dynamic_scale=None,
@@ -738,24 +735,36 @@ class TestAscendW8A8MXFP8MoEMethod(TestBase):
             activation=MoEActivation.SWIGLUOAI_UNINTERLEAVE,
             group_list=torch.tensor([num_tokens // num_experts] * num_experts, dtype=torch.int64),
             group_list_type=1,
-            swiglu_limit=7.0,
+            swiglu_limit=swiglu_limit,
             swiglu_alpha=1.702,
             swiglu_beta=1.0,
         )
 
-    def test_swiglu_oai_fusion_opt_in_routes_above_threshold(self):
+    def test_swiglu_oai_fusion_prepares_ready_flag_and_routes_above_threshold(self):
         self.scheme.use_expert_weight_list = False
         self.scheme._dynamic_mx_quant_scale_alg = DynamicMXQuantScaleAlg.CEIL
-        self.scheme._swiglu_oai_fusion_enabled = True
-        mlp_compute_input = self._make_swiglu_oai_compute_input(num_tokens=2 * 513, num_experts=2)
+        layer = create_mxfp_moe_layer(num_experts=2, hidden_size=128, intermediate_size=64)
+        with (
+            patch(
+                "vllm_ascend.quantization.methods.w8a8.w8a8_mxfp8.get_current_vllm_config",
+                return_value=create_mock_vllm_config(),
+            ),
+            patch("vllm_ascend.utils._should_trans_nz", return_value=True),
+            patch("vllm_ascend.quantization.methods.w8a8.w8a8_mxfp8.is_internal_npu_format", return_value=True),
+            patch("vllm_ascend.quantization.methods.gmm_swiglu_oai.enable_custom_op", return_value=True),
+            patch.object(torch.ops._C_ascend, "gmm_swiglu_oai_mx_quant", create=True, new=Mock()),
+        ):
+            self.scheme.process_weights_after_loading(layer)
+
+        self.assertTrue(layer._swiglu_oai_weight_ready)
+
+        mlp_compute_input = self._make_swiglu_oai_compute_input(num_tokens=2 * 513, num_experts=2, layer=layer)
         quant_hidden = torch.empty((2 * 513, 128), dtype=torch.float8_e4m3fn)
         pertoken_scale = torch.empty((2 * 513, 2, 2), dtype=torch.uint8)
         expected_out = torch.empty((2 * 513, 64), dtype=torch.float8_e4m3fn)
         expected_scale = torch.empty((2 * 513, 1, 2), dtype=torch.uint8)
         fused_op = Mock(return_value=(expected_out, expected_scale))
         with (
-            patch("vllm_ascend.quantization.methods.w8a8.w8a8_mxfp8.is_internal_npu_format", return_value=True),
-            patch("vllm_ascend.quantization.methods.w8a8.w8a8_mxfp8.enable_custom_op", return_value=True),
             patch.object(self.scheme, "_quant_hidden_states", return_value=(quant_hidden, pertoken_scale)),
             patch("vllm_ascend.quantization.methods.w8a8.w8a8_mxfp8.dispose_tensor") as mock_dispose,
             patch(
@@ -770,8 +779,8 @@ class TestAscendW8A8MXFP8MoEMethod(TestBase):
         self.assertIs(out_scale, expected_scale)
         fused_op.assert_called_once_with(
             quant_hidden,
-            [mlp_compute_input.layer.w13_weight],
-            [mlp_compute_input.layer.w13_weight_scale],
+            [layer.w13_weight],
+            [layer.w13_weight_scale],
             pertoken_scale,
             mlp_compute_input.group_list,
             1,
@@ -781,20 +790,61 @@ class TestAscendW8A8MXFP8MoEMethod(TestBase):
         )
         mock_dispose.assert_called_once_with(mlp_compute_input.hidden_states)
 
-    def test_swiglu_oai_fusion_falls_back_when_disabled_or_below_threshold(self):
+        # RL restore must clear the cached ready flag before converting weights back to ND,
+        # and re-running process_weights_after_loading must recompute it.
+        self.scheme.restore_weights_for_rl_loading(layer)
+        self.assertFalse(layer._swiglu_oai_weight_ready)
+        with (
+            patch(
+                "vllm_ascend.quantization.methods.w8a8.w8a8_mxfp8.get_current_vllm_config",
+                return_value=create_mock_vllm_config(),
+            ),
+            patch("vllm_ascend.quantization.methods.w8a8.w8a8_mxfp8.is_internal_npu_format", return_value=True),
+            patch("vllm_ascend.quantization.methods.gmm_swiglu_oai.enable_custom_op", return_value=True),
+            patch.object(torch.ops._C_ascend, "gmm_swiglu_oai_mx_quant", create=True, new=Mock()),
+        ):
+            self.scheme.process_weights_after_loading(layer)
+        self.assertTrue(layer._swiglu_oai_weight_ready)
+
+    def test_swiglu_oai_fusion_falls_back_when_unready_invalid_attrs_or_below_threshold(self):
         self.scheme.use_expert_weight_list = False
         self.scheme._dynamic_mx_quant_scale_alg = DynamicMXQuantScaleAlg.CEIL
-        for enabled, num_tokens in ((False, 2 * 513), (True, 2 * 512)):
-            with self.subTest(enabled=enabled, num_tokens=num_tokens):
-                self.scheme._swiglu_oai_fusion_enabled = enabled
-                mlp_compute_input = self._make_swiglu_oai_compute_input(num_tokens=num_tokens, num_experts=2)
+        # Non-32 group_size must never mark weights ready.
+        bad_group_layer = create_mxfp_moe_layer(num_experts=2, hidden_size=128, intermediate_size=64, group_size=64)
+        self.scheme.group_size = 64
+        with (
+            patch(
+                "vllm_ascend.quantization.methods.w8a8.w8a8_mxfp8.get_current_vllm_config",
+                return_value=create_mock_vllm_config(),
+            ),
+            patch("vllm_ascend.utils._should_trans_nz", return_value=True),
+            patch("vllm_ascend.quantization.methods.w8a8.w8a8_mxfp8.is_internal_npu_format", return_value=True),
+            patch("vllm_ascend.quantization.methods.gmm_swiglu_oai.enable_custom_op", return_value=True),
+            patch.object(torch.ops._C_ascend, "gmm_swiglu_oai_mx_quant", create=True, new=Mock()),
+        ):
+            self.scheme.process_weights_after_loading(bad_group_layer)
+        self.assertFalse(bad_group_layer._swiglu_oai_weight_ready)
+        self.scheme.group_size = 32
+
+        cases = (
+            ("unprepared_layer", False, 2 * 513, 7.0),
+            ("below_threshold", True, 2 * 513 - 1, 7.0),
+            ("zero_limit", True, 2 * 513, 0.0),
+        )
+        for name, ready, num_tokens, swiglu_limit in cases:
+            with self.subTest(case=name):
+                mlp_compute_input = self._make_swiglu_oai_compute_input(
+                    num_tokens=num_tokens,
+                    num_experts=2,
+                    swiglu_limit=swiglu_limit,
+                )
+                if ready:
+                    mlp_compute_input.layer._swiglu_oai_weight_ready = True
                 gmm1_out = torch.empty((num_tokens, 128), dtype=torch.bfloat16)
                 fallback_out = torch.empty((num_tokens, 64), dtype=torch.float8_e4m3fn)
                 fallback_scale = torch.empty((num_tokens, 1, 2), dtype=torch.uint8)
                 fused_op = Mock()
                 with (
-                    patch("vllm_ascend.quantization.methods.w8a8.w8a8_mxfp8.is_internal_npu_format", return_value=True),
-                    patch("vllm_ascend.quantization.methods.w8a8.w8a8_mxfp8.enable_custom_op", return_value=True),
                     patch.object(torch.ops._C_ascend, "gmm_swiglu_oai_mx_quant", create=True, new=fused_op),
                     patch.object(self.scheme, "apply_gmm1", return_value=gmm1_out) as mock_gmm1,
                     patch(

@@ -1,3 +1,4 @@
+from types import SimpleNamespace
 from unittest.mock import MagicMock, Mock, patch
 
 import torch
@@ -6,7 +7,7 @@ from vllm.model_executor.layers.fused_moe.activation import MoEActivation
 from vllm.model_executor.layers.linear import RowParallelLinear
 
 from tests.ut.base import TestBase
-from tests.ut.quantization.conftest_quantization import create_mock_ascend_config, create_mock_vllm_config
+from tests.ut.quantization.conftest_quantization import create_mock_vllm_config
 from vllm_ascend.quantization.methods.w4a4.w4a4_mxfp4 import (
     AscendW4A4MXFP4DynamicFusedMoEMethod,
     AscendW4A4MXFP4DynamicLinearMethod,
@@ -134,10 +135,8 @@ class TestAscendW4A4MXFP4MoEMethod(TestBase):
     intermediate_size = 256
 
     @patch("vllm_ascend.quantization.methods.w4a4.w4a4_mxfp4.get_current_vllm_config")
-    @patch("vllm_ascend.quantization.methods.w4a4.w4a4_mxfp4.get_ascend_config")
-    def setUp(self, mock_ascend, mock_vllm):
+    def setUp(self, mock_vllm):
         mock_vllm.return_value = create_mock_vllm_config()
-        mock_ascend.return_value = create_mock_ascend_config()
         mx_profile = patch("vllm_ascend.quantization.methods.base.get_current_hardware_profile")
         mx_profile.start().return_value.supports_weight_format.return_value = True
         self.addCleanup(mx_profile.stop)
@@ -439,15 +438,22 @@ class TestAscendW4A4MXFP4MoEMethod(TestBase):
             with self.subTest(fused=fused):
                 self._run_gmm1_keeps_dispatch_quantized_input_until_operator(fused)
 
-    def _make_swiglu_oai_layer(self):
+    def _make_swiglu_oai_layer(self, *, num_experts: int = 8, swiglu_limit: float = 7.0):
         layer = nn.Module()
         layer.activation = MoEActivation.SWIGLUOAI_UNINTERLEAVE
-        layer.w13_weight = nn.Parameter(torch.randint(0, 255, (8, 256, 64), dtype=torch.uint8), requires_grad=False)
-        layer.w2_weight = nn.Parameter(torch.randint(0, 255, (8, 128, 128), dtype=torch.uint8), requires_grad=False)
-        layer.w13_weight_scale = nn.Parameter(
-            torch.randint(0, 255, (8, 256, 4), dtype=torch.uint8), requires_grad=False
+        layer.moe_config = SimpleNamespace(swiglu_limit=swiglu_limit, swiglu_alpha=1.702, swiglu_beta=1.0)
+        layer.w13_weight = nn.Parameter(
+            torch.randint(0, 255, (num_experts, 256, 64), dtype=torch.uint8), requires_grad=False
         )
-        layer.w2_weight_scale = nn.Parameter(torch.randint(0, 255, (8, 128, 8), dtype=torch.uint8), requires_grad=False)
+        layer.w2_weight = nn.Parameter(
+            torch.randint(0, 255, (num_experts, 128, 128), dtype=torch.uint8), requires_grad=False
+        )
+        layer.w13_weight_scale = nn.Parameter(
+            torch.randint(0, 255, (num_experts, 256, 4), dtype=torch.uint8), requires_grad=False
+        )
+        layer.w2_weight_scale = nn.Parameter(
+            torch.randint(0, 255, (num_experts, 128, 8), dtype=torch.uint8), requires_grad=False
+        )
         return layer
 
     def _make_swiglu_oai_vllm_config(self):
@@ -456,40 +462,76 @@ class TestAscendW4A4MXFP4MoEMethod(TestBase):
         config.lora_config = None
         return config
 
-    def test_swiglu_oai_fusion_disabled_by_default(self):
+    def test_swiglu_oai_fusion_falls_back_when_ineligible(self):
+        cases = (
+            ("zero_limit", {"swiglu_limit": 0.0}, {}, DynamicMXQuantScaleAlg.CEIL, True),
+            ("eplb", {}, {"enable_eplb": True}, DynamicMXQuantScaleAlg.CEIL, True),
+            ("lora", {}, {"lora_config": Mock()}, DynamicMXQuantScaleAlg.CEIL, True),
+            ("non_ceil", {}, {}, DynamicMXQuantScaleAlg.MAX_EXPONENT, True),
+            ("no_custom_op", {}, {}, DynamicMXQuantScaleAlg.CEIL, False),
+            ("too_many_experts", {"num_experts": 1025}, {}, DynamicMXQuantScaleAlg.CEIL, True),
+        )
+        for name, layer_kwargs, config_overrides, scale_alg, custom_op_enabled in cases:
+            with self.subTest(case=name):
+                layer = self._make_swiglu_oai_layer(**layer_kwargs)
+                config = self._make_swiglu_oai_vllm_config()
+                if "enable_eplb" in config_overrides:
+                    config.parallel_config.enable_eplb = config_overrides["enable_eplb"]
+                if "lora_config" in config_overrides:
+                    config.lora_config = config_overrides["lora_config"]
+                # Verify stale ready state is always cleared before checking the new layer.
+                self.scheme._swiglu_oai_fusion_weight_ready = True
+                with (
+                    patch(
+                        "vllm_ascend.quantization.methods.w4a4.w4a4_mxfp4.get_current_vllm_config", return_value=config
+                    ),
+                    patch("vllm_ascend.quantization.methods.w4a4.w4a4_mxfp4.use_cann_megamoe", return_value=False),
+                    patch(
+                        "vllm_ascend.quantization.methods.w4a4.w4a4_mxfp4.get_dynamic_mx_quant_scale_alg",
+                        return_value=scale_alg,
+                    ),
+                    patch(
+                        "vllm_ascend.quantization.methods.gmm_swiglu_oai.enable_custom_op",
+                        return_value=custom_op_enabled,
+                    ),
+                    patch.object(torch.ops._C_ascend, "gmm_swiglu_oai_mx_quant", create=True, new=Mock()),
+                    patch("vllm_ascend.quantization.nz.torch_npu.npu_format_cast") as mock_cast,
+                ):
+                    self.scheme.process_weights_after_loading(layer)
+
+                experts = layer_kwargs.get("num_experts", 8)
+                mock_cast.assert_not_called()
+                self.assertFalse(self.scheme._swiglu_oai_fusion_weight_ready)
+                self.assertFalse(self.scheme.supports_fused_activation(MoEActivation.SWIGLUOAI_UNINTERLEAVE))
+                self.assertEqual(layer.w13_weight.shape, (experts, 64, 256))
+                self.assertEqual(layer.w13_weight_scale.shape, (experts, 2, 256, 2))
+
+    def test_swiglu_oai_fusion_prepares_weight_and_dispatches_op(self):
         layer = self._make_swiglu_oai_layer()
         config = self._make_swiglu_oai_vllm_config()
         with (
             patch("vllm_ascend.quantization.methods.w4a4.w4a4_mxfp4.get_current_vllm_config", return_value=config),
-            patch("vllm_ascend.quantization.methods.w4a4.w4a4_mxfp4.use_cann_megamoe", return_value=False),
-            patch(
-                "vllm_ascend.quantization.methods.w4a4.w4a4_mxfp4.get_dynamic_mx_quant_scale_alg",
-                return_value=DynamicMXQuantScaleAlg.CEIL,
-            ),
-            patch("vllm_ascend.quantization.methods.w4a4.w4a4_mxfp4.enable_custom_op", return_value=True),
-            patch.object(torch.ops._C_ascend, "gmm_swiglu_oai_mx_quant", create=True, new=Mock()),
-            patch("vllm_ascend.quantization.nz.torch_npu.npu_format_cast") as mock_cast,
-        ):
-            self.scheme.process_weights_after_loading(layer)
-
-        mock_cast.assert_not_called()
-        self.assertFalse(self.scheme._swiglu_oai_fusion_weight_ready)
-        self.assertFalse(self.scheme.supports_fused_activation(MoEActivation.SWIGLUOAI_UNINTERLEAVE))
-        self.assertEqual(layer.w13_weight.shape, (8, 64, 256))
-        self.assertEqual(layer.w13_weight_scale.shape, (8, 2, 256, 2))
-
-    def test_swiglu_oai_fusion_opt_in_prepares_weight_and_dispatches_op(self):
-        layer = self._make_swiglu_oai_layer()
-        config = self._make_swiglu_oai_vllm_config()
-        ascend_config = create_mock_ascend_config(fusion_ops_gmm_swiglu_oai_mx_quant=True)
-        with (
-            patch("vllm_ascend.quantization.methods.w4a4.w4a4_mxfp4.get_current_vllm_config", return_value=config),
-            patch("vllm_ascend.quantization.methods.w4a4.w4a4_mxfp4.get_ascend_config", return_value=ascend_config),
             patch("vllm_ascend.quantization.methods.base.get_current_hardware_profile") as mock_profile,
         ):
             mock_profile.return_value.supports_weight_format.return_value = True
             scheme = AscendW4A4MXFP4DynamicFusedMoEMethod()
 
+        # Calling the OAI fused path before weight preparation fails fast before touching inputs.
+        unready_input = MagicMock(
+            hidden_states=torch.empty((4, 64), dtype=torch.bfloat16),
+            dynamic_scale=None,
+            layer=layer,
+            activation=MoEActivation.SWIGLUOAI_UNINTERLEAVE,
+        )
+        with (
+            patch.object(scheme, "_quant_hidden_states") as mock_quant,
+            patch("vllm_ascend.quantization.methods.w4a4.w4a4_mxfp4.dispose_tensor") as mock_dispose,
+        ):
+            with self.assertRaises(RuntimeError):
+                scheme.apply_gmm1_act_quant(unready_input)
+            mock_quant.assert_not_called()
+            mock_dispose.assert_not_called()
+
         with (
             patch("vllm_ascend.quantization.methods.w4a4.w4a4_mxfp4.get_current_vllm_config", return_value=config),
             patch("vllm_ascend.quantization.methods.w4a4.w4a4_mxfp4.use_cann_megamoe", return_value=False),
@@ -497,7 +539,7 @@ class TestAscendW4A4MXFP4MoEMethod(TestBase):
                 "vllm_ascend.quantization.methods.w4a4.w4a4_mxfp4.get_dynamic_mx_quant_scale_alg",
                 return_value=DynamicMXQuantScaleAlg.CEIL,
             ),
-            patch("vllm_ascend.quantization.methods.w4a4.w4a4_mxfp4.enable_custom_op", return_value=True),
+            patch("vllm_ascend.quantization.methods.gmm_swiglu_oai.enable_custom_op", return_value=True),
             patch.object(torch.ops._C_ascend, "gmm_swiglu_oai_mx_quant", create=True, new=Mock()),
             patch(
                 "vllm_ascend.quantization.nz.torch_npu.npu_format_cast",

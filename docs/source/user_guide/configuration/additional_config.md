@@ -40,7 +40,6 @@ The following table lists additional configuration options available in vLLM Asc
 | `finegrained_tp_config`             | dict | `{}`    | Configuration options for fine-grained tensor parallelism. See [Fine-Grained Tensor Parallelism](../feature_guide/Fine_grained_TP.md). |
 | `kv_trace`                  | dict | `{}`    | Per-engine KV cache address diagnostics for Model Runner V2. `enabled` defaults to `false`; `action` accepts `"log"` (default) or `"raise"`. See [KV Trace](../feature_guide/kv_trace.md). |
 | `ascend_compilation_config`         | dict | `{}`    | Configuration options for Ascend compilation                                                              |
-| `ascend_fusion_config`              | dict | `{}`    | Controls fused Ascend operators. See [Ascend fusion configuration](#ascend-fusion-configuration). |
 | `ascend_warmup_config`              | dict | `{}`    | Configuration options for startup warmup that overlaps weight loading                                     |
 | `eplb_config`                       | dict | `{}`    | Runner-specific EPLB extensions. See [Expert Parallelism Load Balancer](../feature_guide/expert_parallelism_load_balancer.md). |
 | `scheduler_config`                  | dict | `{}`    | Configuration options for Ascend scheduler extensions, including balance scheduling, recompute scheduling, DyntraLB, ShortRequestFirst, and dynamic chunked pipeline parallel. |
@@ -78,15 +77,6 @@ The following table lists additional configuration options available in vLLM Asc
 | `combine_quant_mode`                | int  | `0`     | Controls communication quantization for the MC2 combine operation. The default (`0`) lets the runtime select the mode. Set `2`, `3`, or `4` to override the `comm_quant_mode` argument to `torch_npu.npu_moe_distribute_combine_v2`. |
 
 The details of each configuration option are as follows:
-
-<span id="ascend-fusion-configuration"></span>**ascend_fusion_config**
-
-| Name | Type | Default | Description |
-| ---- | ---- | ------- | ----------- |
-| `fusion_ops_gmmswigluquant` | bool | `true` | Enables the existing grouped matmul SwiGLU quantization fusion. |
-| `fusion_ops_gmm_swiglu_oai_mx_quant` | bool | `false` | Opts eligible Ascend A5 MXFP4 and MXFP8 MoE layers into fusion of grouped matmul, OAI SwiGLU, and MX output quantization. |
-
-To opt in, pass `--additional-config '{"ascend_fusion_config":{"fusion_ops_gmm_swiglu_oai_mx_quant":true}}'` when starting the server.
 
 <span id="runtime_guard"></span>**runtime_guard**
 
