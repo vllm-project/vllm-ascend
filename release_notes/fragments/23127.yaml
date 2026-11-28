@@ -1,0 +1,9 @@
+pr: 23127
+entries:
+  - category: performance
+    text: >-
+      Reduced Qwen3.6 vision-prefill launch overhead on Ascend A5 by reusing
+      expanded rotary-embedding coefficients across all vision layers.
+      The optimization is enabled automatically and requires no configuration change.
+    model: qwen3.6
+    hardware: [A5]

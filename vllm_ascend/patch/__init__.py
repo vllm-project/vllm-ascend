@@ -947,6 +947,20 @@
 #       when using mrope.
 #    Future Plan:
 #       Remove this patch when vllm-ascend supports pattern matching for this fused kernel.
+#   4. `vllm.model_executor.models.qwen3_vl.Qwen3_VisionTransformer.prepare_encoder_metadata`
+#      and `vllm.model_executor.models.qwen2_5_vl.Qwen2_5_VisionAttention.forward`
+#    Why:
+#       Qwen3.6 reuses this vision attention, whose Ascend RoPE path otherwise
+#       concatenates cos and sin in every transformer layer.
+#    How:
+#       On A5, expand cos and sin once while preparing encoder metadata, then
+#       pass the expanded tensors directly to npu_rotary_mul in every layer.
+#       Other devices and non-expanded inputs retain the upstream path.
+#    Related PR (if no, explain why):
+#       No. This optimization targets Ascend npu_rotary_mul input preparation.
+#    Future Plan:
+#       Remove this patch when upstream lets backends prepare reusable vision
+#       RoPE metadata outside the transformer-layer loop.
 #
 # ** 19. File: worker/patch_routed_experts_capture.py**
 # ~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~

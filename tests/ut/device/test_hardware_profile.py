@@ -141,6 +141,7 @@ _EXPECTED_CAPABILITIES = {
             HardwareCapability.SWIGLU_OAI_MX_QUANT,
             HardwareCapability.TRITON_BATCH_MEMCPY,
             HardwareCapability.UNRESTRICTED_MLAPO,
+            HardwareCapability.VIT_PREEXPANDED_ROPE,
         }
     ),
 }
