@@ -238,6 +238,26 @@ def _quantize_impl_fake(
     return torch_npu.npu_quantize(in_tensor, input_scale_reciprocal, input_offset, torch.qint8, -1, False)
 
 
+def _rope_forward_oot_functional(
+    positions: torch.Tensor,
+    query: torch.Tensor,
+    key: torch.Tensor,
+    cos_sin_cache: torch.Tensor,
+    head_size: int,
+    rotary_dim: int,
+    is_neox_style: bool = True,
+    offsets: torch.Tensor | None = None,
+    out_dtype: torch.dtype | None = None,
+) -> tuple[torch.Tensor, torch.Tensor]:
+    # The regular Triton kernel rotates its arguments in place. The FP8
+    # kernel already writes independent outputs.
+    if out_dtype is None:
+        query, key = query.clone(), key.clone()
+    return rope_forward_oot(
+        positions, query, key, cos_sin_cache, head_size, rotary_dim, is_neox_style, offsets, out_dtype
+    )
+
+
 def _rope_forward_oot_impl_fake(
     positions: torch.Tensor,
     query: torch.Tensor,
@@ -251,7 +271,7 @@ def _rope_forward_oot_impl_fake(
 ) -> tuple[torch.Tensor, torch.Tensor]:
     if out_dtype is not None and out_dtype != torch.float8_e4m3fn:
         raise NotImplementedError(f"Unsupported RoPE output dtype: {out_dtype}")
-    if out_dtype is not None:
+    if out_dtype is not None or _REQUIRE_FUNCTIONAL_CUSTOM_OPS:
         return torch.empty_like(query, dtype=out_dtype), torch.empty_like(key, dtype=out_dtype)
     return query, key
 
@@ -314,7 +334,7 @@ direct_register_custom_op(
 
 direct_register_custom_op(
     op_name="npu_rotary_embedding",
-    op_func=rope_forward_oot,
+    op_func=_rope_forward_oot_functional if _REQUIRE_FUNCTIONAL_CUSTOM_OPS else rope_forward_oot,
     fake_impl=_rope_forward_oot_impl_fake,
     mutates_args=[],
     dispatch_key="PrivateUse1",
