@@ -31,6 +31,7 @@ class _Pointer:
 
 class _Language:
     int32, int64, float32 = np.int32, np.int64, np.float32
+    uint32, uint64 = np.uint32, np.uint64
     constexpr = object
     static_range = staticmethod(range)
     row = 0
@@ -59,6 +60,10 @@ class _Language:
         return _value(np.sum(value, axis=axis, dtype=value.dtype))
 
     @staticmethod
+    def max(value, axis):
+        return _value(np.max(value, axis=axis))
+
+    @staticmethod
     def cumsum(value, axis):
         return _value(np.cumsum(value, axis=axis, dtype=value.dtype))
 
@@ -73,6 +78,10 @@ class _Language:
     @staticmethod
     def where(condition, a, b):
         return _value(np.where(condition, a, b))
+
+    @staticmethod
+    def gather(value, indices, axis):
+        return _value(np.take(value, indices, axis=axis))
 
 
 class _Kernel:
@@ -97,20 +106,28 @@ class _Kernel:
         return launch
 
 
+def load_triton_functions(source, names, namespace):
+    # NumPy and Triton expose integer widths in bytes and bits respectively.
+    module = ast.parse(source.read_text().replace(".dtype.primitive_bitwidth", ".dtype.itemsize * 8"))
+    functions = [node for node in ast.walk(module) if isinstance(node, ast.FunctionDef) and node.name in names]
+    for node in functions:
+        node.decorator_list = []
+    module.body[:] = functions
+    exec(compile(module, str(source), "exec"), namespace)
+
+
 def load_cpu_preparation():
-    source = Path(__file__).resolve().parents[4] / "vllm_ascend/ops/triton/qwen4_exp/gbsa.py"
-    module = ast.parse(source.read_text())
-    module.body = [node for node in module.body if not isinstance(node, (ast.Import, ast.ImportFrom))]
+    root = Path(__file__).resolve().parents[4] / "vllm_ascend/ops/triton"
     language = _Language()
-    for node in module.body:
-        if isinstance(node, ast.FunctionDef):
-            node.decorator_list = []
     namespace = {
         "torch": torch,
         "tl": language,
         "triton": SimpleNamespace(next_power_of_2=lambda n: 1 << (n - 1).bit_length()),
     }
-    exec(compile(module, str(source), "exec"), namespace)
+    load_triton_functions(root / "sharded_indexer.py", {"dcp_local_length"}, namespace)
+    load_triton_functions(
+        root / "qwen4_exp/gbsa.py", {"_prepare_qsa_gbsa_rows_kernel", "prepare_qsa_gbsa_inputs"}, namespace
+    )
     namespace["_prepare_qsa_gbsa_rows_kernel"] = _Kernel(namespace["_prepare_qsa_gbsa_rows_kernel"], language)
     return namespace["prepare_qsa_gbsa_inputs"]
 
@@ -130,6 +147,12 @@ def make_inputs(groups, tail, pattern, dtype, rows=7):
     lengths = torch.tensor([groups * 4 + tail, 0, 3, 17], dtype=dtype).repeat_interleave(2)[::2]
     requests = torch.tensor([0, 1, 2, 3, -1, 0, 0], dtype=dtype)[:rows].repeat_interleave(2)[::2]
     positions = (lengths[requests.long()] - 1).repeat_interleave(2)[::2]
+    for row, (position, request) in enumerate(zip(positions.tolist(), requests.tolist())):
+        length = int(lengths[request])
+        visible = min(max(position + 1, 0), length)
+        tail_start = visible // 4 * 4
+        tail = torch.arange(tail_start, visible, dtype=dtype)
+        compact[row, groups : groups + tail.numel()] = tail
     table = torch.randint(0, 100, (4, 86), dtype=dtype, generator=generator)[:, ::2]
     return compact, positions, lengths, requests, table
 

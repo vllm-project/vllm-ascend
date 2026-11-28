@@ -26,6 +26,36 @@ def qsa_gbsa_attention(
     output: torch.Tensor,
     prepared_metadata: torch.Tensor | None = None,
 ) -> torch.Tensor:
+    result, _ = qsa_gbsa_local_attention(
+        query,
+        key_cache,
+        value_cache,
+        compact_indices,
+        block_table,
+        token_to_req,
+        logical_positions,
+        seq_lens,
+        prepared_metadata=prepared_metadata,
+    )
+    return output.copy_(result)
+
+
+def qsa_gbsa_local_attention(
+    query: torch.Tensor,
+    key_cache: torch.Tensor,
+    value_cache: torch.Tensor,
+    compact_indices: torch.Tensor,
+    block_table: torch.Tensor,
+    token_to_req: torch.Tensor,
+    logical_positions: torch.Tensor,
+    seq_lens: torch.Tensor,
+    *,
+    prepared_metadata: torch.Tensor | None = None,
+    dcp_size: int = 1,
+    dcp_rank: int = 0,
+    dcp_interleave: int = GBSA_COMPRESS_RATIO,
+) -> tuple[torch.Tensor, torch.Tensor]:
+    """Compute attention over this rank's KV. DCP also needs the LSE for merging."""
     if key_cache.ndim != 4 or value_cache.ndim != 4:
         raise ValueError("QSA GBSA requires 4-D K/V caches")
     if key_cache.shape != value_cache.shape:
@@ -55,8 +85,18 @@ def qsa_gbsa_attention(
     if logical_positions.shape != (query.shape[0],):
         raise ValueError("QSA GBSA logical positions must match query rows")
 
+    if dcp_size > 1 and prepared_metadata is not None:
+        raise ValueError("QSA DCP GBSA metadata must be built after distributed TopK")
     sparse_idx, sparse_count, row_visible_lens, cu_q, row_block_table = prepare_qsa_gbsa_inputs(
-        compact_indices, logical_positions, seq_lens, token_to_req, block_table, num_kv_heads
+        compact_indices,
+        logical_positions,
+        seq_lens,
+        token_to_req,
+        block_table,
+        num_kv_heads,
+        dcp_size=dcp_size,
+        dcp_rank=dcp_rank,
+        dcp_interleave=dcp_interleave,
     )
     common = dict(
         cu_seqlens_q=cu_q,
@@ -67,7 +107,7 @@ def qsa_gbsa_attention(
         mask_mode=1,
         quant_mode=0,
         softmax_precision=0,
-        residual_block_mode=0,
+        residual_block_mode=1,
         is_consistent_topk=False,
     )
     metadata = prepared_metadata
@@ -83,7 +123,7 @@ def qsa_gbsa_attention(
             max_seqlen_kv=int(logical_max_seqlen_kv),
             **common,
         )
-    result, _ = generic_block_sparse_attention(
+    result, lse = generic_block_sparse_attention(
         query.contiguous(),
         key_cache,
         value_cache,
@@ -93,10 +133,17 @@ def qsa_gbsa_attention(
         metadata=metadata,
         block_table=row_block_table,
         softmax_scale=query.shape[-1] ** -0.5,
+        return_softmax_lse=dcp_size > 1,
         **common,
     )
-    output.copy_(result)
-    return output
+    if dcp_size > 1:
+        # Some devices leave empty sparse rows unspecified. They must be the
+        # neutral contribution to the global softmax, including graph padding.
+        empty = (sparse_count == 0) & (row_visible_lens % GBSA_COMPRESS_RATIO == 0)
+        empty = empty.transpose(0, 1).repeat_interleave(query.shape[1] // num_kv_heads, dim=1)
+        result.masked_fill_(empty.unsqueeze(-1), 0)
+        lse.masked_fill_(empty.unsqueeze(-1), -torch.inf)
+    return result, lse
 
 
-__all__ = ["qsa_gbsa_attention"]
+__all__ = ["qsa_gbsa_attention", "qsa_gbsa_local_attention"]

@@ -191,7 +191,7 @@ def test_phase_metadata_required_to_cover_requests(implementation):
         implementation["build_qsa_request_plan"](torch.tensor([0, 1, 2]), 2, torch.tensor([False]))
 
 
-def load_builder():
+def load_builder(dcp_size=1):
     source = MODEL_DIR / "qsa.py"
     builder = next(
         n
@@ -200,6 +200,8 @@ def load_builder():
     )
 
     class Base:
+        vllm_config = SimpleNamespace(parallel_config=SimpleNamespace(decode_context_parallel_size=dcp_size))
+
         def build(self, *args, **kwargs):
             return SimpleNamespace(block_table="kept")
 
@@ -229,6 +231,13 @@ def test_metadata_builder_keeps_decode_capture_on_gbsa():
     # must not freeze the prefill request plan into the graph.
     common.is_prefilling = torch.tensor([True])
     assert builder.build_for_cudagraph_capture(common).qsa_request_plan is None
+    assert plans == []
+
+
+def test_dcp_builder_keeps_prefill_on_sharded_gbsa():
+    builder, plans = load_builder(dcp_size=2)
+    common = SimpleNamespace(is_prefilling=torch.tensor([True]))
+    assert builder.build(0, common).qsa_request_plan is None
     assert plans == []
 
 

@@ -14,6 +14,7 @@ TILING_DATA_FIELD_DEF(uint32_t, groups);
 TILING_DATA_FIELD_DEF(uint32_t, input_groups);
 TILING_DATA_FIELD_DEF(uint32_t, topk);
 TILING_DATA_FIELD_DEF(uint32_t, width);
+TILING_DATA_FIELD_DEF(uint32_t, output_width);
 TILING_DATA_FIELD_DEF(uint32_t, compact_row_stride);
 TILING_DATA_FIELD_DEF(uint32_t, sort_tmp_bytes);
 TILING_DATA_FIELD_DEF(uint32_t, groups_per_core);

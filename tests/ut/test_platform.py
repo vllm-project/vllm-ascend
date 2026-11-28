@@ -225,8 +225,66 @@ def test_validate_target_dcp_config_rejects_gqa_dcp(pcp_size):
             decode_context_parallel_size=2,
         ),
     )
-    with pytest.raises(ValueError, match="DCP.*not supported for GQA/MQA"):
+    with pytest.raises(ValueError, match="DCP.*not supported for this model"):
         _validate_target_dcp_config(config)
+
+
+@pytest.mark.parametrize("explicit,interleave", [(False, 1), (True, 4), (True, 128)])
+def test_qsa_dcp_config_resolves_group_aligned_interleave(explicit, interleave):
+    config = SimpleNamespace(
+        model_config=SimpleNamespace(
+            architecture="Qwen4ExpForCausalLM",
+            hf_text_config=SimpleNamespace(
+                num_key_value_heads=2,
+                indexer_n_heads=4,
+                layer_types=["linear_attention", "indexed_attention"],
+                indexer_compress_ratio=4,
+            ),
+            use_mla=False,
+        ),
+        parallel_config=SimpleNamespace(
+            tensor_parallel_size=8,
+            decode_context_parallel_size=4,
+            prefill_context_parallel_size=1,
+            cp_kv_cache_interleave_size=interleave,
+            _allow_auto_resolve_cp_interleave_size=not explicit,
+        ),
+    )
+    _validate_target_dcp_config(config)
+    assert config.parallel_config.cp_kv_cache_interleave_size == (interleave if explicit else 4)
+
+
+@pytest.mark.parametrize(
+    "indexer_heads,layer_type,ratio,auto,error",
+    [
+        (4, "qwen_sparse_attention", 4, False, "compression group must have one KV owner"),
+        (None, "qwen_sparse_attention", 4, True, "DCP.*not supported for this model"),
+        (4, "linear_attention", 4, True, "DCP.*not supported for this model"),
+        (4, "qwen_sparse_attention", 8, True, "compression ratio 4"),
+    ],
+)
+def test_qsa_dcp_rejects_invalid_configs_before_changing_interleave(indexer_heads, layer_type, ratio, auto, error):
+    config = SimpleNamespace(
+        model_config=SimpleNamespace(
+            architecture="Qwen4ExpForConditionalGeneration",
+            hf_text_config=SimpleNamespace(
+                num_key_value_heads=2,
+                indexer_n_heads=indexer_heads,
+                layer_types=[layer_type],
+                indexer_compress_ratio=ratio,
+            ),
+        ),
+        parallel_config=SimpleNamespace(
+            tensor_parallel_size=8,
+            decode_context_parallel_size=4,
+            prefill_context_parallel_size=1,
+            cp_kv_cache_interleave_size=1,
+            _allow_auto_resolve_cp_interleave_size=auto,
+        ),
+    )
+    with pytest.raises(ValueError, match=error):
+        _validate_target_dcp_config(config)
+    assert config.parallel_config.cp_kv_cache_interleave_size == 1
 
 
 @pytest.mark.parametrize("dcp_size", [2, 16])

@@ -1,5 +1,6 @@
 # SPDX-License-Identifier: Apache-2.0
 
+from pathlib import Path
 from types import SimpleNamespace
 from typing import cast
 from unittest.mock import Mock
@@ -9,7 +10,7 @@ import torch
 from vllm.config import ParallelConfig
 from vllm.v1.attention.backend import AttentionBackend
 from vllm.v1.attention.ops import metadata as upstream_metadata_ops
-from vllm.v1.kv_cache_interface import MLAAttentionSpec
+from vllm.v1.kv_cache_interface import CircularBufferSpec, FullAttentionSpec, MLAAttentionSpec
 from vllm.v1.worker import cp_utils
 from vllm.v1.worker.utils import AttentionGroup
 
@@ -380,6 +381,195 @@ def test_pcp_indexer_replaces_registered_cache_owners() -> None:
         assert cache.get_attn_backend().get_builder_cls() is qsa.AscendPCPQSAIndexerMetadataBuilder
 
 
+@pytest.fixture
+def cpu_compressed_slot_kernel(monkeypatch):
+    from vllm.v1.attention.backends.mla import compressor_utils
+
+    from tests.ut.models.qwen4_exp.test_gbsa_preparation import _Kernel, _Language, load_triton_functions
+
+    # Execute the shared compressed slot kernel with CPU tensors, including its page-table lookup.
+    language = _Language()
+    namespace = {"tl": language}
+    load_triton_functions(Path(compressor_utils.__file__), {"kernel"}, namespace)
+    kernel = _Kernel(namespace["kernel"], language)
+
+    def launch(out, slots, starts, lengths, table, block_size, compress_ratio, dcp_world_size, cp_interleave):
+        kernel[(table.shape[0],)](
+            out,
+            slots,
+            starts,
+            lengths,
+            table,
+            table.stride(0),
+            block_size,
+            dcp_world_size,
+            cp_interleave,
+            COMPRESS_RATIO=compress_ratio,
+            PAD_ID=-1,
+            TRITON_BLOCK_SIZE=128,
+            num_warps=1,
+        )
+
+    monkeypatch.setattr(compressor_utils, "_COMPRESSED_SLOT_MAPPING_KERNEL", launch)
+
+
+@pytest.mark.parametrize("world,interleave,page", [(2, 4, 128), (4, 16, 128), (2, 128, 768)])
+def test_dcp_compressed_builder_uses_local_slots_and_global_positions(
+    monkeypatch, cpu_compressed_slot_kernel, world, interleave, page
+) -> None:
+    from vllm_ascend.attention.context_parallel import common_cp
+
+    # One decode closes a group. The prefill spans two physical pages per rank.
+    length = world * page * 2
+    tokens = torch.arange(length)
+    positions = torch.cat((torch.tensor([3]), tokens, torch.tensor([-1, -1])))
+    table = torch.tensor([[6, 4], [3, 1], [5, 2], [0, 0]], dtype=torch.int32)
+    # The last two rows have stale slots: one has a negative logical position, the other is graph padding.
+    starts = torch.tensor([0, 1, length + 1, length + 2, length + 6], dtype=torch.int32)
+    seq_lens = torch.tensor([4, length, 0, 0], dtype=torch.int32)
+    group = SimpleNamespace(world_size=world, rank_in_group=0)
+    monkeypatch.setattr(common_cp, "get_dcp_group", lambda: group)
+    config = SimpleNamespace(
+        scheduler_config=SimpleNamespace(max_num_seqs=4, max_num_batched_tokens=len(positions)),
+        speculative_config=None,
+        parallel_config=SimpleNamespace(decode_context_parallel_size=world, cp_kv_cache_interleave_size=interleave),
+    )
+
+    for rank in range(world):
+        group.rank_in_group = rank
+        builder = qsa.AscendDCPQSAIndexerMetadataBuilder(
+            MLAAttentionSpec(block_size=page, num_kv_heads=1, head_size=128, dtype=torch.bfloat16, tokens_per_state=4),
+            ["compressed"],
+            config,
+            torch.device("cpu"),
+        )
+        assert builder.compress_ratio == 4
+        owned = tokens[tokens // interleave % world == rank]
+        slots = torch.full_like(positions, -1)
+        if rank == 0:
+            slots[0] = 3
+        slots[1 + owned] = torch.arange(len(owned))
+        slots[1 + owned[3]] = -1  # Cached group end on bounded replay.
+        slots[-2:] = 1
+        common = AscendCommonAttentionMetadata(
+            query_start_loc=starts,
+            query_start_loc_cpu=starts[:4],
+            seq_lens=seq_lens,
+            num_reqs=4,
+            num_actual_tokens=len(positions),
+            max_query_len=length,
+            max_seq_len=length,
+            block_table_tensor=table,
+            slot_mapping=slots,
+        )
+        common._token_to_req_indices_cache = torch.tensor([0] + [1] * length + [2, 0], dtype=torch.int32)
+        metadata = builder.build(0, common)
+        expected = torch.full_like(slots, -1)
+        group_ends = 1 + owned[7::4]
+        local_groups = torch.arange(1, len(owned) // 4)
+        page_states = page // 4
+        if rank == 0:
+            expected[0] = table[0, 0] * page_states
+        expected[group_ends] = table[1, local_groups // page_states].long() * page_states + local_groups % page_states
+        torch.testing.assert_close(metadata.slot_mapping, expected)
+        torch.testing.assert_close(metadata.visible_blocks, ((positions + 1) // 4).int())
+        assert (metadata.compress_ratio, metadata.dcp_size, metadata.dcp_rank) == (4, world, rank)
+        assert metadata.dcp_interleave == interleave
+        assert metadata.k_work_metadata.numel() == 0
+        assert (metadata.num_decodes, metadata.num_prefills, metadata.decode_query_len) == (1, 3, 1)
+        torch.testing.assert_close(metadata.logical_positions, positions)
+        assert metadata.slot_mapping.data_ptr() == builder.slot_mapping_buffer.data_ptr()
+        assert metadata.logical_positions.data_ptr() == builder.logical_positions_buffer.data_ptr()
+        assert metadata.visible_blocks.data_ptr() == builder.visible_blocks_buffer.data_ptr()
+
+
+@pytest.mark.parametrize("dcp_size,expected_slots", [(1, [-1, -1, -1, 13]), (2, [12, 13, 14, 15])])
+def test_unsharded_compressed_and_dcp_raw_keep_qsa_slots(monkeypatch, dcp_size, expected_slots) -> None:
+    from vllm_ascend.attention.context_parallel import common_cp
+
+    monkeypatch.setattr(common_cp, "get_dcp_group", lambda: SimpleNamespace(world_size=dcp_size, rank_in_group=0))
+    monkeypatch.setattr(qsa, "get_compressed_slot_mapping", Mock(side_effect=AssertionError("DCP compressed lookup")))
+    config = SimpleNamespace(
+        scheduler_config=SimpleNamespace(max_num_seqs=1, max_num_batched_tokens=4),
+        speculative_config=None,
+        parallel_config=SimpleNamespace(decode_context_parallel_size=dcp_size, cp_kv_cache_interleave_size=4),
+    )
+    if dcp_size == 1:
+        builder_cls = qsa.QSAIndexerBackend.get_builder_cls()
+        spec = MLAAttentionSpec(block_size=16, num_kv_heads=1, head_size=128, dtype=torch.bfloat16, tokens_per_state=4)
+    else:
+        cache = object.__new__(qsa.AscendDCPQSARawKeyCache)
+        builder_cls = cache.get_attn_backend().get_builder_cls()
+        assert cache.supports_dcp and builder_cls is qsa.QSAIndexerMetadataBuilder
+        spec = CircularBufferSpec(block_size=4, num_kv_heads=1, head_size=128, dtype=torch.bfloat16)
+    starts = torch.tensor([0, 4], dtype=torch.int32)
+    common = AscendCommonAttentionMetadata(
+        query_start_loc=starts,
+        query_start_loc_cpu=starts,
+        seq_lens=torch.tensor([8]),
+        num_reqs=1,
+        num_actual_tokens=4,
+        max_query_len=4,
+        max_seq_len=8,
+        block_table_tensor=torch.tensor([[3]]),
+        slot_mapping=torch.arange(4),
+    )
+    common._token_to_req_indices_cache = torch.zeros(4, dtype=torch.int32)
+    metadata = builder_cls(spec, ["key"], config, torch.device("cpu")).build(0, common)
+
+    torch.testing.assert_close(metadata.slot_mapping, torch.tensor(expected_slots))
+
+
+def test_dcp_qsa_passes_worker_compatibility_and_merges_head_shards(monkeypatch) -> None:
+    from vllm.distributed import parallel_state
+
+    from vllm_ascend.attention.context_parallel import common_cp
+
+    group = SimpleNamespace(world_size=2, rank_in_group=1, device_group=object())
+    group.all_gather = Mock(side_effect=lambda tensor, dim: torch.cat((tensor, tensor), dim=dim))
+    monkeypatch.setattr(parallel_state, "get_dcp_world_size_and_rank", lambda *_: (2, 1))
+    monkeypatch.setattr(common_cp, "get_dcp_group", lambda: group)
+    monkeypatch.setattr(common_cp, "get_tp_group", lambda: group)
+    monkeypatch.setattr(common_cp, "get_pcp_group", lambda: SimpleNamespace(world_size=1))
+    impl = qsa.AscendQSAImpl(2, 128, 128**-0.5, 1, "auto")
+    impl.dcp_interleave = 4
+    monkeypatch.setattr(cp_utils, "get_layers_from_vllm_config", lambda *_: {"qsa": SimpleNamespace(impl=impl)})
+    config = SimpleNamespace(
+        parallel_config=SimpleNamespace(
+            prefill_context_parallel_size=1, decode_context_parallel_size=2, cp_kv_cache_interleave_size=4
+        ),
+        speculative_config=object(),
+    )
+    cp_utils.check_attention_cp_compatibility(config)
+    query = torch.ones((1, 2, 128), dtype=torch.bfloat16)
+    layer = SimpleNamespace(
+        topk_indices_buffer=torch.full((1, 7), -1, dtype=torch.int32),
+        indexer=SimpleNamespace(token_topk=4, compress_ratio=4),
+    )
+    partial = torch.zeros((1, 4, 128), dtype=query.dtype)
+    lse = torch.full((1, 4, 1), -torch.inf)
+    attention = Mock(return_value=(partial, lse))
+    monkeypatch.setattr(qsa, "qsa_gbsa_local_attention", attention)
+    impl._merge_dcp_attention_output = Mock(return_value=query * 3)
+    output = torch.empty_like(query)
+    # A rank with no selected KV still participates in both collectives.
+    impl._dispatch_qsa(
+        layer,
+        query,
+        (torch.zeros(1, 128, 1, 128), torch.zeros(1, 128, 1, 128)),
+        SimpleNamespace(num_actual_tokens=1, block_table=torch.tensor([[0]])),
+        output,
+        torch.tensor([0]),
+        torch.tensor([2]),
+        torch.tensor([3]),
+    )
+    assert group.all_gather.call_count == 1
+    assert attention.call_args.args[0].shape == (1, 4, 128)
+    assert attention.call_args.kwargs["dcp_size"] == 2
+    impl._merge_dcp_attention_output.assert_called_once_with(partial, lse)
+    torch.testing.assert_close(output, query * 3)
+
+
 def test_pcp_indexer_global_write_invalidates_the_local_layout(monkeypatch) -> None:
     local_starts = torch.tensor([0, 2], dtype=torch.int32)
     global_starts = torch.tensor([0, 5], dtype=torch.int32)
@@ -485,6 +675,104 @@ def test_qsa_padded_decode_maps_only_live_rows(cpu_token_to_req, full_graph, exp
     assert metadata["indexer"].num_actual_tokens == metadata["main"].num_actual_tokens == expected_rows
     assert metadata["indexer"].logical_positions.tolist() == [96, 97, 98, 99] * 13 + [-1] * (expected_rows - 52)
     assert metadata["other"].num_actual_tokens == 52
+
+
+def test_dcp_qsa_full_graph_refreshes_captured_indexer_inputs(
+    cpu_token_to_req, cpu_compressed_slot_kernel, monkeypatch
+) -> None:
+    from vllm.config.compilation import CUDAGraphMode
+
+    from tests.ut.models.qwen4_exp.test_input_adapter import AscendQwen4ExpQSAAttention, _load_adapter, _Model
+    from vllm_ascend.attention.context_parallel import common_cp
+    from vllm_ascend.models.qwen4_exp.model_state import AscendMambaHybridModelState, AscendQwen4ExpModelState
+
+    monkeypatch.setattr(
+        qsa.upstream_qsa.Qwen4ExpQSAMetadataBuilder,
+        "build",
+        lambda _, prefix_len, common, fast_build=False: SimpleNamespace(num_actual_tokens=common.num_actual_tokens),
+    )
+    monkeypatch.setattr(common_cp, "get_dcp_group", lambda: SimpleNamespace(world_size=2, rank_in_group=0))
+    config = SimpleNamespace(
+        scheduler_config=SimpleNamespace(max_num_seqs=4, max_num_batched_tokens=4),
+        speculative_config=None,
+        parallel_config=SimpleNamespace(decode_context_parallel_size=2, cp_kv_cache_interleave_size=4),
+    )
+    layer = AscendQwen4ExpQSAAttention()
+    adapter_cls, _ = _load_adapter(monkeypatch)
+    state = object.__new__(AscendQwen4ExpModelState)
+    state.qsa_prepared_input_adapter = adapter_cls(_Model(layer))
+    parent_prepare = Mock()
+    monkeypatch.setattr(AscendMambaHybridModelState, "prepare_attn", parent_prepare)
+    main = object.__new__(qsa.AscendQSAMetadataBuilder)
+    main.vllm_config = config
+    groups = [
+        AttentionGroup(
+            backend=qsa.AscendQSABackend,
+            layer_names=[layer.layer_name],
+            kv_cache_spec=FullAttentionSpec(block_size=128, num_kv_heads=1, head_size=128, dtype=torch.bfloat16),
+            kv_cache_group_id=0,
+            metadata_builders=[main],
+        )
+    ]
+    for name, cache_cls, spec in (
+        (
+            "raw",
+            qsa.AscendDCPQSARawKeyCache,
+            CircularBufferSpec(block_size=4, num_kv_heads=1, head_size=128, dtype=torch.bfloat16),
+        ),
+        (
+            "compressed",
+            qsa.AscendDCPQSACompressedKeyCache,
+            MLAAttentionSpec(block_size=16, num_kv_heads=1, head_size=128, dtype=torch.bfloat16, tokens_per_state=4),
+        ),
+    ):
+        backend = object.__new__(cache_cls).get_attn_backend()
+        builder = backend.get_builder_cls()(spec, [name], config, torch.device("cpu"))
+        groups.append(AttentionGroup(backend, [name], spec, kv_cache_group_id=0, metadata_builders=[builder]))
+    cache_config = SimpleNamespace(kv_cache_groups=[SimpleNamespace(kv_cache_spec=None)])
+    starts = torch.arange(5, dtype=torch.int32)
+    table = torch.empty((4, 1), dtype=torch.int32)
+    slots = torch.empty((1, 4), dtype=torch.long)
+    captured = None
+    for step, live in enumerate((4, 3, 4)):
+        length = 4 + 8 * step  # The closing token of each group belongs to rank 0.
+        table[:, 0] = torch.arange(1, 5) + step * 4
+        table[live:] = 0
+        slots.fill_(0)
+        slots[:, live:] = -1
+        parent_prepare.return_value = build_attn_metadata(
+            attn_groups=[groups],
+            num_reqs=4,
+            num_actual_reqs=live,
+            num_tokens=4,
+            num_actual_tokens=live,
+            query_start_loc_gpu=starts,
+            query_start_loc_cpu=starts,
+            seq_lens=(torch.arange(4) < live).int() * length,
+            max_query_len=1,
+            max_seq_len=32,
+            block_tables=(table,),
+            slot_mappings=slots,
+            kv_cache_config=cache_config,
+            for_cudagraph_capture=step == 0,
+            full_graph_mode=step > 0,
+        )
+        mode = CUDAGraphMode.NONE if step == 0 else CUDAGraphMode.FULL
+        metadata = state.prepare_attn(None, mode, (table,), slots, [groups], cache_config, for_capture=step == 0)
+        compressed = metadata["compressed"]
+        current = (*compressed.qsa_dcp_indexer_inputs, compressed.qsa_lightning_v2_metadata)
+        if captured is None:
+            captured = current
+        assert [t.data_ptr() for t in current] == [t.data_ptr() for t in captured]
+        cu_query, lengths, row_table, schedule = captured
+        assert cu_query.tolist() == [0, 1, 2, 3, 4]
+        assert lengths.tolist() == [step + 1] * live + [0] * (4 - live)
+        torch.testing.assert_close(row_table[:live], table[:live])
+        assert schedule.tolist() == [4, live * (step + 1), 4]
+        assert metadata[layer.layer_name].num_actual_tokens == metadata["raw"].num_actual_tokens == 4
+        for side in (metadata["raw"], compressed):
+            assert side.logical_positions.tolist() == [length - 1] * live + [-1] * (4 - live)
+            assert (side.slot_mapping[:live] >= 0).all() and (side.slot_mapping[live:] == -1).all()
 
 
 @pytest.mark.parametrize("local_live_tokens", [0, 1, 2])
@@ -641,23 +929,27 @@ def test_qsa_kv_store_keeps_page_stride_with_multiple_heads(monkeypatch) -> None
 
 
 @pytest.mark.parametrize(
-    "enable_dbo,ubatch_size,pcp_size,expected_sharing",
+    "enable_dbo,ubatch_size,pcp_size,dcp_size,expected_sharing",
     [
-        pytest.param(False, 0, 1, True, id="ordinary-decode"),
-        pytest.param(False, 2, 1, False, id="explicit-ubatching"),
-        pytest.param(True, 0, 1, False, id="dbo"),
-        pytest.param(False, 0, 2, False, id="pcp"),
+        pytest.param(False, 0, 1, 1, True, id="ordinary-decode"),
+        pytest.param(False, 0, 1, 2, True, id="dcp"),
+        pytest.param(False, 2, 1, 1, False, id="explicit-ubatching"),
+        pytest.param(True, 0, 1, 1, False, id="dbo"),
+        pytest.param(False, 0, 2, 1, False, id="pcp"),
     ],
 )
-def test_target_topk_sharing_respects_parallel_modes(monkeypatch, enable_dbo, ubatch_size, pcp_size, expected_sharing):
+def test_target_topk_sharing_respects_parallel_modes(
+    monkeypatch, enable_dbo, ubatch_size, pcp_size, dcp_size, expected_sharing
+):
     # Bypass unrelated distributed config validation while retaining the real
     # upstream use_ubatching property used by the target constructor.
     parallel_config = object.__new__(ParallelConfig)
     parallel_config.enable_dbo = enable_dbo
     parallel_config.ubatch_size = ubatch_size
     parallel_config.prefill_context_parallel_size = pcp_size
-    parallel_config.decode_context_parallel_size = 1
-    parallel_config.tensor_parallel_size = 1
+    parallel_config.decode_context_parallel_size = dcp_size
+    parallel_config.tensor_parallel_size = dcp_size
+    parallel_config.cp_kv_cache_interleave_size = 4
     config = SimpleNamespace(
         parallel_config=parallel_config,
         model_config=SimpleNamespace(hf_text_config=SimpleNamespace(linear_num_key_heads=4, linear_num_value_heads=4)),
@@ -666,7 +958,15 @@ def test_target_topk_sharing_respects_parallel_modes(monkeypatch, enable_dbo, ub
     def init_attention(self, *, vllm_config, **kwargs):
         torch.nn.Module.__init__(self)
         assert vllm_config.parallel_config.prefill_context_parallel_size == 1
-        self.indexer = SimpleNamespace(configure_pcp_cache_backends=Mock())
+        self.indexer = SimpleNamespace(
+            configure_pcp_cache_backends=Mock(),
+            _configure_cache_backends=Mock(),
+            compress_ratio=4,
+            compressed_key_cache=SimpleNamespace(dtype=torch.bfloat16),
+        )
+        self.total_num_kv_heads = 1
+        self.kv_cache_torch_dtype = torch.bfloat16
+        self.impl = SimpleNamespace(dcp_group=object())
         self.register_buffer("topk_indices_buffer", torch.empty(8, 4, dtype=torch.int32), persistent=False)
 
     def init_backbone(self, **kwargs):

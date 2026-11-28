@@ -13,8 +13,9 @@ import torch
 
 @pytest.fixture
 def selector(monkeypatch):
-    # Load the real selector without importing vLLM or a Triton NPU runtime.
-    # Only device kernels and the external stride utility are replaced.
+    from vllm.utils import torch_utils as utilities
+
+    # Execute the selector with CPU tensors and stub only operator calls and strides.
     upstream = ModuleType("cann_ops_transformer")
     bindings = SimpleNamespace(
         lightning_indexer_v2_metadata=Mock(return_value=torch.empty(1024, dtype=torch.int32)),
@@ -38,9 +39,8 @@ def selector(monkeypatch):
 
     packing = ModuleType("vllm_ascend.ops.triton.qwen4_exp.qsa")
     packing.__dict__.update(pack_qsa_group_indices_npu=Mock(side_effect=fake_pack))
-    utilities = ModuleType("vllm.utils.torch_utils")
-    utilities.__dict__.update(canonicalize_singleton_dim_strides=Mock(side_effect=lambda tensor: tensor))
-    for module in (upstream, packing, utilities):
+    monkeypatch.setattr(utilities, "canonicalize_singleton_dim_strides", Mock(side_effect=lambda tensor: tensor))
+    for module in (upstream, packing):
         monkeypatch.setitem(sys.modules, module.__name__, module)
     source = Path(__file__).resolve().parents[4] / "vllm_ascend/models/qwen4_exp/lightning_indexer.py"
     spec = importlib.util.spec_from_file_location("qsa_liv2_contract", source)
@@ -58,6 +58,7 @@ def _inputs():
             block_table=torch.arange(12, dtype=torch.int32).reshape(3, 4),
             token_to_req=torch.tensor([0, 0, 1, 1, 2, 2]),
             logical_positions=torch.tensor([31, 32, 32, 33, -1, -1]),
+            visible_blocks=torch.tensor([8, 8, 8, 8, 0, 0], dtype=torch.int32),
             seq_lens=torch.tensor([33, 34, 0], dtype=torch.int32),
             query_start_loc=torch.tensor([0, 2, 4, 6], dtype=torch.int32),
             num_actual_tokens=6,
@@ -66,6 +67,43 @@ def _inputs():
         compress_ratio=4,
         out=torch.full((6, 2051), 99, dtype=torch.int32),
     )
+
+
+@pytest.mark.parametrize("rows", [4, 6])
+def test_dcp_packs_local_winners_of_global_topk(selector, monkeypatch, rows):
+    module, bindings, packing, _ = selector
+    inputs = _inputs()
+    inputs["query"] = inputs["query"][:rows]
+    metadata = inputs["attn_metadata"]
+    metadata.dcp_size, metadata.dcp_rank, metadata.dcp_interleave = 2, 1, 16
+    if rows != metadata.num_actual_tokens:
+        # A schedule prepared for the untrimmed batch cannot be reused.
+        metadata.qsa_dcp_indexer_inputs = object()
+        metadata.qsa_lightning_v2_metadata = object()
+    local_indices = torch.arange(512, dtype=torch.int32).view(1, 1, -1).expand(rows, 1, -1).clone()
+    local_scores = torch.arange(512, dtype=torch.float32).view(1, 1, -1).expand(rows, 1, -1).clone()
+    bindings.lightning_indexer_v2.side_effect = None
+    bindings.lightning_indexer_v2.return_value = (local_indices, local_scores)
+    winners = torch.full((rows, 1, 512), -1, dtype=torch.int32)
+    winners[:4, 0, :2] = torch.tensor([3, 0])
+    exchange = Mock(return_value=winners)
+    monkeypatch.setattr("vllm_ascend.attention.context_parallel.sharded_indexer.distributed_topk", exchange)
+    group = SimpleNamespace(world_size=2, rank_in_group=1)
+
+    assert module.qsa_select_paged_tokens_lightning_v2(**inputs, dcp_group=group) is inputs["out"]
+
+    kwargs = bindings.lightning_indexer_v2.call_args.kwargs
+    assert bindings.lightning_indexer_v2_metadata.call_count == 1
+    assert kwargs["return_value"] == 1 and kwargs["mask_mode"] == 0 and kwargs["cmp_ratio"] == 1
+    assert kwargs["cu_seqlens_q"].tolist() == list(range(rows + 1))
+    assert kwargs["seqused_k"].tolist() == [4, 4, 4, 4, 0, 0][:rows]
+    torch.testing.assert_close(kwargs["block_table"], metadata.block_table[metadata.token_to_req[:rows].long()])
+    indices, scores, actual_group, topk, interleave = exchange.call_args.args
+    assert actual_group is group and topk == 512 and interleave == 4
+    assert exchange.call_args.kwargs == {"return_local": True}
+    assert (indices[:4, :, 4:] == -1).all() and (indices[4:] == -1).all()
+    assert torch.isneginf(scores[:4, :, 4:]).all() and torch.isneginf(scores[4:]).all()
+    torch.testing.assert_close(packing.pack_qsa_group_indices_npu.call_args.args[0], winners.squeeze(1))
 
 
 @pytest.mark.parametrize("prepared", [False, True])
@@ -97,7 +135,7 @@ def test_padded_bounds_preserve_output_and_metadata(selector, monkeypatch, rows,
         layer = AscendQwen4ExpQSAAttention()
         adapter = adapter_cls(_Model(layer))
         inputs["attn_metadata"].num_actual_tokens = rows
-        adapter._prepare_lightning(layer, inputs["attn_metadata"], prepared_this_step={})
+        adapter._prepare_lightning(layer, inputs["attn_metadata"], full_graph=True, prepared_this_step={})
     result = module.qsa_select_paged_tokens_lightning_v2(**inputs)
     assert result is inputs["out"]
     assert torch.all(result[:4, :515] == 7)

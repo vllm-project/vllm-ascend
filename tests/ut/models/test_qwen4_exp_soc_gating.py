@@ -34,10 +34,10 @@ def test_select_always_uses_cann_lightning_v2(monkeypatch) -> None:
     calls: list[tuple] = []
     metadata = _select_metadata()
 
-    def lightning(*args, **kwargs):
+    def lightning(*args, dcp_group=None):
         calls.append(args)
         assert args[2] is metadata
-        assert not kwargs
+        assert dcp_group is None
         return sentinel
 
     monkeypatch.setattr(ascend_qsa, "qsa_select_paged_tokens_lightning_v2", lightning)
@@ -50,6 +50,7 @@ def test_select_always_uses_cann_lightning_v2(monkeypatch) -> None:
 def _make_impl() -> ascend_qsa.AscendQSAImpl:
     impl = object.__new__(ascend_qsa.AscendQSAImpl)
     impl.head_size = 2
+    impl.dcp_size = 1
     return impl
 
 

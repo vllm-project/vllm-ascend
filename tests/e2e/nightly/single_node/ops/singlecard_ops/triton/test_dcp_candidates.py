@@ -22,6 +22,7 @@ from vllm_ascend.ops.triton.sharded_indexer import merge_packed_candidates, pack
         (8, 65, 2048, 2051, torch.float32, None, False),
         # Cover ties on the unsorted and presorted merge paths.
         (3, 17, 31, 33, torch.float32, None, True),
+        (2, 3, 512, 512, torch.float32, 1, True),
         (8, 128, 2048, 2048, torch.bfloat16, 7, True),
         (17, 49, 2048, 2048, torch.bfloat16, 16, True),
     ],

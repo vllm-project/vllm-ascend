@@ -4,6 +4,8 @@
 import torch
 from vllm.triton_utils import tl, triton
 
+from vllm_ascend.ops.triton.sharded_indexer import dcp_local_length
+
 
 @triton.jit
 def _prepare_qsa_gbsa_rows_kernel(
@@ -28,10 +30,12 @@ def _prepare_qsa_gbsa_rows_kernel(
     rows,
     table_columns,
     GROUPS: tl.constexpr,
-    OUTPUT_GROUPS: tl.constexpr,
     GROUP_BLOCK: tl.constexpr,
     KV_HEADS: tl.constexpr,
     TABLE_BLOCK: tl.constexpr,
+    DCP_SIZE: tl.constexpr,
+    DCP_RANK: tl.constexpr,
+    INTERLEAVE: tl.constexpr,
 ):
     row = tl.program_id(0)
     columns = tl.arange(0, GROUP_BLOCK)
@@ -40,34 +44,45 @@ def _prepare_qsa_gbsa_rows_kernel(
     request = tl.where(request < 0, request + requests_count, request)
     position = tl.load(positions + row * position_stride).to(tl.int32)
     length = tl.load(lengths + request * length_stride).to(tl.int32)
-    visible = tl.minimum(tl.maximum(position + 1, 0), length)
+    current_visible = tl.minimum(tl.maximum(position + 1, 0), length)
+    tail_offsets = tl.arange(0, 4)
+    tail_tokens = tl.load(
+        indices + row * indices_row_stride + (GROUPS + tail_offsets) * indices_column_stride,
+        tail_offsets < 3,
+        other=-1,
+    ).to(tl.int32)
+    valid_tail = (tail_offsets < 3) & (tail_tokens >= 0) & (tail_tokens < length)
+    tail_end = tl.max(tl.where(valid_tail, tail_tokens + 1, 0), 0)
+    # The compact LI-v2 buffer is the selection contract. In MTP skip-topk
+    # steps its three tail slots still describe step 0, while positions and
+    # sequence lengths advance. Keep that saved tail; when it is empty, keep
+    # only the complete-group boundary rather than synthesizing a new tail.
+    visible = tl.where(tl.sum(valid_tail.to(tl.int32), 0) > 0, tail_end, current_visible // 4 * 4)
+    if DCP_SIZE > 1:
+        # A graph padding row may still carry a live request's saved tail.
+        visible = dcp_local_length(tl.minimum(visible, current_visible), DCP_SIZE, DCP_RANK, INTERLEAVE)
     group = tl.load(
         indices + row * indices_row_stride + columns * indices_column_stride, columns < GROUPS, other=-1
     ).to(tl.int32)
     valid = (columns < GROUPS) & (group >= 0) & (group < visible // 4)
     count = tl.sum(valid.to(tl.int32), 0)
-    has_tail = visible % 4 != 0
-    tail_slot = tl.minimum(count, OUTPUT_GROUPS - has_tail.to(tl.int32))
     if tl.sum(((columns < count) & (~valid)).to(tl.int32), 0) == 0:
         # LI-v2 packing normally already has a valid prefix. Preserve its
         # selected-group order directly, without sorting or a prefix scan.
-        packed = tl.where(has_tail & (columns == tail_slot), visible // 4, group)
+        packed = group
         for head in tl.static_range(KV_HEADS):
-            tl.store(packed_indices + (head * rows + row) * OUTPUT_GROUPS + columns, packed, columns < GROUPS)
+            tl.store(packed_indices + (head * rows + row) * GROUPS + columns, packed, columns < GROUPS)
     else:
         # Use the native scan: gather-based scans can miscompile on Triton-Ascend 3.6.
         prefix = tl.cumsum(valid.to(tl.int32), 0)
         destination = tl.where(valid, prefix - 1, count + columns - prefix)
-        packed = tl.where(has_tail & (destination == tail_slot), visible // 4, group)
+        packed = group
         for head in tl.static_range(KV_HEADS):
-            tl.store(packed_indices + (head * rows + row) * OUTPUT_GROUPS + destination, packed, columns < GROUPS)
+            tl.store(packed_indices + (head * rows + row) * GROUPS + destination, packed, columns < GROUPS)
+    # The operator adds the incomplete visible group implicitly. Counts and
+    # indices describe complete groups only, including all 512 selections.
     for head in tl.static_range(KV_HEADS):
-        # Append the residual slot when capacity allows, otherwise replace the
-        # final selection exactly as the PR adapter does at the 512-entry limit.
-        if OUTPUT_GROUPS > GROUPS:
-            extra = tl.where(has_tail & (tail_slot == GROUPS), visible // 4, -1)
-            tl.store(packed_indices + (head * rows + row) * OUTPUT_GROUPS + GROUPS, extra)
-        tl.store(counts + head * rows + row, tail_slot + has_tail.to(tl.int32))
+        tl.store(counts + head * rows + row, count)
     tl.store(visible_lengths + row, visible)
     tl.store(cu_query + row, row.to(tl.int64))
     if row == 0:
@@ -88,19 +103,26 @@ def prepare_qsa_gbsa_inputs(
     token_to_req: torch.Tensor,
     block_table: torch.Tensor,
     num_kv_heads: int,
+    *,
+    dcp_size: int = 1,
+    dcp_rank: int = 0,
+    dcp_interleave: int = 4,
 ) -> tuple[torch.Tensor, torch.Tensor, torch.Tensor, torch.Tensor, torch.Tensor]:
-    """Produce the same integer tensors as the original GBSA torch pipeline.
+    """Prepare full-group indices for GBSA implicit residual mode.
 
     The block table already addresses 128-token kernel pages. Residual blocks
-    remain explicit (residual_block_mode=0), including the 512-entry limit.
+    are implicit (residual_block_mode=1); explicit indices contain full groups only.
+    The packed tail slots define the residual visibility so MTP skip-topk steps
+    reuse both parts of the step-0 selection.
     Every output element is written before use. No device-to-host reads or
     process-global tensor cache are introduced; inputs can change every call.
     """
+    if dcp_size > 1 and (dcp_interleave < 4 or dcp_interleave % 4):
+        raise ValueError("QSA DCP interleave must preserve four-token groups")
     rows = compact_indices.shape[0]
     groups = compact_indices.shape[1] - 3
     columns = block_table.shape[1]
-    output_groups = groups + (groups < 512)
-    sparse_idx = torch.empty((num_kv_heads, rows, output_groups), dtype=torch.int32, device=compact_indices.device)
+    sparse_idx = torch.empty((num_kv_heads, rows, groups), dtype=torch.int32, device=compact_indices.device)
     sparse_count = torch.empty((num_kv_heads, rows), dtype=torch.int32, device=compact_indices.device)
     visible = torch.empty((rows,), dtype=torch.int32, device=compact_indices.device)
     cu_query = torch.empty((rows + 1,), dtype=torch.int64, device=compact_indices.device)
@@ -131,10 +153,12 @@ def prepare_qsa_gbsa_inputs(
         rows,
         columns,
         GROUPS=groups,
-        OUTPUT_GROUPS=output_groups,
         GROUP_BLOCK=group_block,
         KV_HEADS=num_kv_heads,
         TABLE_BLOCK=triton.next_power_of_2(columns),
+        DCP_SIZE=dcp_size,
+        DCP_RANK=dcp_rank,
+        INTERLEAVE=dcp_interleave,
         num_warps=1,
     )
     return sparse_idx, sparse_count, visible, cu_query, row_table

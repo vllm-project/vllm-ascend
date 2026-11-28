@@ -136,9 +136,24 @@ def get_pcp_profile_num_tokens(vllm_config: VllmConfig, max_num_tokens: int, max
     return profile_tokens
 
 
+def model_uses_qwen4_exp_qsa(model_config: Any) -> bool:
+    if getattr(model_config, "architecture", None) not in ("Qwen4ExpForCausalLM", "Qwen4ExpForConditionalGeneration"):
+        return False
+    config = getattr(model_config, "hf_text_config", None)
+    # Match Qwen4ExpDecoderLayer without importing the model during platform configuration.
+    layer_types = getattr(config, "layer_types", None) or ()
+    return getattr(config, "indexer_n_heads", None) is not None and (
+        "qwen_sparse_attention" in layer_types or "indexed_attention" in layer_types
+    )
+
+
 def model_supports_dcp(model_config: Any) -> bool:
-    """Whether the model enables MLA or uses Ascend SFA attention."""
-    return getattr(model_config, "use_mla", False) or model_uses_sfa_sparse(model_config)
+    """Whether the model has an Ascend implementation of DCP."""
+    return (
+        getattr(model_config, "use_mla", False)
+        or model_uses_sfa_sparse(model_config)
+        or model_uses_qwen4_exp_qsa(model_config)
+    )
 
 
 def extract_dsv4_layer_index(config: Any, layer_name: str) -> int:

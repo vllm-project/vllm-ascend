@@ -552,11 +552,16 @@ def build_attn_metadata(
             if is_qsa_group:
                 if pcp_context is not None and (full_graph_mode or for_cudagraph_capture):
                     layer_common = layer_common.replace(graph_pad_size=num_input_tokens)
-                elif full_graph_mode and num_input_tokens > num_actual_tokens:
+                elif (full_graph_mode or for_cudagraph_capture) and (
+                    num_input_tokens > num_actual_tokens or getattr(attn_metadata_builder, "dcp_size", 1) > 1
+                ):
                     # QSA sizes LI and GBSA tiling buffers from num_actual_tokens.
                     # Replay needs the captured row count. The indexer's CPU
-                    # query boundary still marks the end of the live rows.
-                    layer_common = layer_common.replace(num_actual_tokens=num_input_tokens)
+                    # query boundary still marks the end of the live rows. The
+                    # DCP indexer must use its own row-map buffer even at capture.
+                    layer_common = layer_common.replace(
+                        num_actual_tokens=num_input_tokens, _token_to_req_indices_cache=None
+                    )
             metadata_variants = [(attn_group.layer_names, layer_common)]
             if is_sfa_builder and draft_layer_names:
                 target_names = [name for name in attn_group.layer_names if name not in draft_layer_names]

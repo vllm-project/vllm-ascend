@@ -16,7 +16,7 @@
 
 from __future__ import annotations
 
-from typing import Any
+from typing import TYPE_CHECKING, Any
 
 import torch
 import torch.nn as nn
@@ -31,6 +31,12 @@ from vllm_ascend.models.qwen4_exp.input_adapter import (
 from vllm_ascend.worker.v2.model_states.mamba_hybrid import (
     AscendMambaHybridModelState,
 )
+
+if TYPE_CHECKING:
+    from vllm.v1.kv_cache_interface import KVCacheConfig
+    from vllm.v1.worker.utils import AttentionGroup
+
+    from vllm_ascend.worker.v2.input_batch import AscendInputBatch
 
 
 class AscendQwen4ExpModelState(Qwen4ExpModelState, AscendMambaHybridModelState):
@@ -81,14 +87,33 @@ class AscendQwen4ExpModelState(Qwen4ExpModelState, AscendMambaHybridModelState):
             self.qsa_prepared_input_adapter.prepare_positions(positions, num_tokens)
         return model_inputs
 
-    def prepare_attn(self, *args: Any, **kwargs: Any) -> dict[str, Any]:
-        metadata = super().prepare_attn(*args, **kwargs)
-        cudagraph_mode = kwargs.get("cudagraph_mode")
-        if cudagraph_mode is None and len(args) > 1:
-            cudagraph_mode = args[1]
+    def prepare_attn(
+        self,
+        input_batch: AscendInputBatch,
+        cudagraph_mode: CUDAGraphMode,
+        block_tables: tuple[torch.Tensor, ...],
+        slot_mappings: torch.Tensor,
+        attn_groups: list[list[AttentionGroup]],
+        kv_cache_config: KVCacheConfig,
+        for_capture: bool = False,
+        *args: Any,
+        **kwargs: Any,
+    ) -> dict[str, Any]:
+        metadata = super().prepare_attn(
+            input_batch,
+            cudagraph_mode,
+            block_tables,
+            slot_mappings,
+            attn_groups,
+            kv_cache_config,
+            for_capture,
+            *args,
+            **kwargs,
+        )
+        # vLLM prepares FULL capture with mode NONE and for_capture=True.
         self.qsa_prepared_input_adapter.prepare_attention_metadata(
             metadata,
-            full_graph=cudagraph_mode == CUDAGraphMode.FULL,
+            full_graph=for_capture or cudagraph_mode == CUDAGraphMode.FULL,
         )
         return metadata
 

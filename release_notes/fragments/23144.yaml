@@ -1,0 +1,7 @@
+pr: 23144
+entries:
+  - category: feature
+    text: >-
+      Qwen3.8-Flash-Next can shard its QSA KV caches across Ascend devices
+      with `--decode-context-parallel-size`. Use BF16 KV caches and
+      `--prefill-context-parallel-size 1`.
