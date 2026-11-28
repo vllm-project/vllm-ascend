@@ -14,6 +14,9 @@
 
 """Ascend QSA owner for Qwen3.8-Flash-Next."""
 
+from collections.abc import Iterator
+from contextlib import contextmanager
+from contextvars import ContextVar
 from copy import copy
 from dataclasses import replace
 from typing import TYPE_CHECKING, Any, Protocol, TypeAlias, cast
@@ -599,6 +602,19 @@ class AscendQSAImpl(AttentionImplBase[Any]):
         """QSA replay parameters live in persistent buffers; nothing to rebind."""
 
 
+_qsa_full_graph_replay = ContextVar("qsa_full_graph_replay", default=False)
+
+
+@contextmanager
+def qsa_metadata_build_scope(*, full_graph: bool) -> Iterator[None]:
+    """Expose the Qwen model state's replay mode during the parent metadata build."""
+    token = _qsa_full_graph_replay.set(full_graph)
+    try:
+        yield
+    finally:
+        _qsa_full_graph_replay.reset(token)
+
+
 class AscendQSAMetadataBuilder(upstream_qsa.Qwen4ExpQSAMetadataBuilder):
     # FULL_DECODE_ONLY captures the standard GBSA path.
     _cudagraph_support = AttentionCGSupport.UNIFORM_BATCH
@@ -664,8 +680,8 @@ class AscendQSAMetadataBuilder(upstream_qsa.Qwen4ExpQSAMetadataBuilder):
         fast_build: bool = False,
         *,
         for_capture: bool = False,
-        full_graph_mode: bool = False,
     ):
+        full_graph_mode = _qsa_full_graph_replay.get()
         pcp_context = getattr(common_attn_metadata, "pcp_context", None)
         full_pcp_graph = pcp_context is not None and common_attn_metadata.graph_pad_size >= 0
         if full_pcp_graph:

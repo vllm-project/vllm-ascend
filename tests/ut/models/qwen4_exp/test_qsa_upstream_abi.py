@@ -7,6 +7,7 @@ from unittest.mock import Mock
 import pytest
 import torch
 from vllm.config import ParallelConfig
+from vllm.config.compilation import CUDAGraphMode
 from vllm.v1.attention.backend import AttentionBackend
 from vllm.v1.attention.ops import metadata as upstream_metadata_ops
 from vllm.v1.kv_cache_interface import MLAAttentionSpec
@@ -16,8 +17,10 @@ from vllm.v1.worker.utils import AttentionGroup
 from tests.ut.models.qwen4_exp.test_gbsa_preparation import load_cpu_preparation
 from vllm_ascend.attention.utils import AscendCommonAttentionMetadata
 from vllm_ascend.models.qwen4_exp import gbsa, input_adapter, model, qsa
+from vllm_ascend.models.qwen4_exp.model_state import AscendQwen4ExpModelState
 from vllm_ascend.worker.v2.attn_utils import build_attn_metadata
 from vllm_ascend.worker.v2.input_batch import AscendInputBatch
+from vllm_ascend.worker.v2.model_states.mamba_hybrid import AscendMambaHybridModelState
 from vllm_ascend.worker.v2.pcp_manager import AscendPCPAttentionContext
 
 
@@ -439,6 +442,24 @@ def cpu_token_to_req(monkeypatch):
     monkeypatch.setattr(upstream_metadata_ops, "compute_token_to_req_indices", token_to_req)
 
 
+def test_qwen_model_state_scopes_full_graph_to_parent_build(monkeypatch):
+    state = AscendQwen4ExpModelState.__new__(AscendQwen4ExpModelState)
+    adapter = Mock()
+    state.qsa_prepared_input_adapter = adapter
+    observed = []
+
+    def build(*args, **kwargs):
+        observed.append(qsa._qsa_full_graph_replay.get())
+        return {}
+
+    monkeypatch.setattr(AscendMambaHybridModelState, "prepare_attn", build)
+    state.prepare_attn(None, CUDAGraphMode.FULL)
+    assert not qsa._qsa_full_graph_replay.get()
+    state.prepare_attn(None, cudagraph_mode=CUDAGraphMode.NONE)
+    assert observed == [True, False]
+    assert [call.kwargs["full_graph"] for call in adapter.prepare_attention_metadata.call_args_list] == observed
+
+
 @pytest.mark.parametrize("full_graph", [True, False])
 @pytest.mark.parametrize("live_reqs", [13, 14])
 def test_qsa_decode_maps_only_live_rows(cpu_token_to_req, full_graph, live_reqs):
@@ -468,24 +489,25 @@ def test_qsa_decode_maps_only_live_rows(cpu_token_to_req, full_graph, live_reqs)
         )
     ]
     starts = torch.arange(0, 57, 4, dtype=torch.int32)
-    metadata = build_attn_metadata(
-        attn_groups=[groups],
-        num_reqs=14,
-        num_actual_reqs=live_reqs,
-        num_tokens=56,
-        num_actual_tokens=live_tokens,
-        query_start_loc_gpu=starts,
-        query_start_loc_cpu=starts,
-        max_query_len=4,
-        seq_lens=torch.full((14,), 100, dtype=torch.int32),
-        max_seq_len=100,
-        is_prefilling=torch.zeros(14, dtype=torch.bool),
-        block_tables=(torch.zeros((14, 7), dtype=torch.int32),),
-        slot_mappings=(torch.arange(56),),
-        kv_cache_config=SimpleNamespace(kv_cache_groups=[SimpleNamespace(kv_cache_spec=spec)]),
-        full_graph_mode=full_graph,
-        skip_ring_state_update=False,
-    )
+    with qsa.qsa_metadata_build_scope(full_graph=full_graph):
+        metadata = build_attn_metadata(
+            attn_groups=[groups],
+            num_reqs=14,
+            num_actual_reqs=live_reqs,
+            num_tokens=56,
+            num_actual_tokens=live_tokens,
+            query_start_loc_gpu=starts,
+            query_start_loc_cpu=starts,
+            max_query_len=4,
+            seq_lens=torch.full((14,), 100, dtype=torch.int32),
+            max_seq_len=100,
+            is_prefilling=torch.zeros(14, dtype=torch.bool),
+            block_tables=(torch.zeros((14, 7), dtype=torch.int32),),
+            slot_mappings=(torch.arange(56),),
+            kv_cache_config=SimpleNamespace(kv_cache_groups=[SimpleNamespace(kv_cache_spec=spec)]),
+            full_graph_mode=full_graph,
+            skip_ring_state_update=False,
+        )
     assert metadata["indexer"].num_actual_tokens == metadata["main"].num_actual_tokens == expected_rows
     assert metadata["indexer"].logical_positions.tolist() == [96, 97, 98, 99] * live_reqs + [-1] * (
         expected_rows - live_tokens
