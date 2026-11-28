@@ -8,19 +8,259 @@ Counters are read as deltas; hybrid cases reset local KV between rounds.
 from __future__ import annotations
 
 import contextlib
+import hashlib
 import json
 import os
+import shutil
+import subprocess
 import time
 from collections.abc import Callable, Sequence
 from dataclasses import asdict, dataclass, field
+from importlib import metadata
 from typing import Any
 
+import pytest
 import regex as re
 
 HITS_METRIC = "vllm:external_prefix_cache_hits"
 QUERIES_METRIC = "vllm:external_prefix_cache_queries"
 LOAD_KEYS_METRIC = "vllm:ascend_store_load_get_keys"
 DELAYED_BLOCKS_METRIC = "vllm:ascend_store_delayed_release_blocks"
+MEMCACHE_TRANSFER_GATE_TIMEOUT_S = 120
+MEMCACHE_TRANSFER_GATE_ATTEMPTS = 3
+MEMCACHE_TRANSFER_GATE_RETRY_DELAY_S = 5
+HIXL_TOPOLOGY_GATE_TIMEOUT_S = 30
+NPU_SMI_TIMEOUT_S = 10
+GATE_ERROR_LINE_LIMIT = 8
+GATE_TAIL_LINE_LIMIT = 20
+GATE_ERROR_KEYWORDS = ("ERROR", "error", "fail", "Fail", "ret=-")
+HCCL_ROOTINFO_PATH = "/etc/hccl_rootinfo.json"
+DRIVER_TOPO_PATH = "/usr/local/Ascend/driver/topo/950/atlas_850_1.json"
+UB_STACK_PATHS = ("/etc/hixlep", "/lib/route.conf")
+UBURMA_DEVICE_DIR = "/dev/uburma"
+# What the installation guide reports when the UB stack cannot build the
+# fabric topology (/etc/hixlep + /lib/route.conf + /etc/hccl_rootinfo.json).
+URMA_TOPOLOGY_FAILURES = (
+    "Failed to recv netlink msg",
+    "Failed to get topo info",
+    "Failed to get ubagg topo",
+)
+
+
+def _read_prefix(path: str, size: int = 256) -> str:
+    try:
+        with open(path, encoding="utf-8", errors="replace") as handle:
+            return handle.read(size).strip()
+    except OSError:
+        return ""
+
+
+def _file_md5(path: str) -> str:
+    try:
+        with open(path, "rb") as handle:
+            return hashlib.md5(handle.read()).hexdigest()[:8]
+    except OSError:
+        return "?"
+
+
+def _count_entries(path: str) -> str:
+    try:
+        return str(len(os.listdir(path)))
+    except OSError:
+        return "?"
+
+
+def _npu_summary() -> str:
+    try:
+        completed = subprocess.run(["npu-smi", "info"], capture_output=True, text=True, timeout=NPU_SMI_TIMEOUT_S)
+    except (OSError, subprocess.TimeoutExpired):
+        return "?"
+    # Chip rows carry a model name; process rows carry a numeric PID.
+    chips = re.findall(r"^\|\s*\d+\s*\|\s*([A-Za-z0-9]*[A-Za-z][A-Za-z0-9]*)\s*\|", completed.stdout, re.MULTILINE)
+    if not chips:
+        return "?"
+    return f"{len(chips)}x{chips[0]}"
+
+
+def _memlock_mb() -> str:
+    try:
+        # resource is POSIX-only; keep the import local so importing this module
+        # on a non-POSIX host does not fail.
+        import resource
+
+        soft, _ = resource.getrlimit(resource.RLIMIT_MEMLOCK)
+        if soft == resource.RLIM_INFINITY:
+            return "unlimited"
+        return str(soft // (1024 * 1024))
+    except (ImportError, OSError, ValueError):
+        return "?"
+
+
+def _hugepages_total() -> str:
+    for line in _read_prefix("/proc/meminfo", 4096).splitlines():
+        if line.startswith("HugePages_Total:"):
+            return line.split(":", 1)[1].strip()
+    return "?"
+
+
+def _shm_size_mb() -> str:
+    try:
+        stat = os.statvfs("/dev/shm")
+    except OSError:
+        return "?"
+    return str(stat.f_blocks * stat.f_frsize // (1024 * 1024))
+
+
+def _package_version(name: str) -> str:
+    try:
+        return metadata.version(name)
+    except Exception:  # diagnostics must never break the gate
+        return "?"
+
+
+def _machine_fingerprint() -> str:
+    """Compact host identity for triaging gate skips on the shared CI runners."""
+    serial = _read_prefix("/sys/class/dmi/id/product_serial") or _read_prefix("/sys/class/dmi/id/board_serial")
+    ub_stack = ",".join(f"{path}={'y' if os.path.exists(path) else 'n'}" for path in UB_STACK_PATHS)
+    return (
+        f"serial={serial or '?'} npu={_npu_summary()} uburma={_count_entries(UBURMA_DEVICE_DIR)} "
+        f"rootinfo={_file_md5(HCCL_ROOTINFO_PATH)} topo={_file_md5(DRIVER_TOPO_PATH)} {ub_stack}"
+    )
+
+
+def _skip_memcache_gate(reason: str) -> None:
+    # pytest only prints skip reasons with -r, so leave the signature in the log too.
+    print(f"[memcache_transfer_gate] {reason}", flush=True)
+    pytest.skip(reason)
+
+
+def _skip_hixl_gate(reason: str) -> None:
+    print(f"[hixl_topology_gate] {reason}", flush=True)
+    pytest.skip(reason)
+
+
+def ensure_hixl_topology() -> None:
+    """Skip when the UB fabric topology HIXL needs for its peer plane is absent.
+
+    ``urma_admin show topo`` is the documented stack check: the topology is
+    built from ``/etc/hixlep``, ``/lib/route.conf`` and
+    ``/etc/hccl_rootinfo.json``, and a pod without them reports
+    ``Failed to recv netlink msg`` / ``Failed to get topo info``. HIXL needs
+    those CLOS links, so the mooncake pool dies in store init (``No CLOS edge``
+    or a SIGKILL) when the check fails. The endpoint list from
+    ``urma_admin show`` can be all ``ACTIVE`` in that state, so probe the
+    topology, not the links.
+    """
+    if shutil.which("urma_admin") is None:
+        _skip_hixl_gate("mooncake gate: urma_admin is not installed in the image")
+    fingerprint = _machine_fingerprint()
+    print(f"[hixl_topology_gate] host: {fingerprint}", flush=True)
+    try:
+        completed = subprocess.run(
+            ["urma_admin", "show", "topo"],
+            capture_output=True,
+            text=True,
+            timeout=HIXL_TOPOLOGY_GATE_TIMEOUT_S,
+        )
+    except subprocess.TimeoutExpired:
+        _skip_hixl_gate(
+            f"mooncake gate: urma_admin show topo did not finish in "
+            f"{HIXL_TOPOLOGY_GATE_TIMEOUT_S}s ({fingerprint})"
+        )
+    output = completed.stdout + completed.stderr
+    if completed.returncode != 0 or any(sig in output for sig in URMA_TOPOLOGY_FAILURES):
+        tail = output.strip().splitlines()[:4]
+        _skip_hixl_gate(
+            f"mooncake gate: UB topology is not ready (rc={completed.returncode}, {fingerprint}): "
+            + " / ".join(tail)
+        )
+
+
+def ensure_memcache_transfer(protocol: str, local_rank_size: int) -> None:
+    """Skip when the A5 data plane cannot carry a plain memfabric transfer.
+
+    Follows the memfabric troubleshooting flow: run the transport benchmark
+    before the pool leg so a broken UB path skips in two minutes with a
+    signature instead of hanging the DP workers. A5 targets ``device_urma``;
+    ``device_sdma`` has no cross-rank data plane there and is not a fallback.
+    """
+    if shutil.which("mfcli") is None:
+        _skip_memcache_gate("memcache transfer gate: mfcli is not installed in the image")
+    env = dict(os.environ)
+    env.setdefault("MF_HYBM_ENABLE_4K_PAGE", "1")
+    command = [
+        "mfcli",
+        "benchmark",
+        "--protocol",
+        protocol,
+        "--device",
+        "0",
+        "--local-rank-size",
+        str(local_rank_size),
+        "--copysize",
+        "2097152",
+        "--copy-count",
+        "10",
+        "read",
+    ]
+    fingerprint = _machine_fingerprint()
+    print(f"[memcache_transfer_gate] host: {fingerprint}", flush=True)
+    print(
+        f"[memcache_transfer_gate] probe: cmd={' '.join(command)} "
+        f"full_mesh={env.get('TEST_MF_TRANSPORT_FULL_MESH', '<unset>')} "
+        f"4k_page={env['MF_HYBM_ENABLE_4K_PAGE']} "
+        f"memfabric={_package_version('memfabric_hybrid')} "
+        f"ulimit_l={_memlock_mb()}MB hugepages={_hugepages_total()} shm={_shm_size_mb()}MB",
+        flush=True,
+    )
+    # The A5 full-mesh path has an intermittent init/copy crash, so one failed
+    # benchmark is not proof of a broken data plane. Retry before skipping.
+    last_failure = ""
+    for attempt in range(1, MEMCACHE_TRANSFER_GATE_ATTEMPTS + 1):
+        started = time.monotonic()
+        try:
+            completed = subprocess.run(
+                command,
+                capture_output=True,
+                text=True,
+                timeout=MEMCACHE_TRANSFER_GATE_TIMEOUT_S,
+                env=env,
+            )
+        except subprocess.TimeoutExpired:
+            elapsed = time.monotonic() - started
+            last_failure = (
+                f"{protocol} did not finish in {MEMCACHE_TRANSFER_GATE_TIMEOUT_S}s; "
+                "blocked in HYBM init or the first copy"
+            )
+            print(
+                f"[memcache_transfer_gate] attempt {attempt}/{MEMCACHE_TRANSFER_GATE_ATTEMPTS} "
+                f"timed out after {elapsed:.1f}s",
+                flush=True,
+            )
+        else:
+            elapsed = time.monotonic() - started
+            if completed.returncode == 0:
+                print(
+                    f"[memcache_transfer_gate] attempt {attempt}/{MEMCACHE_TRANSFER_GATE_ATTEMPTS} "
+                    f"passed in {elapsed:.1f}s",
+                    flush=True,
+                )
+                return
+            output = (completed.stdout + completed.stderr).strip().splitlines()
+            matched = [line for line in output if any(key in line for key in GATE_ERROR_KEYWORDS)]
+            tail = (matched[-GATE_ERROR_LINE_LIMIT:] + output[-GATE_TAIL_LINE_LIMIT:])[-GATE_TAIL_LINE_LIMIT:]
+            last_failure = f"rc={completed.returncode} after {elapsed:.1f}s: " + " / ".join(tail)
+            print(
+                f"[memcache_transfer_gate] attempt {attempt}/{MEMCACHE_TRANSFER_GATE_ATTEMPTS} failed "
+                f"{last_failure}",
+                flush=True,
+            )
+        if attempt < MEMCACHE_TRANSFER_GATE_ATTEMPTS:
+            time.sleep(MEMCACHE_TRANSFER_GATE_RETRY_DELAY_S)
+    _skip_memcache_gate(
+        f"memcache transfer gate failed {MEMCACHE_TRANSFER_GATE_ATTEMPTS} attempts "
+        f"({fingerprint}): {last_failure}"
+    )
 
 
 @dataclass(frozen=True)
@@ -254,8 +494,10 @@ def run_pool_hit_sequence(
     ``prompt_ids`` supplies a measured long natural-language prompt;
     ``answer_secret`` asserts the cold and hit answers. ``replicas`` scales with
     DP size. ``lcm_block_size`` / ``expected_hit_tokens`` enable exact hit-token
-    checks. ``reset_local_cache`` is for hybrid cases. ``check_output=False``
-    skips H3 (DSpark and dummy-weight cases).
+    checks. ``reset_local_cache`` is for hybrid cases. ``check_output`` only
+    controls the H3 exact token comparison; the ``answer_secret`` semantic check
+    always runs for the cold and both hit rounds, so ``check_output=False``
+    still guards the restored-prefix content.
     """
     prompt_a = prompt_ids if prompt_ids is not None else build_pool_prompts(prompt_tokens)[0]
     prompt_b = build_pool_prompts(prompt_tokens)[1]
@@ -471,12 +713,17 @@ def _control_hit_outputs(
     prompt_tokens: int,
     max_tokens: int,
     prompt_ids: list[int] | None = None,
+    replicas: int = 1,
 ) -> tuple[list[list[int]], float]:
-    """B leg: cold write + one local-hit round; no local hit is CONTROL_DEFECT."""
+    """B leg: cold write + one local-hit round; no local hit is CONTROL_DEFECT.
+
+    ``replicas`` matches the DP width so the control outputs line up with the
+    pool leg's per-rank outputs for the H3 token comparison.
+    """
     prompt = prompt_ids if prompt_ids is not None else build_pool_prompts(prompt_tokens)[0]
-    runner.generate_greedy([prompt], max_tokens)
+    runner.generate_greedy([prompt] * replicas, max_tokens)
     before = _prefix_cache_hits(runner)
-    outputs = [list(ids) for ids, _ in runner.generate_greedy([prompt], max_tokens)]
+    outputs = [list(ids) for ids, _ in runner.generate_greedy([prompt] * replicas, max_tokens)]
     after = _prefix_cache_hits(runner)
     local_hits = after - before
     assert local_hits > 0, f"CONTROL_DEFECT: B leg got no local prefix-cache hit (prefix_cache_hits Δ{local_hits:.0f})"
@@ -547,6 +794,7 @@ def run_pool_ab(
     perf_prompt_tokens: int | None = None,
     max_tokens: int = POOL_MAX_TOKENS,
     token_identity: bool = True,
+    replicas: int = 1,
     perf_reset_local: bool = False,
     perf_seed_concurrency: bool = False,
     gate: bool = True,
@@ -574,7 +822,7 @@ def run_pool_ab(
                     hits = float(summary.get("r3", 0.0))
                     local_hits = 0.0
                 else:
-                    outputs, local_hits = _control_hit_outputs(runner, prompt_tokens, max_tokens, prompt_ids)
+                    outputs, local_hits = _control_hit_outputs(runner, prompt_tokens, max_tokens, prompt_ids, replicas)
                     # B leg records local-hit output, not pool hits.
                     hits = 0.0
                 phase = "perf"

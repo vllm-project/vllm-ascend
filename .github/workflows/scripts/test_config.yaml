@@ -52,6 +52,10 @@ curated_tests:
     - tests/e2e/pull_request/one_card/test_hisparse_attention.py
     - tests/e2e/pull_request/one_card/test_hisparse_integration.py
     - tests/e2e/pull_request/one_card/test_hisparse_prefill_staging.py
+    - tests/e2e/pull_request/four_card_a5/pool/test_deepseek_v4_1_pool.py
+    - tests/e2e/pull_request/four_card_a5/pool/test_deepseek_v4_1_pool_mooncake.py
+    - tests/e2e/pull_request/four_card_a5/pool/test_pool_ssd_hit.py
+    - tests/e2e/pull_request/four_card_a5/pool/test_pool_perf.py
 
 # === Skipped Tests ===
 # Removed from any selection after directory scanning, so they are never
@@ -133,6 +137,13 @@ runner_mapping:
     default: a5-4
   tests/e2e/pull_request/one_card/test_hisparse_(attention|integration|prefill_staging)\.py$:
     default: a5-4
+  # Directory name is historical; the A5 pool cases run on the 8-die runner.
+  tests/e2e/pull_request/four_card_a5:
+    default: a5-8
+  # Qwen3.8-27B hybrid Mamba needs all eight on-board localIds visible for
+  # the HYBM full mesh, so run it on the 8-die A5 runner.
+  tests/e2e/pull_request/two_card/pool:
+    default: a5-8
   tests/e2e/pull_request/one_card:
     default: a2-1
     310p: 310p-1
@@ -149,6 +160,12 @@ runner_mapping:
 partition:
   a5-4:
     runner_label: linux-aarch64-a5-4
+    count: 1
+  a5-8:
+    runner_label: linux-aarch64-a5-8
+    count: 1
+  a5-2:
+    runner_label: linux-aarch64-a5-2
     count: 1
   310p-1:
     runner_label: linux-aarch64-310p-1

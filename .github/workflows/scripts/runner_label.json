@@ -109,7 +109,19 @@
     "linux-aarch64-a5-4": {
         "chip": "a5",
         "npu_num": 4,
-        "image_tag": "9.3.0_20261113161300-950-ubuntu22.04-py3.12",
+        "image_tag": "9.3.0_20261125184600-950-ubuntu22.04-py3.12",
+        "csrc_cache_target": "a5-arm64-ubuntu"
+    },
+    "linux-aarch64-a5-8": {
+        "chip": "a5",
+        "npu_num": 8,
+        "image_tag": "9.3.0_20261125184600-950-ubuntu22.04-py3.12",
+        "csrc_cache_target": "a5-arm64-ubuntu"
+    },
+    "linux-aarch64-a5-2": {
+        "chip": "a5",
+        "npu_num": 2,
+        "image_tag": "9.3.0_20261125184600-950-ubuntu22.04-py3.12",
         "csrc_cache_target": "a5-arm64-ubuntu"
     }
 }

@@ -81,6 +81,23 @@ setup_vllm_cache_root() {
   echo "Using Torch extensions directory: ${TORCH_EXTENSIONS_DIR}"
 }
 
+ensure_a5_cannbot_ops() {
+  if [ "${npu_type}" != "a5" ] || [ "${mode}" != "with-device" ]; then
+    return
+  fi
+  if python -c "import ops.mixed_quant_sparse_flash_mla_metadata" >/dev/null 2>&1; then
+    echo "CannBot DSL ops already available"
+    return
+  fi
+  echo "Installing CannBot DSL ops for A5"
+  PIP_EXTRA_INDEX_URL="https://mirrors.huaweicloud.com/ascend/repos/pypi https://mirrors.huaweicloud.com/ascend/repos/pypi/nightly" \
+    python -m pip install "cannbotdsl===0.8.2" "cannbot-arena-net-ops===0.3.0"
+  if ! python -c "import ops.mixed_quant_sparse_flash_mla_metadata" >/dev/null 2>&1; then
+    echo "::error::CannBot DSL ops installation did not provide ops.mixed_quant_sparse_flash_mla_metadata"
+    exit 1
+  fi
+}
+
 terminate_process_group() {
   local process_group="$1"
   if ! kill -0 -- "-${process_group}" 2>/dev/null; then
@@ -168,6 +185,15 @@ print_summary() {
   fi
 }
 
+all_tests_skipped() {
+  local log_file="$1"
+  local summary
+  summary=$(grep -E '=+ .*(passed|skipped|error|failed).* in [0-9.]+s' "${log_file}" | tail -1)
+  [ -n "${summary}" ] &&
+    echo "${summary}" | grep -Eq '[0-9]+ skipped' &&
+    ! echo "${summary}" | grep -Eq '[0-9]+ (passed|failed|errors?)'
+}
+
 run_pytest_target() {
   local target="$1"
   test_index=$((test_index + 1))
@@ -209,7 +235,17 @@ run_pytest_target() {
   fi
   echo "::endgroup::"
   if [ "${status}" -eq 0 ]; then
-    test_results+=("${target}|PASSED|${log_file}")
+    if all_tests_skipped "${log_file}"; then
+      # pytest exits 0 when every test is skipped. Treat that as a failure so
+      # a gate-blocked run cannot report a green job.
+      test_results+=("${target}|SKIPPED|${log_file}")
+      echo "::error title=No tests executed::${target} was skipped; see ${log_file}"
+      if [ "${overall_status}" -eq 0 ]; then
+        overall_status=6
+      fi
+    else
+      test_results+=("${target}|PASSED|${log_file}")
+    fi
   elif [ "${status}" -eq 5 ] && grep -Eq 'collected 0 items / [1-9][0-9]* skipped[[:space:]]*$' "${log_file}"; then
     # A collection skip can yield exit 5 even when the target is valid.
     test_results+=("${target}|SKIPPED|${log_file}")
@@ -296,6 +332,7 @@ print_timing_json() {
 
 print_test_info
 setup_vllm_cache_root
+ensure_a5_cannbot_ops
 
 if [ "${npu_type}" = "cpu" ]; then
   run_pytest_batch "cpu-ut (${#targets[@]} targets)" "${targets[@]}"
