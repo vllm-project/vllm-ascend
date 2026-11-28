@@ -462,31 +462,7 @@ class _MoonEPRuntime:
                 qp_layout[1],
                 qp_layout[2],
             )
-        # Check effective context flags once at initialization. Planning is
-        # native in this SDK; the other three stages support UDMA.
-        expected_backends = {
-            "planning": False,
-            "dispatch": use_udma,
-            "combine": use_udma,
-            "prefetch": use_udma,
-        }
-        for (experts, topk, hidden), pool in self._buffers.items():
-            for cap, buffer in pool.items():
-                ctx = buffer._require_ctx()
-                ctx["udma_prefetch_overlap_ready"] = qp_layout is not None
-                actual = {name: bool(ctx[f"_{name}_use_udma"]) for name in expected_backends}
-                if actual != expected_backends:
-                    raise RuntimeError(f"MoonEP backend mismatch: requested={expected_backends}, effective={actual}")
-                backends = " ".join(f"{name}={'udma' if enabled else 'mte'}" for name, enabled in actual.items())
-                logger.info(
-                    "[moonep-backend r%s] E=%s K=%s H=%s S=%s %s",
-                    get_ep_group().rank_in_group,
-                    experts,
-                    topk,
-                    hidden,
-                    cap,
-                    backends,
-                )
+        self._validate_buffer_backends(use_udma, prefetch_overlap_ready=qp_layout is not None)
         dev = torch.npu.current_device()
         torch.npu.synchronize(dev)
         torch.npu.empty_cache()
@@ -508,6 +484,32 @@ class _MoonEPRuntime:
             free_after - free_before,
             free_after,
         )
+
+    def _validate_buffer_backends(self, use_udma: bool, *, prefetch_overlap_ready: bool) -> None:
+        """Record queue readiness and check the effective transport of each pooled buffer."""
+        expected_backends = {
+            "planning": False,
+            "dispatch": use_udma,
+            "combine": use_udma,
+            "prefetch": use_udma,
+        }
+        for (experts, topk, hidden), pool in self._buffers.items():
+            for cap, buffer in pool.items():
+                ctx = buffer._require_ctx()
+                ctx["udma_prefetch_overlap_ready"] = prefetch_overlap_ready
+                actual = {name: bool(ctx[f"_{name}_use_udma"]) for name in expected_backends}
+                if actual != expected_backends:
+                    raise RuntimeError(f"MoonEP backend mismatch: requested={expected_backends}, effective={actual}")
+                backends = " ".join(f"{name}={'udma' if enabled else 'mte'}" for name, enabled in actual.items())
+                logger.info(
+                    "[moonep-backend r%s] E=%s K=%s H=%s S=%s %s",
+                    get_ep_group().rank_in_group,
+                    experts,
+                    topk,
+                    hidden,
+                    cap,
+                    backends,
+                )
 
 
 _MOONEP_RUNTIME = _MoonEPRuntime()
