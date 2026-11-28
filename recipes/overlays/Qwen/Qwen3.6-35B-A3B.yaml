@@ -1,7 +1,7 @@
 # Source: https://github.com/vllm-project/vllm/blob/52a65d7b19e9e3ad86bf1e3b6954e4e11eeec7da/recipes/models/Qwen/Qwen3.6-35B-A3B.yaml
 # Extracted with vllm-project/recipes@b08ad73889f9e33319d8ac9c887dec6a0975c55d.
 meta:
-  date_updated: 2026-11-20
+  date_updated: 2026-11-28
   hardware:
     ascend_910b: verified
     ascend_910c: verified
@@ -40,7 +40,7 @@ features:
           ascend_910c:
             args:
               - '--speculative-config'
-              - '{"method":"qwen3_5_mtp","num_speculative_tokens":3}'
+              - '{"method":"mtp","num_speculative_tokens":3}'
           ascend_950dt:
             args:
               - '--speculative-config'
@@ -149,6 +149,8 @@ variants:
       - '--trust-remote-code'
       - '--safetensors-load-strategy'
       - lazy
+      - '--dtype'
+      - bfloat16
       - '--enable-prefix-caching'
       - '--compilation-config'
       - '{"cudagraph_mode":"FULL_AND_PIECEWISE"}'
@@ -169,6 +171,9 @@ variants:
       ascend_910c:
         docker_image: quay.io/ascend/vllm-ascend:v0.30.0-a3
         docker_serve_command: "vllm serve"
+        docker_shm_size: 1g
+        install:
+          pip: false
 
   ascend_w8a8_mxfp8_a5:
     model_id: Eco-Tech/Qwen3.6-35B-A3B-w8a8-mxfp8
@@ -226,10 +231,34 @@ presets:
     variants:
       - ascend_w8a8_a3
     default: true
-    args:
-      - '--enable-expert-parallel'
     source:
+      label: Qwen3.6-35B-A3B single-node deployment on A3
       href: https://github.com/vllm-project/vllm-ascend/blob/638d7184045f149b07bd904690772a6544126200/docs/source/tutorials/models/Qwen3.6-35B-A3B.md#51-single-node-online-deployment
+      key: A2 Series / A3 Series
+      revision: 638d7184045f149b07bd904690772a6544126200
+    select:
+      frontend: python
+      features:
+        spec_decoding: mtp
+        tool_calling: false
+        reasoning: false
+        encoder_parallel: false
+    env:
+      ASCEND_RT_VISIBLE_DEVICES: '0,1'
+    args:
+      - '--data-parallel-size'
+      - '1'
+      - '--enable-expert-parallel'
+      - '--served-model-name'
+      - qwen3.6
+      # The builder's Verify and Benchmark commands send the checkpoint ID.
+      - Eco-Tech/Qwen3.6-35B-A3B-w8a8
+    remove_args:
+      - '--dtype'
+    runbook: >-
+      Use the A3 container from section 4.1 of the tutorial. If the weights are
+      already in the host's ModelScope cache, mount that cache at the same path
+      inside the container. Section 5.1 also lists the host CPU and NUMA settings.
 
 hardware_notes:
   ascend_910b:
