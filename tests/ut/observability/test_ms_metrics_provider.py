@@ -81,12 +81,11 @@ def test_get_metric_provider_returns_packaged_yaml(monkeypatch):
     assert provider.handler_module_prefixes == ("vllm_ascend.observability.ms_metrics.",)
     assert provider.config_paths == tuple(sorted(provider.config_paths))
     packaged_configs = {Path(path).name for path in provider.config_paths}
-    assert {
-        "base_metrics.yaml",
-        "eplb_metrics.yaml",
-        "runtime_guard_metrics.yaml",
-        "schedule_execute_metrics.yaml",
-    } <= packaged_configs
+    # Derive the expectation from the source tree instead of a hardcoded list:
+    # every packaged config exists in the config directory and vice versa, so
+    # provider branches never edit this shared assertion.
+    expected_configs = {path.name for path in (_PACKAGE_ROOT / "config").glob("*.yaml")}
+    assert packaged_configs == expected_configs
     assert all(Path(path).is_file() for path in provider.config_paths)
     config = _load_all_provider_configs(provider.config_paths)
     # Assert per-file and namespace invariants instead of exact totals: every
@@ -158,17 +157,16 @@ def test_provider_yaml_custom_handlers_resolve(monkeypatch):
     package = ModuleType("vllm_ascend")
     package.__path__ = [str(_REPOSITORY_ROOT / "vllm_ascend")]
     monkeypatch.setitem(sys.modules, "vllm_ascend", package)
-    for module_name in (
+    # Purge the package and every feature submodule (derived from the tree, so
+    # new handler files need no edit here) before importing the package fresh.
+    module_names = [
         "vllm_ascend.observability",
         "vllm_ascend.observability.ms_metrics",
         "vllm_ascend.observability.ms_metrics.provider",
-        "vllm_ascend.observability.ms_metrics.handlers",
-        "vllm_ascend.observability.ms_metrics.handlers.common",
-        "vllm_ascend.observability.ms_metrics.handlers.eplb",
-        "vllm_ascend.observability.ms_metrics.handlers.rl_lifecycle",
-        "vllm_ascend.observability.ms_metrics.handlers.runtime_guard",
-        "vllm_ascend.observability.ms_metrics.handlers.schedule_execute",
-    ):
+        _HANDLER_PACKAGE,
+    ]
+    module_names.extend(f"{_HANDLER_PACKAGE}.{path.stem}" for path in sorted((_PACKAGE_ROOT / "handlers").glob("*.py")))
+    for module_name in module_names:
         monkeypatch.delitem(sys.modules, module_name, raising=False)
 
     handler_module = __import__(_HANDLER_PACKAGE, fromlist=["__unused__"])
@@ -305,6 +303,218 @@ def test_symbol_hook_handlers_honor_level_and_labels(monkeypatch):
     assert lifecycle.sleep_handler(lambda worker, level: "slept", object(), 2) == "slept"
     assert metrics.record_metric.call_args.kwargs["labels"] == {"level": "2"}
     assert metrics.record_metric.call_args.args[0] == "lifecycle:sleep:duration_ms"
+
+
+def test_kv_transfer_finished_handler_counts_finished_recving(monkeypatch):
+    metric_type = type("MetricType", (), {"GAUGE": "gauge", "HISTOGRAM": "histogram", "COUNTER": "counter"})
+    metrics = Mock()
+    _install_provider_api(
+        monkeypatch,
+        MetricType=metric_type,
+        get_metric_recorder=lambda: metrics,
+    )
+    handlers = _load_feature_handlers(monkeypatch, "test_kv_transfer_finished_results", "kv_transfer")
+    connector = type("MooncakeConnector", (), {})()
+    results = type("TransferResults", (), {"finished_recving": {"a", "b", "c"}, "failed_recving": set()})()
+
+    assert handlers.kv_transfer_finished_handler(lambda current: results, connector) is results
+    metrics.record_metric.assert_called_once_with(
+        "kv:xfer_finished_total",
+        value=3.0,
+        labels={"connector": "mooncake"},
+    )
+
+    metrics.reset_mock()
+    empty = type("TransferResults", (), {"finished_recving": set(), "failed_recving": set()})()
+    handlers.kv_transfer_finished_handler(lambda current: empty, connector)
+    metrics.record_metric.assert_not_called()
+
+
+def test_kv_transfer_outcome_handler_counts_each_request_once(monkeypatch):
+    metric_type = type("MetricType", (), {"GAUGE": "gauge", "HISTOGRAM": "histogram", "COUNTER": "counter"})
+    metrics = Mock()
+    _install_provider_api(
+        monkeypatch,
+        MetricType=metric_type,
+        get_metric_recorder=lambda: metrics,
+    )
+    handlers = _load_feature_handlers(monkeypatch, "test_kv_transfer_outcome_once", "kv_transfer")
+    scheduler = type("MooncakePullConnectorScheduler", (), {})()
+    output = type("KVConnectorOutput", (), {"finished_recving": {"a", "b"}, "failed_recving": set()})()
+
+    assert handlers.kv_transfer_outcome_handler(lambda current, out: "ok", scheduler, output) == "ok"
+    metrics.record_metric.assert_called_once_with(
+        "kv:xfer_finished_total",
+        value=2.0,
+        labels={"connector": "mooncake"},
+    )
+
+
+def test_kv_transfer_outcome_handler_separates_failed_receives(monkeypatch):
+    metric_type = type("MetricType", (), {"GAUGE": "gauge", "HISTOGRAM": "histogram", "COUNTER": "counter"})
+    metrics = Mock()
+    _install_provider_api(
+        monkeypatch,
+        MetricType=metric_type,
+        get_metric_recorder=lambda: metrics,
+    )
+    handlers = _load_feature_handlers(monkeypatch, "test_kv_transfer_outcome_failed", "kv_transfer")
+    scheduler = type("MooncakePushConnectorScheduler", (), {})()
+    output = type(
+        "KVConnectorOutput",
+        (),
+        {"finished_recving": {"a", "b"}, "failed_recving": {"b"}},
+    )()
+
+    handlers.kv_transfer_outcome_handler(lambda current, out: None, scheduler, output)
+    recorded = {call.args[0]: call.kwargs["value"] for call in metrics.record_metric.call_args_list}
+    assert recorded == {"kv:xfer_finished_total": 2.0, "kv:xfer_failed_total": 1.0}
+
+    metrics.reset_mock()
+    empty = type("KVConnectorOutput", (), {"finished_recving": set(), "failed_recving": set()})()
+    handlers.kv_transfer_outcome_handler(lambda current, out: None, scheduler, empty)
+    metrics.record_metric.assert_not_called()
+
+
+def test_kv_transfer_invalid_blocks_handler_counts_blocks(monkeypatch):
+    metric_type = type("MetricType", (), {"GAUGE": "gauge", "HISTOGRAM": "histogram", "COUNTER": "counter"})
+    metrics = Mock()
+    _install_provider_api(
+        monkeypatch,
+        MetricType=metric_type,
+        get_metric_recorder=lambda: metrics,
+    )
+    handlers = _load_feature_handlers(monkeypatch, "test_kv_transfer_invalid_blocks", "kv_transfer")
+    connector = type("UCMConnectorV1", (), {})()
+
+    assert handlers.kv_transfer_invalid_blocks_handler(lambda current: {7, 8}, connector) == {7, 8}
+    metrics.record_metric.assert_called_once_with(
+        "kv:invalid_blocks_total",
+        value=2.0,
+        labels={"connector": "ucm"},
+    )
+
+    metrics.reset_mock()
+    handlers.kv_transfer_invalid_blocks_handler(lambda current: set(), connector)
+    metrics.record_metric.assert_not_called()
+
+
+def test_kv_transfer_remote_waiting_handler_reports_pending_before_drain(monkeypatch):
+    metric_type = type("MetricType", (), {"GAUGE": "gauge", "HISTOGRAM": "histogram", "COUNTER": "counter"})
+    metrics = Mock()
+    _install_provider_api(
+        monkeypatch,
+        MetricType=metric_type,
+        get_metric_recorder=lambda: metrics,
+    )
+    handlers = _load_feature_handlers(monkeypatch, "test_kv_transfer_remote_waiting", "kv_transfer")
+    scheduler = type("MooncakePullConnectorScheduler", (), {"_reqs_need_recv": {"a", "b"}})()
+
+    def build_connector_meta(current):
+        # build_connector_meta drains the pending collection before returning.
+        current._reqs_need_recv.clear()
+        return "meta"
+
+    assert handlers.kv_transfer_remote_waiting_handler(build_connector_meta, scheduler) == "meta"
+    metrics.record_metric.assert_called_once_with(
+        "kv:remote_kv_waiting_requests",
+        value=2.0,
+        labels={"connector": "mooncake"},
+    )
+
+    metrics.reset_mock()
+    scheduler._reqs_need_recv = set()
+    handlers.kv_transfer_remote_waiting_handler(lambda current: "meta", scheduler)
+    metrics.record_metric.assert_called_once_with(
+        "kv:remote_kv_waiting_requests",
+        value=0.0,
+        labels={"connector": "mooncake"},
+    )
+
+
+def test_kv_transfer_remote_waiting_handler_keeps_inflight_across_steps(monkeypatch):
+    metric_type = type("MetricType", (), {"GAUGE": "gauge", "HISTOGRAM": "histogram", "COUNTER": "counter"})
+    metrics = Mock()
+    _install_provider_api(
+        monkeypatch,
+        MetricType=metric_type,
+        get_metric_recorder=lambda: metrics,
+    )
+    handlers = _load_feature_handlers(monkeypatch, "test_kv_transfer_remote_waiting_inflight", "kv_transfer")
+    scheduler = type(
+        "MooncakePullConnectorScheduler",
+        (),
+        {
+            "_reqs_need_recv": {"req"},
+            "_reqs_recv_info": {"req": ("host", 1, "remote-req")},
+        },
+    )()
+
+    def build_connector_meta(current):
+        # Dispatch drains the pending queue while the READ is still in flight.
+        current._reqs_need_recv.clear()
+        return "meta"
+
+    assert handlers.kv_transfer_remote_waiting_handler(build_connector_meta, scheduler) == "meta"
+    metrics.record_metric.assert_called_once_with(
+        "kv:remote_kv_waiting_requests",
+        value=1.0,
+        labels={"connector": "mooncake"},
+    )
+
+    # Next step: nothing is queued, but the transfer has not completed yet, so
+    # the in-flight registration keeps the gauge above zero.
+    metrics.reset_mock()
+    handlers.kv_transfer_remote_waiting_handler(lambda current: "meta", scheduler)
+    metrics.record_metric.assert_called_once_with(
+        "kv:remote_kv_waiting_requests",
+        value=1.0,
+        labels={"connector": "mooncake"},
+    )
+
+    # Completion drops the in-flight registration and the gauge returns to zero.
+    metrics.reset_mock()
+    scheduler._reqs_recv_info.clear()
+    handlers.kv_transfer_remote_waiting_handler(lambda current: "meta", scheduler)
+    metrics.record_metric.assert_called_once_with(
+        "kv:remote_kv_waiting_requests",
+        value=0.0,
+        labels={"connector": "mooncake"},
+    )
+
+
+def test_kv_transfer_remote_waiting_handler_falls_back_to_async_loading(monkeypatch):
+    metric_type = type("MetricType", (), {"GAUGE": "gauge", "HISTOGRAM": "histogram", "COUNTER": "counter"})
+    metrics = Mock()
+    _install_provider_api(
+        monkeypatch,
+        MetricType=metric_type,
+        get_metric_recorder=lambda: metrics,
+    )
+    handlers = _load_feature_handlers(monkeypatch, "test_kv_transfer_remote_waiting_fallback", "kv_transfer")
+    scheduler = type("BaseKVPoolScheduler", (), {"_async_loading_req_ids": {"req"}})()
+
+    assert handlers.kv_transfer_remote_waiting_handler(lambda current: "meta", scheduler) == "meta"
+    metrics.record_metric.assert_called_once_with(
+        "kv:remote_kv_waiting_requests",
+        value=1.0,
+        labels={"connector": "ascend_store"},
+    )
+
+
+def test_kv_transfer_remote_waiting_handler_skips_missing_collections(monkeypatch):
+    metric_type = type("MetricType", (), {"GAUGE": "gauge", "HISTOGRAM": "histogram", "COUNTER": "counter"})
+    metrics = Mock()
+    _install_provider_api(
+        monkeypatch,
+        MetricType=metric_type,
+        get_metric_recorder=lambda: metrics,
+    )
+    handlers = _load_feature_handlers(monkeypatch, "test_kv_transfer_remote_waiting_missing", "kv_transfer")
+    scheduler = type("MooncakeConnectorScheduler", (), {})()
+
+    assert handlers.kv_transfer_remote_waiting_handler(lambda current: "meta", scheduler) == "meta"
+    metrics.record_metric.assert_not_called()
 
 
 def test_custom_handlers_are_not_factory_created_from_yaml_metrics():

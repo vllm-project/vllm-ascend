@@ -1,0 +1,58 @@
+# PD disaggregation (KV transfer). Receive outcomes per request, blocks that
+# failed to load back into the engine, and the per-step requests still waiting
+# for remote KV. Each symbol is only hooked once; facade and worker methods
+# that forward to each other are not both listed to avoid double count.
+
+# Request outcomes on the Decode scheduler, where worker outputs are already
+# aggregated across TP ranks: one remote receive is counted once, not once per
+# rank. finished_recving carries every terminal receive, failures included.
+- symbol: vllm_ascend.distributed.kv_transfer.kv_p2p.mooncake.pull_scheduler:MooncakePullConnectorScheduler.update_connector_output
+  handler: vllm_ascend.observability.ms_metrics.handlers:kv_transfer_outcome_handler
+
+- symbol: vllm_ascend.distributed.kv_transfer.kv_p2p.mooncake.push_scheduler:MooncakePushConnectorScheduler.update_connector_output
+  handler: vllm_ascend.observability.ms_metrics.handlers:kv_transfer_outcome_handler
+
+# Connectors that only expose worker-side results stay on the per-rank hook and
+# therefore count once per TP rank.
+- symbol: vllm_ascend.distributed.kv_transfer.kv_p2p.mooncake_connector:MooncakeConnector.get_transfer_results
+  handler: vllm_ascend.observability.ms_metrics.handlers:kv_transfer_finished_handler
+
+- symbol: vllm_ascend.distributed.kv_transfer.kv_pool.ascend_store.ascend_store_connector:AscendStoreConnector.get_transfer_results
+  handler: vllm_ascend.observability.ms_metrics.handlers:kv_transfer_finished_handler
+
+# Blocks that failed to load. AscendStore is excluded: kvpool:load_error_blocks_total
+# already covers it and both series would grow together.
+- symbol: vllm_ascend.distributed.kv_transfer.kv_p2p.mooncake.connector:MooncakeBaseConnector.get_block_ids_with_load_errors
+  handler: vllm_ascend.observability.ms_metrics.handlers:kv_transfer_invalid_blocks_handler
+
+- symbol: vllm_ascend.distributed.kv_transfer.kv_p2p.mooncake_connector:MooncakeConnector.get_block_ids_with_load_errors
+  handler: vllm_ascend.observability.ms_metrics.handlers:kv_transfer_invalid_blocks_handler
+
+- symbol: vllm_ascend.distributed.kv_transfer.kv_p2p.mooncake_layerwise_connector:MooncakeLayerwiseConnector.get_block_ids_with_load_errors
+  handler: vllm_ascend.observability.ms_metrics.handlers:kv_transfer_invalid_blocks_handler
+
+- symbol: vllm_ascend.distributed.kv_transfer.kv_pool.ucm_connector.connector:UCMConnectorV1.get_block_ids_with_load_errors
+  handler: vllm_ascend.observability.ms_metrics.handlers:kv_transfer_invalid_blocks_handler
+
+- symbol: vllm_ascend.distributed.kv_transfer.kv_p2p.sfa_pd_rd2h.worker:SFAPDRD2HConsumerWorker.get_block_ids_with_load_errors
+  handler: vllm_ascend.observability.ms_metrics.handlers:kv_transfer_invalid_blocks_handler
+
+# Requests still waiting for remote KV, sampled before build_connector_meta
+# drains the pending collection.
+- symbol: vllm_ascend.distributed.kv_transfer.kv_p2p.mooncake.pull_scheduler:MooncakePullConnectorScheduler.build_connector_meta
+  handler: vllm_ascend.observability.ms_metrics.handlers:kv_transfer_remote_waiting_handler
+
+- symbol: vllm_ascend.distributed.kv_transfer.kv_p2p.mooncake_connector:MooncakeConnectorScheduler.build_connector_meta
+  handler: vllm_ascend.observability.ms_metrics.handlers:kv_transfer_remote_waiting_handler
+
+- symbol: vllm_ascend.distributed.kv_transfer.kv_p2p.mooncake_layerwise_connector:MooncakeLayerwiseConnectorScheduler.build_connector_meta
+  handler: vllm_ascend.observability.ms_metrics.handlers:kv_transfer_remote_waiting_handler
+
+- symbol: vllm_ascend.distributed.kv_transfer.kv_p2p.mooncake_hybrid_connector:MooncakeConnectorScheduler.build_connector_meta
+  handler: vllm_ascend.observability.ms_metrics.handlers:kv_transfer_remote_waiting_handler
+
+- symbol: vllm_ascend.distributed.kv_transfer.kv_p2p.sfa_pd_rd2h.scheduler:SFAPDRD2HScheduler.build_connector_meta
+  handler: vllm_ascend.observability.ms_metrics.handlers:kv_transfer_remote_waiting_handler
+
+- symbol: vllm_ascend.distributed.kv_transfer.kv_pool.ascend_store.pool_scheduler:BaseKVPoolScheduler.build_connector_meta
+  handler: vllm_ascend.observability.ms_metrics.handlers:kv_transfer_remote_waiting_handler
