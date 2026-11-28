@@ -158,6 +158,16 @@ class ModelAclGraphManager(AscendGraphManagerMixin, ModelCudaGraphManager):
             if metadata is not None:
                 metadata.finish_replay()
 
+    def run_pw_graph(self, model: nn.Module, model_inputs: dict[str, Any]) -> Any:
+        """Bring the piecewise replay path into the ``vllm_ascend`` namespace.
+
+        Without this override the symbol resolves to the upstream
+        ``vllm.*`` definition, which the ms_service_metric provider cannot
+        hook (owned_symbol_prefixes only covers ``vllm_ascend.``). Pure
+        passthrough: behavior is unchanged.
+        """
+        return super().run_pw_graph(model, model_inputs)
+
     def _graph_relay(self, attn_backend, desc, num_tokens, attn_metadata):
         self.update_stream.wait_stream(torch.npu.current_stream())
         ret = super().run_fullgraph(desc)
