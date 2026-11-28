@@ -41,17 +41,13 @@
 curated_tests:
   kvpp:
     - tests/e2e/pull_request/two_card/test_kvpp.py
-  # A5 (Ascend 950) curated test suite
+  # A5 (Ascend 950) curated test suite. It is defined by its own directory so
+  # that adding an A5 test needs no edit to this file: drop the file under
+  # ``tests/e2e/pull_request/a5/`` and it joins this suite (and is routed to
+  # the A5 partition) automatically. This keeps A5 additions on the precise
+  # selection path instead of forcing the full suite.
   a5:
-    - tests/e2e/pull_request/one_card/test_expert_offload_a5.py
-    - tests/e2e/pull_request/four_card/test_data_parallel_tp2.py
-    - tests/e2e/pull_request/one_card/test_mla_fp8_decode_layout_a5.py
-    - tests/e2e/pull_request/one_card/test_flash_attn_precision.py
-    - tests/e2e/pull_request/one_card/test_swiglu_mx_quant.py
-    - tests/e2e/pull_request/two_card/ops/test_pcp_quantized_routing.py
-    - tests/e2e/pull_request/one_card/test_hisparse_attention.py
-    - tests/e2e/pull_request/one_card/test_hisparse_integration.py
-    - tests/e2e/pull_request/one_card/test_hisparse_prefill_staging.py
+    - tests/e2e/pull_request/a5
 
 # === Skipped Tests ===
 # Removed from any selection after directory scanning, so they are never
@@ -116,7 +112,10 @@ accuracy_tests:
 # for files whose name contains ``_310p``.
 # Patterns are evaluated longest first (most specific wins).
 runner_mapping:
-  tests/e2e/pull_request/one_card/test_expert_offload_a5\.py$:
+  # A5 (Ascend 950) tests live in their own directory; every test under it is
+  # routed to the A5 partition by path, so adding one needs no per-file rule
+  # here. This is the A5 "default matching rule".
+  tests/e2e/pull_request/a5:
     default: a5-4
   # Sparse KV offload native ops require A3, even for the TP=1 runner test.
   tests/e2e/pull_request/one_card/test_sparse_kv_offload_lifecycle\.py$:
@@ -127,12 +126,6 @@ runner_mapping:
   # Run the TP=1 KV pool test on the smallest available A3 runner.
   tests/e2e/pull_request/one_card/test_kv_pool_accuracy\.py$:
     default: a3-2
-  tests/e2e/pull_request/one_card/test_flash_attn_precision\.py$:
-    default: a5-4
-  tests/e2e/pull_request/one_card/test_swiglu_mx_quant\.py$:
-    default: a5-4
-  tests/e2e/pull_request/one_card/test_hisparse_(attention|integration|prefill_staging)\.py$:
-    default: a5-4
   tests/e2e/pull_request/one_card:
     default: a2-1
     310p: 310p-1
