@@ -237,7 +237,7 @@ Use a matching `LiLiCorrDraftModel` checkpoint and set `K` at or below the
 trained block size minus one. Both plain and convolutional checkpoints support
 greedy and probabilistic drafting with standard TP.
 
-Set `"enforce_eager":true` inside `speculative_config` for the draft.
+On Ascend, LiLiCorr requires eager drafting.
 Fine-grained embedding or LM-head TP and PCP vocabulary sharding are
 unsupported. Quantized draft weights require an Ascend-supported format.
 
