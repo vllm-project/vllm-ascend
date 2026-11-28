@@ -1,7 +1,0 @@
-pr: 23642
-entries:
-  - category: performance
-    text: >-
-      MegaMoe shared-expert fusion (`enable_fused_mc2=3`) on Ascend A3 now
-      reuses replicated W8A8 shared expert weights already stored in FRACTAL_NZ
-      format, leaving more device memory available for the KV cache.

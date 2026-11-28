@@ -18,7 +18,6 @@ from vllm_ascend.ops.fused_moe.shared_experts import AscendSharedExperts
 from vllm_ascend.ops.fused_moe.token_dispatcher import TokenDispatcherWithMC2
 from vllm_ascend.quantization.methods.w4a8 import w4a8
 from vllm_ascend.quantization.quant_type import QuantType
-from vllm_ascend.utils import ACL_FORMAT_FRACTAL_ND, ACL_FORMAT_FRACTAL_NZ
 
 _MODULE = shared_experts_module.__name__
 
@@ -165,49 +164,6 @@ def test_collect_int8_payload_matches_routed_scale_dtype() -> None:
     assert scale.dtype is torch.int64
     assert int(scale[0]) == 1006632960
     assert tuple(runner._megamoe_shared_parts["w1"].shape) == (4096, 4096)
-
-
-@pytest.mark.parametrize(
-    "weight_format,offset,strided,expect_alias",
-    [
-        pytest.param(ACL_FORMAT_FRACTAL_NZ, 0, False, True, id="FRACTAL_NZ"),
-        pytest.param(ACL_FORMAT_FRACTAL_ND, 0, False, False, id="plain-storage"),
-        pytest.param(ACL_FORMAT_FRACTAL_NZ, 1, False, False, id="NZ-offset-view"),
-        pytest.param(ACL_FORMAT_FRACTAL_NZ, 0, True, False, id="NZ-strided-view"),
-    ],
-)
-def test_collect_int8_shared_weight_storage(weight_format, offset, strided, expect_alias):
-    runner = _make_runner(QuantType.W4A8)
-    runner.moe_config = SimpleNamespace(hidden_dim=8, intermediate_size_per_partition=2)
-    parameters = {}
-    with (
-        patch.object(torch.Tensor, "device", torch.device("npu")),
-        patch.object(shared_experts_module.torch_npu, "get_npu_format", return_value=weight_format, create=True),
-        patch.object(
-            shared_experts_module.torch_npu, "npu_format_cast", side_effect=lambda weight, fmt: weight.clone()
-        ) as cast,
-    ):
-        for slot, (rows, cols) in (("w1", (8, 4)), ("w2", (2, 8))):
-            weight = torch.arange(rows * cols + offset, dtype=torch.int8)[offset:].reshape(rows, cols)
-            if strided:
-                weight = weight.t().contiguous().t()
-            parameters[slot] = torch.nn.Parameter(weight, requires_grad=False)
-            linear = SimpleNamespace(
-                weight=parameters[slot],
-                weight_scale=torch.ones(cols),
-                quant_method=SimpleNamespace(quant_type=QuantType.W8A8),
-            )
-            runner._collect_megamoe_shared_weight(slot, linear)
-            if not expect_alias:
-                assert cast.call_args.args[1] == ACL_FORMAT_FRACTAL_NZ
-
-    payload = runner.megamoe_shared_fusion().weights
-    for slot, parameter in parameters.items():
-        published = getattr(payload, slot)[0]
-        assert (published.data_ptr() == parameter.data_ptr()) == expect_alias
-        assert torch.equal(published, parameter)
-    if expect_alias:
-        cast.assert_not_called()
 
 
 _INTEGER_SHARED_ABI = frozenset(
