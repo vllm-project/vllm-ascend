@@ -1,0 +1,9 @@
+pr: 23504
+entries:
+  - category: bugfix
+    text: >-
+      Rejected Prefill/Decode KV transfer when the two engines run different speculative decoding
+      configs. The handshake metadata now carries a fingerprint of the layout-relevant speculative
+      config (enabled, method, num_speculative_tokens, draft layers), and a mismatch stops the engine
+      with both configs and the matching --speculative-config instead of decoding from KV cache that
+      was never transferred (issue #22659).

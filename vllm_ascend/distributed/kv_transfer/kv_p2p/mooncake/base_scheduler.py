@@ -316,6 +316,7 @@ class MooncakeMetadataThread(threading.Thread):
                 block_size_scales=block_size_scales,
                 metadata_by_pcp_rank=metadata_by_pcp_rank,
                 indexer_replication_sizes=indexer_replication_sizes,
+                spec_config_fingerprint=reference.spec_config_fingerprint,
             )
         return merged
 
