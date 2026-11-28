@@ -1644,6 +1644,36 @@ class TestUpstreamConfigCompatibility(TestBase):
         "vllm_ascend.ascend_config.get_current_hardware_profile",
         return_value=get_hardware_profile(AscendDeviceType.A5),
     )
+    def test_dspark_megamoe_uses_target_parallel_config(self, _mock_profile):
+        target_parallel_config = SimpleNamespace(world_size_across_dp=4, pipeline_parallel_size=2)
+        draft_parallel_config = SimpleNamespace(world_size_across_dp=2, pipeline_parallel_size=2)
+        speculative_config = SimpleNamespace(method="dspark", target_parallel_config=target_parallel_config)
+        vc = SimpleNamespace(
+            model_config=SimpleNamespace(
+                architectures=["DeepSeekV4ForCausalLM"],
+                hf_text_config=SimpleNamespace(hidden_size=4096, moe_intermediate_size=2048, num_experts_per_tok=8),
+                get_num_experts=lambda: 128,
+            ),
+            parallel_config=draft_parallel_config,
+            speculative_config=speculative_config,
+        )
+
+        # DSpark's draft query view computes EP=1, while its routed experts
+        # retain the target model's physical EP=2 topology.
+        self.assertTrue(AscendConfig._is_megamoe_supported_by_config(vc))
+
+        speculative_config.target_parallel_config = None
+        self.assertFalse(AscendConfig._is_megamoe_supported_by_config(vc))
+
+        # An independent draft model must retain its own EP topology.
+        speculative_config.method = "eagle3"
+        speculative_config.target_parallel_config = target_parallel_config
+        self.assertFalse(AscendConfig._is_megamoe_supported_by_config(vc))
+
+    @patch(
+        "vllm_ascend.ascend_config.get_current_hardware_profile",
+        return_value=get_hardware_profile(AscendDeviceType.A5),
+    )
     def test_a5_megamoe_k3_uses_routed_dimensions_and_top_k(self, _mock_profile):
         text_config = SimpleNamespace(
             hidden_size=7168,

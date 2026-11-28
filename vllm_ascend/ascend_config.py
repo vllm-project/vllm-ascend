@@ -1245,9 +1245,15 @@ class AscendConfig:
         # num_experts must divide evenly across the EP group (required by both
         # the A3 and A5 operators; MegaMoe assumes an equal per-rank expert
         # count for its symmetric-memory dispatch layout).
-        ep_world_size = (
-            vllm_config.parallel_config.world_size_across_dp // vllm_config.parallel_config.pipeline_parallel_size
-        )
+        parallel_config = vllm_config.parallel_config
+        speculative_config = getattr(vllm_config, "speculative_config", None)
+        target_parallel_config = getattr(speculative_config, "target_parallel_config", None)
+        # DSpark only reconstructs the draft attention query view as PCP=1;
+        # its routed experts retain the target model's physical EP topology.
+        # Other speculative methods may use an independent MoE draft topology.
+        if getattr(speculative_config, "method", None) == "dspark" and target_parallel_config is not None:
+            parallel_config = target_parallel_config
+        ep_world_size = parallel_config.world_size_across_dp // parallel_config.pipeline_parallel_size
         if ep_world_size < 2:
             return False
         if int(vllm_config.model_config.get_num_experts()) % ep_world_size != 0:
