@@ -148,6 +148,43 @@ variants:
           TASK_QUEUE_ENABLE: '1'
     tp:
       ascend_910c: 2
+  ascend_w8a8_tutorial:
+    model_id: Eco-Tech/Qwen3.6-27B-w8a8
+    precision: int8
+    label: W8A8 (Ascend tutorial)
+    vram_minimum_gb: 33
+    supported_hardware:
+      - ascend_910b
+      - ascend_910c
+    tp:
+      ascend_910b: 2
+      ascend_910c: 2
+    extra_args:
+      - '--quantization'
+      - ascend
+    supported_features:
+      - tool_calling
+      - reasoning
+      - text_only
+      - encoder_parallel
+      - long_context
+    extra_env:
+      VLLM_USE_MODELSCOPE: 'True'
+      HCCL_BUFFSIZE: '512'
+      PYTORCH_NPU_ALLOC_CONF: 'expandable_segments:True'
+    hardware_overrides:
+      ascend_910b:
+        docker_image: quay.io/ascend/vllm-ascend:v0.32.0rc1
+        docker_shm_size: '1g'
+        docker_serve_command: vllm serve
+        install:
+          pip: false
+      ascend_910c:
+        docker_image: quay.io/ascend/vllm-ascend:v0.32.0rc1-a3
+        docker_shm_size: '1g'
+        docker_serve_command: vllm serve
+        install:
+          pip: false
 meta:
   hardware:
     ascend_950dt: verified
@@ -190,8 +227,117 @@ presets:
       href: https://modelers.cn/models/vLLM_Ascend/Qwen3.6-27B
     select:
       frontend: python
+  ascend_a2_w8a8_tutorial:
+    label: A2 tutorial, W8A8 TP2
+    hardware: ascend_910b
+    strategy: single_node_tp
+    variants:
+      - ascend_w8a8_tutorial
+    source:
+      label: vLLM Ascend Qwen3.6-27B tutorial, section 5.1
+      href: https://github.com/vllm-project/vllm-ascend/blob/a3b7e23f68f9618f618979395ca3fa3f2ae8e813/docs/source/tutorials/models/Qwen3.5-27B-Qwen3.6-27B.md#L223-L256
+      revision: a3b7e23f68f9618f618979395ca3fa3f2ae8e813
+    tp: 2
+    select:
+      frontend: python
+      features:
+        tool_calling: false
+        reasoning: true
+        encoder_parallel: true
+        long_context: false
+    args:
+      - '--host'
+      - '0.0.0.0'
+      - '--port'
+      - '8000'
+      - '--data-parallel-size'
+      - '1'
+      - '--served-model-name'
+      - 'qwen3.6'
+      - '--max-num-seqs'
+      - '32'
+      - '--max-model-len'
+      - '133120'
+      - '--max-num-batched-tokens'
+      - '16384'
+      - '--trust-remote-code'
+      - '--allowed-local-media-path'
+      - '/'
+      - '--dtype'
+      - 'bfloat16'
+      - '--mm-processor-cache-gb'
+      - '0'
+      - '--mm-processor-cache-type'
+      - 'shm'
+      - '--gpu-memory-utilization'
+      - '0.85'
+      - '--speculative-config'
+      - '{"method": "qwen3_5_mtp", "num_speculative_tokens": 3}'
+      - '--compilation-config'
+      - '{"cudagraph_capture_sizes": [1,4,8,12,16,20,24,28,32,36,40,44,48,52,56,60,64,68,72,76,80,84,88,92,96,100,104,108,112,116,120,124,128],"cudagraph_mode":
+        "FULL_DECODE_ONLY"}'
+      - '--additional-config'
+      - '{"enable_cpu_binding":true}'
+  ascend_a3_w8a8_tutorial:
+    label: A3 tutorial, W8A8 TP2
+    hardware: ascend_910c
+    strategy: single_node_tp
+    variants:
+      - ascend_w8a8_tutorial
+    source:
+      label: vLLM Ascend Qwen3.6-27B tutorial, section 5.1
+      href: https://github.com/vllm-project/vllm-ascend/blob/a3b7e23f68f9618f618979395ca3fa3f2ae8e813/docs/source/tutorials/models/Qwen3.5-27B-Qwen3.6-27B.md#L223-L256
+      revision: a3b7e23f68f9618f618979395ca3fa3f2ae8e813
+    tp: 2
+    select:
+      frontend: python
+      features:
+        tool_calling: false
+        reasoning: true
+        encoder_parallel: true
+        long_context: false
+    args:
+      - '--host'
+      - '0.0.0.0'
+      - '--port'
+      - '8000'
+      - '--data-parallel-size'
+      - '1'
+      - '--served-model-name'
+      - 'qwen3.6'
+      - '--max-num-seqs'
+      - '32'
+      - '--max-model-len'
+      - '133120'
+      - '--max-num-batched-tokens'
+      - '16384'
+      - '--trust-remote-code'
+      - '--allowed-local-media-path'
+      - '/'
+      - '--dtype'
+      - 'bfloat16'
+      - '--mm-processor-cache-gb'
+      - '0'
+      - '--mm-processor-cache-type'
+      - 'shm'
+      - '--gpu-memory-utilization'
+      - '0.85'
+      - '--speculative-config'
+      - '{"method": "qwen3_5_mtp", "num_speculative_tokens": 3}'
+      - '--compilation-config'
+      - '{"cudagraph_capture_sizes": [1,4,8,12,16,20,24,28,32,36,40,44,48,52,56,60,64,68,72,76,80,84,88,92,96,100,104,108,112,116,120,124,128],"cudagraph_mode":
+        "FULL_DECODE_ONLY"}'
+      - '--additional-config'
+      - '{"enable_cpu_binding":true}'
+
 guide_sections:
   ascend: |
+    ### Ascend tutorial deployments
+
+    Select a tutorial preset to load the single-service configuration for the chosen hardware.
+    Use the [deployment tutorial](https://docs.vllm.ai/projects/ascend/en/main/tutorials/models/Qwen3.5-27B-Qwen3.6-27B.html) for the Atlas 300I Duo TP4 commands and setup.
+    The combined tutorial has separate Qwen3.5-27B and Qwen3.6-27B examples. Use the Qwen3.6-27B commands for this recipe.
+
     ### Huawei Ascend 910B-w8a8 (vLLM Ascend)
 
     Verified on Atlas 800I A2 (8x Ascend 910B, 64 GB each), TP2+DP1, vLLM Ascend
