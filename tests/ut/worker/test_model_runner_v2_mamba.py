@@ -1553,3 +1553,109 @@ def test_gdn_group_reuse_respects_builder_spec_and_step_hooks():
     # A late hook consumes every layer before the common metadata build returns.
     host.get_metadata_builder(0).prepare_step_metadata = lambda *args: None
     assert mamba_hybrid_module._partition_gdn_groups(groups) == (groups, [])
+
+
+def test_reshape_hybrid_dense_and_step5_summary_characterization(monkeypatch):
+    """Pin current allocate + reshape for matching hybrid dense K/V and Step5 summary caches."""
+    num_blocks = 4
+    full = FullAttentionSpec(block_size=128, num_kv_heads=1, head_size=2, head_size_v=2, dtype=torch.float16)
+    sliding = SlidingWindowSpec(
+        block_size=128, num_kv_heads=1, head_size=1, head_size_v=1, dtype=torch.float16, sliding_window=4096
+    )
+    mamba = MambaSpec(
+        block_size=128,
+        shapes=((32,), (full.real_page_size_bytes // 8,)),
+        dtypes=(torch.bfloat16, torch.float32),
+        page_size_padded=full.real_page_size_bytes,
+    )
+    specs = {
+        "target.full": full,
+        "draft.sliding": replace(sliding, block_size=256),
+        "target.gdn": mamba,
+    }
+    config = SimpleNamespace(
+        parallel_config=SimpleNamespace(decode_context_parallel_size=1, prefill_context_parallel_size=1),
+        attention_config=AttentionConfig(indexer_kv_dtype="int8"),
+        cache_config=SimpleNamespace(cache_dtype="auto"),
+        model_config=SimpleNamespace(
+            dtype=torch.float16, hf_config=SimpleNamespace(), hf_text_config=SimpleNamespace()
+        ),
+        kv_transfer_config=None,
+        additional_config={},
+    )
+    backend = SimpleNamespace(get_kv_cache_shape=lambda n, b, h, d, _dtype: (2, n, b, h, d))
+    layers = {name: SimpleNamespace(get_attn_backend=lambda: _FakeAttentionBackend) for name in specs}
+    monkeypatch.setattr(attn_utils, "get_layers_from_vllm_config", lambda *_args: layers)
+    monkeypatch.setattr(attn_utils, "get_current_vllm_config", lambda: config)
+    monkeypatch.setattr(attn_utils, "enable_sfa", lambda _config: False)
+    monkeypatch.setattr(attn_utils, "enable_fa_quant", lambda _config: False)
+
+    kv_cache_config = KVCacheConfig(
+        num_blocks=num_blocks,
+        kv_cache_tensors=[
+            _make_kv_cache_tensor(
+                num_blocks * spec.page_size_bytes,
+                [name],
+                spec.page_size_bytes,
+                layer_stride=num_blocks * spec.page_size_bytes,
+            )
+            for name, spec in specs.items()
+        ],
+        kv_cache_groups=[KVCacheGroupSpec(layer_names=[name], kv_cache_spec=spec) for name, spec in specs.items()],
+    )
+    groups = [
+        SimpleNamespace(
+            kernel_block_size=None, kv_cache_group_id=i, kv_cache_spec=spec, layer_names=[name], backend=backend
+        )
+        for i, (name, spec) in enumerate(specs.items())
+    ]
+    raw_caches = _allocate_kv_cache(kv_cache_config, {}, torch.device("cpu"))
+    caches = _reshape_kv_cache_v2(groups, raw_caches, "auto", [128] * len(groups), {}, kv_cache_config)
+    k_full, v_full = caches["target.full"]
+    k_sw, v_sw = caches["draft.sliding"]
+    assert k_full.shape == (4, 128, 1, 2)
+    assert v_full.shape == (4, 128, 1, 2)
+    assert k_sw.shape == (8, 128, 1, 1)
+    assert v_sw.shape == (8, 128, 1, 1)
+
+    # Step5 summary auxiliary cache takes its own tensor-view path without K/V split validation.
+    summary = FullAttentionSpec(block_size=128, num_kv_heads=1, head_size=16, dtype=torch.float8_e4m3fn)
+    step_config = SimpleNamespace(
+        parallel_config=SimpleNamespace(decode_context_parallel_size=1, prefill_context_parallel_size=1),
+        attention_config=AttentionConfig(indexer_kv_dtype="int8"),
+        cache_config=SimpleNamespace(cache_dtype="auto"),
+        model_config=SimpleNamespace(
+            dtype=torch.bfloat16, hf_config=SimpleNamespace(), hf_text_config=SimpleNamespace(model_type="step5")
+        ),
+        kv_transfer_config=None,
+        additional_config={},
+    )
+    monkeypatch.setattr(attn_utils, "get_current_vllm_config", lambda: step_config)
+    step_specs = {"model.layers.0.self_attn": full, "model.layers.0.self_attn.sparse_summary_cache": summary}
+    step_cfg = KVCacheConfig(
+        num_blocks=num_blocks,
+        kv_cache_tensors=[
+            _make_kv_cache_tensor(
+                num_blocks * full.page_size_bytes,
+                ["model.layers.0.self_attn"],
+                full.page_size_bytes,
+                layer_stride=num_blocks * full.page_size_bytes,
+            ),
+            _make_kv_cache_tensor(
+                num_blocks * summary.page_size_bytes,
+                ["model.layers.0.self_attn.sparse_summary_cache"],
+                summary.page_size_bytes,
+                layer_stride=num_blocks * summary.page_size_bytes,
+            ),
+        ],
+        kv_cache_groups=[KVCacheGroupSpec(layer_names=[name], kv_cache_spec=spec) for name, spec in step_specs.items()],
+    )
+    step_groups = [
+        SimpleNamespace(
+            kernel_block_size=None, kv_cache_group_id=i, kv_cache_spec=spec, layer_names=[name], backend=backend
+        )
+        for i, (name, spec) in enumerate(step_specs.items())
+    ]
+    step_raw = _allocate_kv_cache(step_cfg, {}, torch.device("cpu"))
+    step_caches = _reshape_kv_cache_v2(step_groups, step_raw, "auto", [128, 128], {}, step_cfg)
+    assert isinstance(step_caches["model.layers.0.self_attn.sparse_summary_cache"], torch.Tensor)
