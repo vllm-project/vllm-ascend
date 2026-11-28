@@ -5,9 +5,11 @@ import argparse
 import json
 import os
 import subprocess
+import sys
 from pathlib import Path
 
 DEVICE_TIMEOUT_SECONDS = 60
+TRANSPORT_TIMEOUT_SECONDS = 120
 ENV_KEYS = (
     "ASCEND_VISIBLE_DEVICES",
     "ASCEND_RT_VISIBLE_DEVICES",
@@ -16,6 +18,11 @@ ENV_KEYS = (
     "LD_LIBRARY_PATH",
     "ASCEND_GLOBAL_RESOURCE_CONFIG",
     "ASCEND_LOCAL_COMM_RES",
+    "VLLM_HOST_IP",
+    "HCCL_IF_IP",
+    "HCCL_SOCKET_IFNAME",
+    "GLOO_SOCKET_IFNAME",
+    "TP_SOCKET_IFNAME",
 )
 REQUIRED_APIS = {
     "aclInit",
@@ -31,7 +38,7 @@ REQUIRED_APIS = {
 }
 
 
-def validate_reports(reports):
+def validate_reports(reports, required_apis=REQUIRED_APIS):
     """Return all errors, including incomplete/crashed probes; never infer IDs."""
     errors = []
     physical_ids = []
@@ -50,7 +57,7 @@ def validate_reports(reports):
             if probe["returncode"] != 0 or probe.get("timeout"):
                 errors.append(f"{label}: child failed or timed out")
             calls = [e for e in probe["events"] if e.get("event") == "return"]
-            if len(calls) != len(REQUIRED_APIS) or {e["api"] for e in calls} != REQUIRED_APIS:
+            if len(calls) != len(required_apis) or {e["api"] for e in calls} != required_apis:
                 errors.append(f"{label}: missing SDK results")
             for call in calls:
                 if call["rc"] != 0:
@@ -78,11 +85,51 @@ def validate_reports(reports):
     return errors
 
 
+def validate_transport_reports(reports):
+    """Require all same-process snapshots and exactly one successful init."""
+    errors = []
+    snapshot_apis = REQUIRED_APIS - {"aclInit", "aclrtSetDevice", "aclrtResetDevice", "aclFinalize"}
+    stages = ("after_torch", "after_import", "after_initialize")
+    for report in reports:
+        for probe in report["probes"]:
+            events = probe["events"]
+            transport = [e for e in events if e.get("event") == "transport"]
+            starts = [e for e in transport if e["stage"] == "initialize_start"]
+            returns = [e for e in transport if e["stage"] == "initialize_return"]
+            if len(starts) != 1 or len(returns) != 1 or returns[0].get("rc") != 0:
+                errors.append(f"{report['role']} user={probe['user']}: initialization missing or failed")
+            if sum(e["stage"] == "complete" for e in transport) != 1:
+                errors.append(f"{report['role']} user={probe['user']}: did not complete")
+            mappings = [e for e in events if e.get("event") == "mapping"]
+            if len(mappings) != len(stages) or any(m != mappings[0] for m in mappings):
+                errors.append(f"{report['role']} user={probe['user']}: mapping changed or snapshot missing")
+    for stage in stages:
+        snapshots = []
+        for report in reports:
+            probes = []
+            for probe in report["probes"]:
+                events = []
+                active = False
+                for item in probe["events"]:
+                    if item.get("event") == "transport":
+                        if item["stage"] == stage + "_start":
+                            active = True
+                        elif item["stage"] == stage + "_return":
+                            active = False
+                    elif active:
+                        events.append(item)
+                probes.append({**probe, "events": events})
+            snapshots.append({**report, "probes": probes})
+        errors.extend(f"{stage}: {error}" for error in validate_reports(snapshots, snapshot_apis))
+    return errors
+
+
 def main():
     parser = argparse.ArgumentParser(description=__doc__)
     parser.add_argument("--binary", required=True)
     parser.add_argument("--role", required=True, choices=("P", "D"))
     parser.add_argument("--output", required=True)
+    parser.add_argument("--transport-library")
     args = parser.parse_args()
     report = {"role": args.role, "pid": os.getpid(), "env": {k: os.environ.get(k) for k in ENV_KEYS}, "probes": []}
     output = Path(args.output)
@@ -91,10 +138,22 @@ def main():
     for user in (0, 1):
         events: list[dict[str, object]] = []
         probe = {"user": user, "events": events, "returncode": None, "timeout": False}
-        with subprocess.Popen([args.binary, str(user)], stdout=subprocess.PIPE, stderr=subprocess.PIPE) as child:
+        command = [args.binary, str(user)]
+        timeout = DEVICE_TIMEOUT_SECONDS
+        if args.transport_library:
+            command = [
+                sys.executable,
+                str(Path(__file__).with_name("a5_mooncake_init_probe.py")),
+                "--library",
+                args.transport_library,
+                "--user",
+                str(user),
+            ]
+            timeout = TRANSPORT_TIMEOUT_SECONDS
+        with subprocess.Popen(command, stdout=subprocess.PIPE, stderr=subprocess.PIPE) as child:
             probe["pid"] = child.pid
             try:
-                stdout, stderr = child.communicate(timeout=DEVICE_TIMEOUT_SECONDS)
+                stdout, stderr = child.communicate(timeout=timeout)
             except subprocess.TimeoutExpired:
                 child.kill()
                 stdout, stderr = child.communicate()

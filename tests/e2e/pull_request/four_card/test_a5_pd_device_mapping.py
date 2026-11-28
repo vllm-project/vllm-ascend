@@ -1,7 +1,7 @@
 # SPDX-License-Identifier: Apache-2.0
-"""Check SDK mappings under the real PD harness's 2+2 masks, without a model.
+"""Check SDK mappings and Mooncake initialization under real PD 2+2 masks.
 
-This is not a vLLM worker, HIXL connection, or PD serving success test.
+This is not a full vLLM worker, peer transfer, or PD serving success test.
 """
 
 import json
@@ -12,14 +12,15 @@ import sys
 from importlib.metadata import PackageNotFoundError, version
 from pathlib import Path
 
-from tests.e2e.common.a5_device_mapping_probe import ENV_KEYS, validate_reports
+from tests.e2e.common.a5_device_mapping_probe import ENV_KEYS, validate_reports, validate_transport_reports
 from tests.e2e.conftest import RemotePDServer
 
 COMMON = Path(__file__).resolve().parents[2] / "common"
 ROLE_TIMEOUT_SECONDS = 150
+TRANSPORT_ROLE_TIMEOUT_SECONDS = 300
 
 
-def build_probe(output_dir):
+def build_probe(output_dir, shared=False):
     candidates = [
         os.environ.get("ASCEND_HOME_PATH"),
         os.environ.get("ASCEND_TOOLKIT_HOME"),
@@ -30,7 +31,7 @@ def build_probe(output_dir):
     assert sdk is not None, f"Missing SDK headers; checked {candidates}"
     library = sdk / "lib64"
     assert (library / "libascendcl.so").exists(), f"Missing SDK library in {library}"
-    binary = output_dir / "a5-device-mapping"
+    binary = output_dir / ("a5-device-mapping.so" if shared else "a5-device-mapping")
     command = [
         *shlex.split(os.environ.get("CXX", "c++")),
         "-std=c++17",
@@ -41,6 +42,8 @@ def build_probe(output_dir):
         "-o",
         str(binary),
     ]
+    if shared:
+        command.extend(["-shared", "-fPIC"])
     versions = {}
     for name in ("version.cfg", "version.info", "ascend_toolkit_install.info"):
         path = sdk / name
@@ -60,9 +63,10 @@ def build_probe(output_dir):
 class MappingProbeServers(RemotePDServer):
     """Keep the real allocation and Popen environment merge; replace only payload."""
 
-    def __init__(self, binary, output_dir):
+    def __init__(self, binary, output_dir, transport=False):
         self.binary = binary
         self.output_dir = output_dir
+        self.transport = transport
         self.roles = []
         self.reports = []
         try:
@@ -96,6 +100,8 @@ class MappingProbeServers(RemotePDServer):
             "--output",
             str(self.output_dir / f"{role}.json"),
         ]
+        if self.transport:
+            command.extend(["--transport-library", str(self.binary)])
         return super()._start_server_with_prefix(command, env_dict, log_prefix)
 
     def _wait_for_multiple_servers(self, *args, **kwargs):
@@ -103,7 +109,8 @@ class MappingProbeServers(RemotePDServer):
         failures = []
         for role, proc in zip(self.roles, self._proc_list):
             try:
-                code = proc.wait(timeout=ROLE_TIMEOUT_SECONDS)
+                timeout = TRANSPORT_ROLE_TIMEOUT_SECONDS if self.transport else ROLE_TIMEOUT_SECONDS
+                code = proc.wait(timeout=timeout)
                 if code != 0:
                     failures.append(f"{role}: coordinator exit {code}")
             except subprocess.TimeoutExpired:
@@ -135,4 +142,11 @@ def test_a5_pd_device_mapping(tmp_path):
     binary = build_probe(tmp_path)
     servers = MappingProbeServers(binary, tmp_path)
     errors = validate_reports(servers.reports)
+    assert not errors, "\n".join(errors)
+
+
+def test_a5_pd_mooncake_initialize(tmp_path):
+    library = build_probe(tmp_path, shared=True)
+    servers = MappingProbeServers(library, tmp_path, transport=True)
+    errors = validate_transport_reports(servers.reports)
     assert not errors, "\n".join(errors)
