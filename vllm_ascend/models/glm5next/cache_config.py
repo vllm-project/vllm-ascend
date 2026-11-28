@@ -18,7 +18,6 @@ from vllm.utils.torch_utils import get_dtype_size
 # Both supported versions expose planning helpers in kv_cache_planning.
 from vllm.v1.core.kv_cache_planning import (
     create_kv_cache_group_specs,
-    may_override_num_blocks,
 )
 from vllm.v1.kv_cache_interface import (
     KVCacheConfig,
@@ -409,7 +408,7 @@ def get_glm5_next_pool_bytes_per_block(groups: list[KVCacheGroupSpec]) -> int:
 def get_glm5_next_kv_cache_config(
     vllm_config: VllmConfig,
     groups: list[KVCacheGroupSpec],
-    available_memory: int,
+    num_blocks: int,
 ) -> KVCacheConfig:
     """Describe one standard unpacked tensor per physical cache slot."""
 
@@ -417,8 +416,6 @@ def get_glm5_next_kv_cache_config(
     if layout is None:
         raise ValueError("Expected GLM-Next cache groups.")
 
-    bytes_per_block = get_glm5_next_pool_bytes_per_block(groups)
-    num_blocks = may_override_num_blocks(vllm_config, max(available_memory // bytes_per_block, 0))
     tensors: list[KVCacheTensor] = []
 
     def make_tensor(size: int, layer_names: list[str], page_size: int) -> KVCacheTensor:

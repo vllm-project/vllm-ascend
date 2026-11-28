@@ -1,0 +1,12 @@
+pr: 23294
+entries:
+  - category: breaking
+    text: >-
+      Balance scheduling is deprecated as of vLLM Ascend v0.33.0 and is planned
+      for removal in a future release. Enabling
+      `scheduler_config.enable_balance_scheduling` or the legacy top-level
+      `enable_balance_scheduling` key now emits a startup warning while retaining
+      the global admission gate; set
+      `scheduler_config.enable_balance_scheduling=false` (the default) and
+      remove the legacy key to use the normal scheduler path. See RFC #23229
+      for the sunset plan and workload feedback.

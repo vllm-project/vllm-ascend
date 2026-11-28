@@ -811,19 +811,21 @@ def test_public_qwen4_grouping_and_pool_charge_match_physical_backing() -> None:
     )
 
 
-def test_platform_builder_uses_qwen_pool_accounting() -> None:
-    pytest.importorskip("vllm.v1.core.kv_cache_planning")
-    from vllm_ascend.core.kv_cache_config_builder import AscendKVCacheConfigBuilder
-
+@pytest.mark.parametrize("override", [None, 7])
+def test_platform_builder_uses_qwen_pool_accounting(override) -> None:
     groups = _groups()
-    expected = get_qwen4_exp_pool_bytes_per_block(groups)
-    assert expected is not None
-    assert (
-        AscendKVCacheConfigBuilder()._get_pool_bytes_per_block(
-            SimpleNamespace(model_config=SimpleNamespace(hf_config=SimpleNamespace(model_type="qwen4_exp"))), groups
-        )
-        == expected
+    config = SimpleNamespace(
+        model_config=SimpleNamespace(hf_config=SimpleNamespace(model_type="qwen4_exp")),
+        cache_config=SimpleNamespace(num_gpu_blocks_override=override, prefix_cache_retention_interval=None),
     )
+    builder = AscendKVCacheConfigBuilder()
+    pool_bytes = get_qwen4_exp_pool_bytes_per_block(groups)
+    assert pool_bytes is not None
+    assert builder._get_pool_bytes_per_block(config, groups) == pool_bytes
+    result = builder.get_kv_cache_config_from_groups(config, groups, num_blocks=3)
+    expected = get_qwen4_exp_kv_cache_config(config, groups, 3 * pool_bytes)
+    assert result.num_blocks == (override if override is not None else 3)
+    assert result.kv_cache_tensors == expected.kv_cache_tensors
 
 
 def test_layout_sizes_slots_for_pp_aggregated_state_owners() -> None:

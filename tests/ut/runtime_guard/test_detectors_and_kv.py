@@ -270,6 +270,421 @@ def test_slice_blocks_partial_out_of_range_reports_used_ids():
     assert torch.equal(out[0], t[1])
 
 
+def test_multi_group_dump_uses_per_group_block_ids(tmp_path: Path):
+    """Hybrid: group0 and group1 must not share group0's page list."""
+    from vllm_ascend.observability.runtime_guard.dump import KvCacheReader
+
+    g0 = torch.arange(0, 4 * 4, dtype=torch.float32).reshape(4, 4)
+    g1 = torch.arange(100, 100 + 4 * 4, dtype=torch.float32).reshape(4, 4)
+    # Fill distinctive rows: g0 block1 → 4..7; g1 block2 → 108..111
+    requests = {
+        "r1": SimpleNamespace(block_ids=([1], [2])),
+    }
+    groups = [
+        SimpleNamespace(layer_names=["L0"]),
+        SimpleNamespace(layer_names=["L1"]),
+    ]
+    runner = SimpleNamespace(
+        requests=requests,
+        kv_caches={"L0": g0, "L1": g1},
+        kv_cache_config=SimpleNamespace(kv_cache_groups=groups),
+        block_tables=SimpleNamespace(blocks_per_kv_block=[1, 1]),
+        compilation_config=None,
+        input_batch=None,
+        execute_model_state=None,
+        req_states=None,
+    )
+    snaps = KvCacheReader(runner).snapshot_request_blocks(
+        req_id="r1",
+        block_ids=[1],  # arm-time group0 hint
+        out_dir=tmp_path / "kv",
+    )
+    by_layer = {s.payload["layer"]: s.payload for s in snaps}
+    assert set(by_layer) == {"L0", "L1"}
+    assert by_layer["L0"]["block_ids"] == [1]
+    assert by_layer["L1"]["block_ids"] == [2]
+    assert torch.equal(by_layer["L0"]["tensor"][0], g0[1])
+    assert torch.equal(by_layer["L1"]["tensor"][0], g1[2])
+
+
+def test_dump_uses_armed_rows_for_estimate_and_delayed_copy(tmp_path):
+    from vllm_ascend.observability.runtime_guard.action.actions import DumpKvAction
+    from vllm_ascend.observability.runtime_guard.processor import RuntimeGuardProcessor
+
+    pages = torch.arange(8, dtype=torch.float32).view(-1, 1)
+    state = SimpleNamespace(block_ids=([1], [2, 3, 4, 5], []))
+    guard = MagicMock()
+    runner = SimpleNamespace(
+        kv_caches={"A": pages, "B": pages + 100, "C": pages + 200},
+        kv_cache_config=SimpleNamespace(
+            kv_cache_groups=[SimpleNamespace(layer_names=[name]) for name in ("A", "B", "C")]
+        ),
+        block_tables=SimpleNamespace(blocks_per_kv_block=1),
+        requests={"r1": state},
+        runtime_guard=guard,
+    )
+    reader = KvCacheReader(runner)
+    ctx = _dump_ctx(
+        tmp_path=tmp_path,
+        incident=Incident(incident_type="token_repeat", req_id="r1", block_ids=[1], wave=7),
+        runner=runner,
+        kv_reader=reader,
+    )
+    DumpKvAction().run(ctx)
+    job = guard.queue_kv_dump.call_args.args[0]
+    rows = job["manager_block_ids_by_group"]
+    assert rows == [[1], [2, 3, 4, 5], []]
+    estimate = reader.estimate_dump_bytes(manager_block_ids_by_group=rows)
+    state.block_ids[0].append(6)
+    state.block_ids[1].clear()
+    state.block_ids[2].append(7)
+    proc = SimpleNamespace(
+        runner=runner,
+        runtime_config=ctx.runtime_config,
+        quota=ctx.quota,
+        action_executor=SimpleNamespace(_kv_reader=reader, submit_heavy=None),
+        wave_tracker=SimpleNamespace(current_wave=lambda: 8),
+    )
+    RuntimeGuardProcessor._run_kv_dumps(proc, [job])
+    shards = [torch.load(path, weights_only=True) for path in tmp_path.rglob("*.pt")]
+    assert {p["layer"]: p["block_ids"] for p in shards} == {"A": [1], "B": [2, 3, 4, 5]}
+    assert all((p["dump_arm_wave"], p["dump_copy_wave"]) == (7, 8) for p in shards)
+    assert estimate == sum(p["tensor"].nbytes for p in shards) == 20
+    values = {p["layer"]: p["tensor"].flatten().tolist() for p in shards}
+    assert values == {"A": [1], "B": [102, 103, 104, 105]}
+    info = json.loads(next(tmp_path.rglob("request_info.json")).read_text(encoding="utf-8"))
+    assert info["manager_block_ids_by_group"] == rows
+
+
+def test_draft_layer_in_non_zero_group_uses_that_group(tmp_path: Path):
+    """Spec draft resident in group1 must use group1 block_ids (not group0)."""
+    from vllm_ascend.observability.runtime_guard.dump import KvCacheReader
+
+    target = torch.zeros(4, 4)
+    draft = torch.arange(0, 4 * 4, dtype=torch.float32).reshape(4, 4)
+    requests = {"r1": SimpleNamespace(block_ids=([0], [3]))}
+    groups = [
+        SimpleNamespace(layer_names=["target.attn"]),
+        SimpleNamespace(layer_names=["draft.attn"]),
+    ]
+    runner = SimpleNamespace(
+        requests=requests,
+        kv_caches={"target.attn": target, "draft.attn": draft},
+        kv_cache_config=SimpleNamespace(kv_cache_groups=groups),
+        block_tables=SimpleNamespace(blocks_per_kv_block=[1, 1]),
+        compilation_config=None,
+        input_batch=None,
+        execute_model_state=None,
+        req_states=None,
+    )
+    snaps = KvCacheReader(runner).snapshot_request_blocks(req_id="r1", block_ids=[0], out_dir=tmp_path / "kv")
+    draft_snap = next(s for s in snaps if s.payload["layer"] == "draft.attn")
+    assert draft_snap.payload["block_ids"] == [3]
+    assert draft_snap.payload["kv_cache_group"] == 1
+    assert torch.equal(draft_snap.payload["tensor"][0], draft[3])
+
+
+def test_dump_skips_when_kv_cache_groups_missing(tmp_path: Path):
+    """Empty layer→group map must not silently dump with group-0 pages."""
+    from vllm_ascend.observability.runtime_guard.dump import KvCacheReader
+
+    cache = torch.arange(0, 4 * 4, dtype=torch.float32).reshape(4, 4)
+    runner = SimpleNamespace(
+        requests={"r1": SimpleNamespace(block_ids=([1],))},
+        kv_caches={"L0": cache},
+        kv_cache_config=None,
+        block_tables=SimpleNamespace(blocks_per_kv_block=[1]),
+        compilation_config=None,
+        input_batch=None,
+        execute_model_state=None,
+        req_states=None,
+    )
+    snaps = KvCacheReader(runner).snapshot_request_blocks(
+        req_id="r1",
+        block_ids=[1],
+        out_dir=tmp_path / "kv",
+    )
+    assert snaps == []
+
+
+def test_dump_skips_layer_missing_from_group_map(tmp_path: Path):
+    """Layer not registered in kv_cache_groups is skipped; mapped layers still dump."""
+    from vllm_ascend.observability.runtime_guard.dump import KvCacheReader
+
+    g0 = torch.arange(0, 4 * 4, dtype=torch.float32).reshape(4, 4)
+    orphan = torch.arange(100, 100 + 4 * 4, dtype=torch.float32).reshape(4, 4)
+    runner = SimpleNamespace(
+        requests={"r1": SimpleNamespace(block_ids=([1], [2]))},
+        kv_caches={"L0": g0, "orphan.attn": orphan},
+        kv_cache_config=SimpleNamespace(
+            kv_cache_groups=[SimpleNamespace(layer_names=["L0"])],
+        ),
+        block_tables=SimpleNamespace(blocks_per_kv_block=[1]),
+        compilation_config=None,
+        input_batch=None,
+        execute_model_state=None,
+        req_states=None,
+    )
+    snaps = KvCacheReader(runner).snapshot_request_blocks(
+        req_id="r1",
+        block_ids=[1],
+        out_dir=tmp_path / "kv",
+    )
+    assert [s.payload["layer"] for s in snaps] == ["L0"]
+    assert snaps[0].payload["kv_cache_group"] == 0
+    assert snaps[0].payload["block_ids"] == [1]
+    assert torch.equal(snaps[0].payload["tensor"][0], g0[1])
+
+
+def test_explicit_group0_layer_still_dumps(tmp_path: Path):
+    """True group-0 membership (name in map → 0) must still produce a dump."""
+    from vllm_ascend.observability.runtime_guard.dump import KvCacheReader
+
+    cache = torch.arange(0, 4 * 4, dtype=torch.float32).reshape(4, 4)
+    runner = SimpleNamespace(
+        requests={"r1": SimpleNamespace(block_ids=([2],))},
+        kv_caches={"L0": cache},
+        kv_cache_config=SimpleNamespace(
+            kv_cache_groups=[SimpleNamespace(layer_names=["L0"])],
+        ),
+        block_tables=SimpleNamespace(blocks_per_kv_block=[1]),
+        compilation_config=None,
+        input_batch=None,
+        execute_model_state=None,
+        req_states=None,
+    )
+    snaps = KvCacheReader(runner).snapshot_request_blocks(
+        req_id="r1",
+        block_ids=[2],
+        out_dir=tmp_path / "kv",
+    )
+    assert len(snaps) == 1
+    assert snaps[0].payload["kv_cache_group"] == 0
+    assert snaps[0].payload["block_ids"] == [2]
+    assert torch.equal(snaps[0].payload["tensor"][0], cache[2])
+
+
+def test_expand_manager_block_ids_kernel_ratio():
+    from vllm_ascend.observability.runtime_guard.dump import expand_manager_block_ids
+
+    assert expand_manager_block_ids([1, 3], 1) == [1, 3]
+    assert expand_manager_block_ids([1], 2) == [2, 3]
+    assert expand_manager_block_ids([0, 1], 2) == [0, 1, 2, 3]
+
+
+def test_manager_block_ids_expanded_when_blocks_per_kv_gt_1():
+    from vllm_ascend.observability.runtime_guard.dump import block_ids_for_request
+
+    runner = SimpleNamespace(
+        requests={"r1": SimpleNamespace(block_ids=([1],))},
+        block_tables=SimpleNamespace(blocks_per_kv_block=[2]),
+        input_batch=None,
+        execute_model_state=None,
+        req_states=None,
+        kv_cache_config=None,
+    )
+    assert block_ids_for_request(runner, "r1", kv_cache_group=0) == [2, 3]
+
+
+def test_capture_expanded_cpu_rows_preserves_repeated_manager_blocks():
+    import numpy as np
+
+    from vllm_ascend.observability.runtime_guard.dump import request_manager_blocks
+
+    runner = SimpleNamespace(
+        req_states=SimpleNamespace(req_id_to_index={"r": 0}),
+        block_tables=SimpleNamespace(
+            blocks_per_kv_block=[2, 3],
+            block_tables_cpu=[np.array([[2, 3, 2, 3, 6, 7]]), np.array([[9, 10, 11]])],
+            num_blocks_np=np.array([[6], [3]]),
+        ),
+        kv_cache_config=SimpleNamespace(kv_cache_groups=[None, None]),
+    )
+    assert request_manager_blocks(runner, "r") == [[1, 1, 3], [3]]
+    runner.block_tables.num_blocks_np[0, 0] = 0
+    assert request_manager_blocks(runner, "r") == [[], [3]]
+
+
+def test_scalar_blocks_per_kv_block_expands_not_silent_r1():
+    """Gemini: scalar ratio must expand (not TypeError→R=1)."""
+    from vllm_ascend.observability.runtime_guard.dump import (
+        _blocks_per_kv_block_for_group,
+        block_ids_for_request,
+    )
+
+    runner = SimpleNamespace(
+        requests={"r1": SimpleNamespace(block_ids=([1],))},
+        block_tables=SimpleNamespace(blocks_per_kv_block=2),  # scalar, not [2]
+        input_batch=None,
+        execute_model_state=None,
+        req_states=None,
+        kv_cache_config=None,
+    )
+    assert _blocks_per_kv_block_for_group(runner, 0) == (2, False)
+    assert _blocks_per_kv_block_for_group(runner, 1) == (2, False)
+    assert block_ids_for_request(runner, "r1", kv_cache_group=0) == [2, 3]
+
+
+def test_numpy_scalar_blocks_per_kv_block_shared_across_groups():
+    """Nit #4: numpy scalar uses the same 'shared R' contract as Python int."""
+    import numpy as np
+
+    from vllm_ascend.observability.runtime_guard.dump import _blocks_per_kv_block_for_group
+
+    runner = SimpleNamespace(
+        block_tables=SimpleNamespace(blocks_per_kv_block=np.int64(2)),
+        kv_cache_config=None,
+    )
+    assert _blocks_per_kv_block_for_group(runner, 0) == (2, False)
+    assert _blocks_per_kv_block_for_group(runner, 1) == (2, False)
+
+
+def test_blocks_per_kv_index_error_warns_and_marks_unknown(monkeypatch):
+    """Nit #4 / Minor #1: short per-group sequence must not silent-R=1."""
+    from vllm_ascend.observability.runtime_guard import dump as dump_mod
+    from vllm_ascend.observability.runtime_guard.dump import _blocks_per_kv_block_for_group
+
+    calls: list[tuple] = []
+    monkeypatch.setattr(dump_mod.logger, "warning_once", lambda *a, **_k: calls.append(a))
+    runner = SimpleNamespace(
+        block_tables=SimpleNamespace(blocks_per_kv_block=[2]),  # only group 0
+        kv_cache_config=None,
+    )
+    assert _blocks_per_kv_block_for_group(runner, 1) == (1, True)
+    assert calls and any("index out of range" in str(a) for a in calls[0])
+
+
+def test_derive_ratio_uses_physical_states_not_logical_tokens():
+    """Alex #3: dump tensor dim0 uses storage R, not logical block_size//kernel."""
+    import numpy as np
+
+    from vllm_ascend.observability.runtime_guard.dump import (
+        _blocks_per_kv_block_for_group,
+        block_ids_for_request,
+    )
+
+    # logical would be 128/32=4; storage layout is 64/32=2
+    spec = SimpleNamespace(block_size=128, num_states=64)
+    runner = SimpleNamespace(
+        requests={"r1": SimpleNamespace(block_ids=([1],))},
+        block_tables=SimpleNamespace(),  # no blocks_per_kv_block (main path)
+        kernel_block_sizes=[32],
+        kv_cache_config=SimpleNamespace(kv_cache_groups=[SimpleNamespace(kv_cache_spec=spec)]),
+        attn_groups=None,
+        input_batch=None,
+        execute_model_state=None,
+        req_states=None,
+    )
+    assert _blocks_per_kv_block_for_group(runner, 0) == (2, False)
+    assert block_ids_for_request(runner, "r1", kv_cache_group=0) == [2, 3]
+
+    # Manager-granularity public tables must expand too when attr is absent.
+    entry = SimpleNamespace(np=np.array([[5, 6]], dtype=np.int32), gpu=None)
+    runner_bt = SimpleNamespace(
+        requests=None,
+        block_tables=SimpleNamespace(
+            num_blocks=SimpleNamespace(np=np.array([[2]], dtype=np.int32)),
+            block_tables=[entry],
+        ),
+        kernel_block_sizes=[32],
+        kv_cache_config=SimpleNamespace(kv_cache_groups=[SimpleNamespace(kv_cache_spec=spec)]),
+        attn_groups=None,
+        input_batch=None,
+        execute_model_state=None,
+        req_states=SimpleNamespace(req_id_to_index={"r1": 0}),
+    )
+    assert block_ids_for_request(runner_bt, "r1", kv_cache_group=0) == [10, 11, 12, 13]
+
+
+def test_underivable_compressed_ratio_warns_and_payload_marks_unknown(tmp_path: Path, monkeypatch):
+    """Minor #1: compressed spec without kernel size → warn + expansion=unknown."""
+    from vllm_ascend.observability.runtime_guard import dump as dump_mod
+    from vllm_ascend.observability.runtime_guard.dump import (
+        KvCacheReader,
+        _blocks_per_kv_block_for_group,
+    )
+
+    calls: list[tuple] = []
+    monkeypatch.setattr(dump_mod.logger, "warning_once", lambda *a, **_k: calls.append(a))
+
+    # storage != block_size ⇒ compressed; no kernel_block_sizes ⇒ underivable
+    spec = SimpleNamespace(block_size=128, num_states=64)
+    cache = torch.arange(0, 4 * 8, dtype=torch.float32).reshape(4, 8)
+    runner = SimpleNamespace(
+        requests={"r1": SimpleNamespace(block_ids=([1],))},
+        block_tables=SimpleNamespace(),
+        kernel_block_sizes=None,
+        attn_groups=None,
+        kv_caches={"L0": cache},
+        kv_cache_config=SimpleNamespace(
+            kv_cache_groups=[SimpleNamespace(layer_names=["L0"], kv_cache_spec=spec)],
+        ),
+        compilation_config=None,
+        input_batch=None,
+        execute_model_state=None,
+        req_states=None,
+        tp_rank=0,
+        dp_rank=0,
+        dcp_rank=0,
+        dcp_size=1,
+    )
+    assert _blocks_per_kv_block_for_group(runner, 0) == (1, True)
+    assert calls and "underivable" in calls[0][0]
+
+    snaps = KvCacheReader(runner).snapshot_request_blocks(
+        req_id="r1",
+        block_ids=[1],
+        out_dir=tmp_path / "kv",
+    )
+    assert len(snaps) == 1
+    assert snaps[0].payload.get("expansion") == "unknown"
+
+
+def test_kv_source_logs_coverage_when_counts_differ(monkeypatch):
+    """Alex #4: surface layer-count mismatch between forward_context and flat list."""
+    from vllm_ascend.observability.runtime_guard import dump as dump_mod
+    from vllm_ascend.observability.runtime_guard.dump import KvCacheReader
+
+    calls: list[tuple] = []
+    monkeypatch.setattr(dump_mod.logger, "warning_once", lambda *a, **_k: calls.append(a))
+
+    k = torch.arange(0, 2 * 4, dtype=torch.float32).reshape(2, 4)
+    v = torch.arange(50, 50 + 2 * 4, dtype=torch.float32).reshape(2, 4)
+    layer = SimpleNamespace(kv_cache=(k, v))
+    runner = SimpleNamespace(
+        kv_caches=[k, v, k],  # 3 flat entries vs 1 forward_context layer
+        compilation_config=SimpleNamespace(static_forward_context={"L0": layer}),
+    )
+    src = KvCacheReader(runner)._kv_sources()
+    assert src[0][0] == "static_forward_context"
+    assert calls and "static_forward_context has" in calls[0][0]
+
+
+def test_kv_source_prefers_forward_context_tuple_parts(tmp_path: Path):
+    """C8-style tuple on static_forward_context keeps part names (not flat list)."""
+    from vllm_ascend.observability.runtime_guard.dump import KvCacheReader
+
+    k = torch.arange(0, 2 * 4, dtype=torch.float32).reshape(2, 4)
+    v = torch.arange(50, 50 + 2 * 4, dtype=torch.float32).reshape(2, 4)
+    scale = torch.arange(90, 90 + 2 * 2, dtype=torch.float32).reshape(2, 2)
+    layer = SimpleNamespace(kv_cache=(k, v, scale))
+    runner = SimpleNamespace(
+        requests={"r1": SimpleNamespace(block_ids=([1],))},
+        kv_caches=[k, v, scale],  # flattened Ascend bind — must NOT be preferred
+        compilation_config=SimpleNamespace(static_forward_context={"L0": layer}),
+        kv_cache_config=SimpleNamespace(kv_cache_groups=[SimpleNamespace(layer_names=["L0"])]),
+        block_tables=SimpleNamespace(blocks_per_kv_block=[1]),
+        input_batch=None,
+        execute_model_state=None,
+        req_states=None,
+    )
+    snaps = KvCacheReader(runner).snapshot_request_blocks(req_id="r1", block_ids=[1], out_dir=tmp_path / "kv")
+    layers = [s.payload["layer"] for s in snaps]
+    assert layers == ["L0[0]", "L0[1]", "L0[2]"]
+    assert snaps[0].payload["source"] == "static_forward_context"
+    assert torch.equal(snaps[0].payload["tensor"][0], k[1])
+
+
 def test_snapshot_skips_empty_block_ids(tmp_path: Path):
     runner = SimpleNamespace(
         kv_caches={"layers.0": torch.randn(8, 16, 4)},
@@ -285,7 +700,18 @@ def test_snapshot_skips_empty_block_ids(tmp_path: Path):
 
 def test_snapshot_request_blocks_writes_req_slice(tmp_path: Path):
     cache = torch.randn(4, 8, 2)
-    runner = SimpleNamespace(kv_caches={"L0": cache})
+    runner = SimpleNamespace(
+        kv_caches={"L0": cache},
+        kv_cache_config=SimpleNamespace(
+            kv_cache_groups=[SimpleNamespace(layer_names=["L0"])],
+        ),
+        requests={"r1": SimpleNamespace(block_ids=([0, 2],))},
+        block_tables=SimpleNamespace(blocks_per_kv_block=[1]),
+        compilation_config=None,
+        input_batch=None,
+        execute_model_state=None,
+        req_states=None,
+    )
     reader = KvCacheReader(runner)
     snaps = reader.snapshot_request_blocks(
         req_id="r1",
@@ -353,9 +779,15 @@ def test_free_bytes_at_returns_none_on_statvfs_error(tmp_path: Path, monkeypatch
 
 def test_estimate_dump_bytes_scales_with_blocks():
     cache = torch.zeros(4, 8, 2)
-    reader = KvCacheReader(SimpleNamespace(kv_caches={"L0": cache}))
-    empty = reader.estimate_dump_bytes(block_ids=[])
-    two = reader.estimate_dump_bytes(block_ids=[0, 1])
+    reader = KvCacheReader(
+        SimpleNamespace(
+            kv_caches={"L0": cache},
+            kv_cache_config=SimpleNamespace(kv_cache_groups=[SimpleNamespace(layer_names=["L0"])]),
+            block_tables=SimpleNamespace(blocks_per_kv_block=[1]),
+        )
+    )
+    empty = reader.estimate_dump_bytes(manager_block_ids_by_group=[[]])
+    two = reader.estimate_dump_bytes(manager_block_ids_by_group=[[0, 1]])
     assert empty == 0
     assert two == int(cache.nbytes) // 2
 
@@ -365,8 +797,14 @@ def test_dump_kv_skips_when_free_below_payload_plus_headroom(tmp_path, monkeypat
     from vllm_ascend.observability.runtime_guard.action.actions import DumpKvAction
 
     cache = torch.zeros(4, 8, 2)
-    reader = KvCacheReader(SimpleNamespace(kv_caches={"L0": cache}))
-    estimated = reader.estimate_dump_bytes(block_ids=[0])
+    reader = KvCacheReader(
+        SimpleNamespace(
+            kv_caches={"L0": cache},
+            kv_cache_config=SimpleNamespace(kv_cache_groups=[SimpleNamespace(layer_names=["L0"])]),
+            block_tables=SimpleNamespace(blocks_per_kv_block=[1]),
+        )
+    )
+    estimated = reader.estimate_dump_bytes(manager_block_ids_by_group=[[0]])
     tp_size = 4
     headroom = DUMP_FREE_HEADROOM_BYTES
     monkeypatch.setattr(
@@ -653,6 +1091,33 @@ def test_queue_kv_dump_dedupes_req_id_same_step():
         ("r1", 2),
         ("r2", 1),
     ]
+
+
+def test_mrv1_host_mirror_table_is_not_used():
+    """Alex #2: do not return manager-granularity ids from MRV1 host-mirror tables."""
+    import numpy as np
+
+    from vllm_ascend.observability.runtime_guard.dump import block_ids_for_request
+
+    # Tempting MRV1-style batch table with manager ids — must be ignored.
+    host_table = SimpleNamespace(
+        num_blocks_per_row=[2],
+        block_table=SimpleNamespace(np=np.array([[1, 2, 0]], dtype=np.int32)),
+    )
+    input_batch = SimpleNamespace(
+        req_id_to_index={"r1": 0},
+        req_ids=["r1"],
+        block_table=SimpleNamespace(block_tables=[host_table]),
+        idx_mapping_np=None,  # no V2 state mapping → cannot resolve via block_tables
+    )
+    runner = SimpleNamespace(
+        requests=None,
+        input_batch=input_batch,
+        execute_model_state=None,
+        block_tables=None,
+        req_states=None,
+    )
+    assert block_ids_for_request(runner, "r1") == []
 
 
 def test_bug4_block_ids_v2_without_input_batch():

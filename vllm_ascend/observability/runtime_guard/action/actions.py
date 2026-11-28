@@ -34,6 +34,8 @@ from vllm_ascend.observability.runtime_guard.dump import (
     REQUEST_FINISHED_AT_DUMP_KEY,
     KvCacheReader,
     free_bytes_at,
+    group0_pages,
+    request_manager_blocks,
     write_kv_dump_request_info,
     write_kv_dump_skipped,
 )
@@ -137,9 +139,8 @@ class DumpKvPrepared:
 class DumpKvAction(Action):
     """Arm a KV dump: record jobs on TP0; last-PP all TP dump at sample end.
 
-    Default ``scope=request`` uses ``incident.block_ids`` only — saves D2H time
-    and disk vs dumping every block. ``incident_type=manual_trigger`` always
-    uses ``all_requests`` (``scope`` ignored).
+    Default ``scope=request`` freezes the request's block rows across KV groups.
+    Manual triggers always use ``all_requests``.
 
     Detection stays last-PP TP0. This action does **not** D2H; it queues
     ``{req_id, ...}``. Drain is +1 wave (detector) or end-of-wave (manual).
@@ -181,7 +182,7 @@ class DumpKvAction(Action):
                 scope,
             )
             return DumpKvPrepared(skip=_dump_skip_kwargs(ctx, reason="no_dump_targets", detail={"scope": scope}))
-        if all(not bids for _req, bids in targets):
+        if not any(any(rows) for _, rows in targets):
             # Manual arm runs in begin_wave *before* prepare_inputs, so the
             # first prefill wave often has req ids but empty block tables.
             # Still queue; drain at sample-end flush resolves block_ids. Auto
@@ -208,11 +209,11 @@ class DumpKvAction(Action):
             )
 
         estimated = 0
-        for _req_id, block_ids in targets:
-            if not block_ids:
+        for _, rows in targets:
+            if not any(rows):
                 continue
             try:
-                piece = ctx.kv_reader.estimate_dump_bytes(block_ids=block_ids)
+                piece = ctx.kv_reader.estimate_dump_bytes(manager_block_ids_by_group=rows)
                 estimated += int(piece)
             except (TypeError, ValueError):
                 continue
@@ -324,36 +325,24 @@ def _dump_skip_kwargs(
 def _resolve_dump_targets(
     ctx: ActionContext,
     scope: str,
-) -> list[tuple[str, list[int]]]:
-    """Build ``(req_id, block_ids)`` for arm-time estimate / request_info / queue.
-
-    ``scope=all_requests`` lists live local requests via
-    ``iter_local_request_rows`` and resolves each req's blocks via
-    ``block_ids_for_request`` (never reuses the incident's ``detail.block_ids``
-    for other requests).
-    """
-    from vllm_ascend.observability.runtime_guard.dump import block_ids_for_request
+) -> list[tuple[str, list[list[int]]]]:
+    """Capture the manager block rows once for the estimate, metadata and queued copy."""
     from vllm_ascend.observability.runtime_guard.state import RequestGuardStore, iter_local_request_rows
 
-    if scope != "all_requests":
-        return [
-            (str(ctx.incident.req_id or "unknown"), list(ctx.incident.block_ids or [])),
+    incident = ctx.incident
+    requests: list[tuple[str, int | None]]
+    if scope == "all_requests":
+        store = RequestGuardStore.get()
+        requests = [
+            (rid, idx) for rid, idx in iter_local_request_rows(ctx.runner) if rid and store.kv_dump_allowed(rid)
         ]
-
-    rows = list(iter_local_request_rows(ctx.runner))
-    store = RequestGuardStore.get()
-    targets: list[tuple[str, list[int]]] = []
-    for req_id, req_idx in rows:
-        rid = str(req_id)
-        if not rid:
-            continue
-        if not store.kv_dump_allowed(rid):
-            continue
-        if rid == str(ctx.incident.req_id or "") and ctx.incident.block_ids:
-            bids = list(ctx.incident.block_ids)
-        else:
-            bids = list(block_ids_for_request(ctx.runner, rid, req_idx))
-        targets.append((rid, bids))
+    else:
+        requests = [(str(incident.req_id or "unknown"), None)]
+    targets = []
+    for rid, idx in requests:
+        hint = incident.block_ids if rid == incident.req_id else None
+        rows = request_manager_blocks(ctx.runner, rid, idx, group0_pages=hint)
+        targets.append((rid, rows))
     return targets
 
 
@@ -370,7 +359,7 @@ def _detail_for_dump_req(ctx: ActionContext, req_id: str) -> dict[str, Any]:
 
 def _build_request_infos_for_targets(
     ctx: ActionContext,
-    targets: list[tuple[str, list[int]]],
+    targets: list[tuple[str, list[list[int]]]],
 ) -> list[dict[str, Any]]:
     """Arm-time TP0: per-target ``write_kv_dump_request_info`` kwargs (commit writes)."""
     if runner_tp_rank(ctx.runner) != 0:
@@ -388,7 +377,7 @@ def _build_request_infos_for_targets(
 
     store = RequestGuardStore.get()
     infos: list[dict[str, Any]] = []
-    for req_id, block_ids in targets:
+    for req_id, rows in targets:
         rid = str(req_id)
         infos.append(
             {
@@ -398,7 +387,8 @@ def _build_request_infos_for_targets(
                 "detail": _detail_for_dump_req(ctx, rid),
                 "rank_tag": rank_tag,
                 "wave": wave,
-                "block_ids": list(block_ids) if block_ids else None,
+                "block_ids": group0_pages(ctx.runner, rows) or None,
+                "manager_block_ids_by_group": rows,
                 "tokenizer": ctx.tokenizer,
                 "save_sensitive_info": save_sensitive,
                 "decode_token_ids": decode_ids,
@@ -412,7 +402,7 @@ def _build_request_infos_for_targets(
 
 def _queue_kv_dumps(
     ctx: ActionContext,
-    targets: list[tuple[str, list[int]]],
+    targets: list[tuple[str, list[list[int]]]],
 ) -> set[str]:
     """TP0 records dump jobs; last-PP all TP (incl. TP0) drain at sample end.
 
@@ -432,9 +422,8 @@ def _queue_kv_dumps(
     consume = bool(ctx.incident.consume_quota)
     wave = ctx.incident.wave
     queued: set[str] = set()
-    for req_id, block_ids in targets:
+    for req_id, rows in targets:
         rid = str(req_id)
-        bids = list(block_ids) if block_ids else []
         added = queue(
             {
                 "req_id": rid,
@@ -442,7 +431,8 @@ def _queue_kv_dumps(
                 "consume_quota": consume,
                 "arm_id": arm_id,
                 "wave": int(wave) if wave is not None else None,
-                "block_ids": bids,
+                "block_ids": group0_pages(ctx.runner, rows),
+                "manager_block_ids_by_group": rows,
                 REQUEST_FINISHED_AT_DUMP_KEY: store.is_request_finished(rid),
             }
         )

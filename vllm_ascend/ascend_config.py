@@ -1831,6 +1831,20 @@ class SchedulerConfig:
         resolved.update({key: value for key, value in scheduler_config.items() if key not in resolved})
         return cls(**resolved)  # type: ignore[arg-type]
 
+    @model_validator(mode="after")
+    def _warn_balance_scheduling_deprecated(self) -> SchedulerConfig:
+        if self.enable_balance_scheduling:
+            logger.warning_once(
+                "Balance scheduling (scheduler_config.enable_balance_scheduling) is deprecated as of "
+                "vLLM Ascend v0.33.0 and will be removed in a future release. "
+                "It remains active while enabled. Set "
+                "additional_config.scheduler_config.enable_balance_scheduling=false (the default) "
+                "to use the normal scheduler path. See "
+                "https://github.com/vllm-project/vllm-ascend/issues/23229 for the sunset plan "
+                "and to share workloads that still require the global admission gate."
+            )
+        return self
+
 
 @config
 class SparseKVOffloadConfig:
