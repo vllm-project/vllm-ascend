@@ -246,10 +246,6 @@ def get_kv_cache_spec(vllm_config: VllmConfig) -> dict[str, KVCacheSpec]:
             spec = mxfp_cache_spec(spec)
         elif type(spec) is FullAttentionSpec and is_qfa_int8_kv_quant(vllm_config):
             spec = qfa_int8_cache_spec(spec)
-        # Speculator.load_model marks draft modules before cache planning.
-        # Apply the upstream ownership tag before Ascend rebuilds MLA specs.
-        if getattr(attn_module, "is_draft_layer", False):
-            spec = replace(spec, is_draft=True)
         kv_cache_spec[layer_name] = spec
         if isinstance(spec, AttentionSpec) and getattr(attn_module, "align_kv_cache_with_mamba", True):
             attention_layer_names.append(layer_name)

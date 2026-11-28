@@ -929,9 +929,6 @@ class AscendModelSlimConfig(QuantizationConfig):
                 from ..methods.kv_cache.mxfp_c8 import AscendC8MXFPKVCacheAttentionMethod
 
                 scheme = AscendC8MXFPKVCacheAttentionMethod(self.quant_description, prefix)
-                logger.debug(
-                    "Select AscendKVCacheMethod(C8-MXFP) for %s (layer=%s)", prefix, "AttentionLayerBase[C8-MXFP]"
-                )
             elif self.enable_qfa_int8_quant and self._is_full_attention_layer(layer):
                 # QFA INT8 KV cache: no recipe gate (the mxfp8 precedent);
                 # the checkpoint's fa_v.scale (per-head FP32, from the
@@ -941,9 +938,6 @@ class AscendModelSlimConfig(QuantizationConfig):
                 from ..methods.kv_cache.kv_c8 import AscendQFAKVCacheAttentionMethod
 
                 scheme = AscendQFAKVCacheAttentionMethod(self.quant_description, prefix)
-                logger.debug(
-                    "Select AscendKVCacheMethod(QFA-INT8) for %s (layer=%s)", prefix, "AttentionLayerBase[QFA-INT8]"
-                )
             elif self.is_hif8_quant_layer(runtime_prefix):
                 scheme = create_scheme_for_layer(_HIF8_C8_LAYER_QUANT_TYPE, prefix, "attention")
             else:
