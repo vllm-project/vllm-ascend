@@ -320,10 +320,9 @@ jobs:
         env:
           NODE_VERSION: 24.18.0
           # Unified agent credential, shared with the AI review job (#22319).
-          # The built-in `deepseek` provider reads DEEPSEEK_API_KEY directly
-          # and defaults to https://api.deepseek.com, so no auth.json needed.
-          # AI_REVIEW_API is expected to point at that same DeepSeek channel.
+          # The key is only valid on the AI_REVIEW_API gateway.
           DEEPSEEK_API_KEY: ${{ secrets.AI_REVIEW_KEY }}
+          AI_REVIEW_API: ${{ secrets.AI_REVIEW_API }}
         run: |
           set -euxo pipefail
 
@@ -350,12 +349,20 @@ jobs:
             opencode-ai
 
           # models.dev does not list deepseek-v4.1-flash yet; extend the
-          # built-in deepseek provider catalog with it.
+          # built-in deepseek provider catalog with it.  The provider's
+          # baseURL defaults to https://api.deepseek.com; AI_REVIEW_API
+          # overrides it when set.
+          if [ -n "${AI_REVIEW_API:-}" ]; then
+            PROVIDER_OPTIONS="\"options\": { \"baseURL\": \"${AI_REVIEW_API}\" },"
+          else
+            PROVIDER_OPTIONS=""
+          fi
           mkdir -p ~/.config/opencode
           cat > ~/.config/opencode/opencode.json <<EOF
           {
             "provider": {
               "deepseek": {
+                ${PROVIDER_OPTIONS}
                 "models": {
                   "deepseek-v4.1-flash": {}
                 }
@@ -547,8 +554,11 @@ jobs:
         env:
           RAY_EXPERIMENTAL_NOSET_ASCEND_RT_VISIBLE_DEVICES: True
           # Same unified agent credential as the install step; the main2main
-          # flow spawns `opencode` and inherits this environment.
+          # flow spawns `opencode` and inherits this environment.  The flow
+          # writes its own opencode.json (OPENCODE_CONFIG), which needs the
+          # AI_REVIEW_API baseURL as well.
           DEEPSEEK_API_KEY: ${{ secrets.AI_REVIEW_KEY }}
+          AI_REVIEW_API: ${{ secrets.AI_REVIEW_API }}
         run: |
           set -euo pipefail
           export PATH="$HOME/.opencode/bin:$PATH"
