@@ -219,7 +219,9 @@ def collect_draft_observation(server, case: WeightUpdateModelCase, *, capture_gr
     return snapshot, observation, runtime
 
 
-def run_draft_hccl_weight_transfer(tmp_path, monkeypatch, packed: bool, enforce_eager: bool, speculative_case):
+def run_draft_hccl_weight_transfer(
+    tmp_path, monkeypatch, packed: bool, enforce_eager: bool, speculative_case, *, reload_mode: str = "layerwise"
+):
     """Compare draft -> target -> draft updates with independent loads."""
     if INFERENCE_DEVICE_INDEX < 0 or torch.npu.device_count() <= TRAINER_DEVICE_INDEX:
         pytest.skip("HCCL weight transfer e2e test requires at least 2 NPUs.")
@@ -234,6 +236,7 @@ def run_draft_hccl_weight_transfer(tmp_path, monkeypatch, packed: bool, enforce_
     second_draft_updated = FixedRandomWeightSource(case, device, seed=1, draft_case=draft_case, draft_seed=2)
     env_dict = {
         "VLLM_SERVER_DEV_MODE": "1",
+        "VLLM_RELOAD_MODE": reload_mode,
         "VLLM_WORKER_MULTIPROC_METHOD": "spawn",
         "ASCEND_RT_VISIBLE_DEVICES": server_visible_devices(INFERENCE_DEVICE_INDEX, INFERENCE_WORLD_SIZE),
     }
