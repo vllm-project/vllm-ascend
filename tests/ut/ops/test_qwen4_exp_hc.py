@@ -130,3 +130,91 @@ def test_hc_gate_mix_passes_wide_offset_flag(monkeypatch: pytest.MonkeyPatch) ->
 
     _, _, kwargs = row_block.launches[0]
     assert kwargs["WIDE_OFFSETS"] is True
+
+
+@pytest.mark.parametrize(
+    ("rows", "row_wise_supported", "weight_shared", "expected_streams_per_program"),
+    (
+        (511, True, False, 1),
+        (512, True, False, 4),
+        (512, False, False, 1),
+        (4096, True, True, 1),
+    ),
+)
+def test_hc_combine_norm_streams_per_program_dispatch(
+    rows: int,
+    row_wise_supported: bool,
+    weight_shared: bool,
+    expected_streams_per_program: int,
+    monkeypatch: pytest.MonkeyPatch,
+) -> None:
+    kernel = _KernelRecorder()
+    profile = SimpleNamespace(
+        supports=lambda capability: row_wise_supported
+        and capability is HardwareCapability.QWEN4EXP_HC_COMBINE_NORM_ROW_WISE
+    )
+    monkeypatch.setattr(hc, "_hc_combine_norm_kernel", kernel)
+    monkeypatch.setattr(hc, "get_current_hardware_profile", lambda: profile)
+
+    residual = torch.empty((rows, 40), dtype=torch.bfloat16)
+    block_output = torch.empty((rows, 10), dtype=torch.bfloat16)
+    injection = torch.empty((rows, 4), dtype=torch.bfloat16)
+    norm_weight = torch.empty(10 if weight_shared else 40, dtype=torch.bfloat16)
+    combined, normalized = hc._hc_combine_norm(residual, block_output, injection, norm_weight, 1e-6, 4)
+
+    assert combined.shape == residual.shape
+    assert normalized.shape == residual.shape
+    assert len(kernel.launches) == 1
+    grid, args, kwargs = kernel.launches[0]
+    expected_stream_groups = 4 // expected_streams_per_program
+    assert grid == (rows * expected_stream_groups,)
+    assert args[2] is injection
+    assert kwargs["HAS_INJECTION"] is True
+    assert kwargs["WEIGHT_SHARED"] is weight_shared
+    assert kwargs["STREAMS_PER_PROGRAM"] == expected_streams_per_program
+    assert kwargs["WIDE_OFFSETS"] is False
+
+
+@pytest.mark.parametrize("wide_tensor", ("residual", "block", "injection", "combined", "normalized"))
+def test_hc_combine_norm_detects_wide_offsets_for_all_tensors(wide_tensor: str) -> None:
+    strides = {
+        "residual": 40,
+        "block": 10,
+        "injection": 4,
+        "combined": 40,
+        "normalized": 40,
+    }
+    strides[wide_tensor] = hc._INT32_MAX
+
+    assert hc._hc_combine_norm_needs_wide_offsets(
+        2,
+        40,
+        10,
+        4,
+        strides["residual"],
+        strides["block"],
+        strides["injection"],
+        strides["combined"],
+        strides["normalized"],
+        True,
+    )
+
+
+def test_hc_combine_norm_passes_wide_offset_flag(monkeypatch: pytest.MonkeyPatch) -> None:
+    kernel = _KernelRecorder()
+    profile = SimpleNamespace(
+        supports=lambda capability: capability is HardwareCapability.QWEN4EXP_HC_COMBINE_NORM_ROW_WISE
+    )
+    monkeypatch.setattr(hc, "_hc_combine_norm_kernel", kernel)
+    monkeypatch.setattr(hc, "_hc_combine_norm_needs_wide_offsets", lambda *_: True)
+    monkeypatch.setattr(hc, "get_current_hardware_profile", lambda: profile)
+
+    residual = torch.empty((512, 40), dtype=torch.bfloat16)
+    block_output = torch.empty((512, 10), dtype=torch.bfloat16)
+    injection = torch.empty((512, 4), dtype=torch.bfloat16)
+    norm_weight = torch.empty(40, dtype=torch.bfloat16)
+    hc._hc_combine_norm(residual, block_output, injection, norm_weight, 1e-6, 4)
+
+    _, _, kwargs = kernel.launches[0]
+    assert kwargs["STREAMS_PER_PROGRAM"] == 4
+    assert kwargs["WIDE_OFFSETS"] is True

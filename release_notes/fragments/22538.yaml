@@ -1,0 +1,11 @@
+pr: 22538
+entries:
+  - category: performance
+    text: >-
+      Improved Qwen3.8-Flash-Next long-prefill HyperConnections performance on A3
+      for batches of 512 rows or more, with 1.084x-1.129x faster operator execution
+      than before. Three ABBA rounds at 4,096/16 input/output tokens and concurrency
+      8 measured 0.43%-0.88% higher request throughput and 0.74%-0.84% lower mean
+      TTFT. Smaller batches and shared norm weights are unchanged.
+    model: qwen3.8-flash-next
+    hardware: [A3]

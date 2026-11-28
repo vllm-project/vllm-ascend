@@ -185,6 +185,9 @@ class HardwareCapability(Enum):
     # A2, A3, and A5 validated parity and a performance benefit at the
     # family-specific dispatch threshold; other profiles retain one-row dispatch.
     QWEN4EXP_HC_GATE_MIX_ROW_BLOCK = auto()
+    # Reuse each block-output row across HC streams on A3. The operator owns
+    # its measured row-count threshold; other profiles retain per-stream dispatch.
+    QWEN4EXP_HC_COMBINE_NORM_ROW_WISE = auto()
     # Inspect PCIe topology to distinguish 310P Root-Complex and endpoint deployments.
     RC_DEVICE_DISCOVERY = auto()
     # Fused RMSNorm+cast is available for the A2/A3 (CANN 9.1) path.
@@ -414,6 +417,7 @@ _A3_CAPABILITIES = _STANDARD_CAPABILITIES | {
     HardwareCapability.MC2_FULLMESH_V2_COMM,
     HardwareCapability.MM_REDUCE_SCATTER_BF16,
     HardwareCapability.QWEN4EXP_HC_GATE_MIX_ROW_BLOCK,
+    HardwareCapability.QWEN4EXP_HC_COMBINE_NORM_ROW_WISE,
     HardwareCapability.RMS_NORM_CAST,
 }
 _DEFAULT_WORKER_CLS = "vllm_ascend.worker.worker.NPUWorker"
