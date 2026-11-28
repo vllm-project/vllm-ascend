@@ -1154,14 +1154,32 @@ class D2RHThread(threading.Thread):
                 if not local_group_block_ids:
                     continue
 
-                grouped_remote_block_ids: list[list[int]] = []
-                grouped_local_block_ids: list[list[int]] = []
-                grouped_blocks_by_scale: dict[tuple[int, int], tuple[list[list[int]], list[list[int]]]] = {}
                 if is_mamba_group:
                     if len(local_group_block_ids) != len(remote_group_block_ids):
                         raise RuntimeError("For MambaSpec num block should equal on P node and CPU staging.")
                     grouped_remote_block_ids = [[remote_group_block_ids[-1]]]
                     grouped_local_block_ids = [[local_group_block_ids[0]]]
+                else:
+                    first_local_idx, first_remote_idx = layer_pairs[0]
+                    local_scale = self.cpu_block_size_scale[first_local_idx][0]
+                    remote_scale = remote_block_size_scale[first_remote_idx][0]
+                    kernel_local_block_ids = expand_block_ids(local_group_block_ids, local_scale)
+                    kernel_remote_block_ids = expand_block_ids(remote_group_block_ids, remote_scale)
+                    # Absolute HBM-prefix slicing was already applied to both
+                    # remote_group_block_ids and local_group_block_ids before
+                    # host-cache filtering.  Do not slice the expanded staging
+                    # ids a second time. Sliding groups deliberately keep their
+                    # complete live tail.
+                    num_kernel_blocks = min(len(kernel_remote_block_ids), len(kernel_local_block_ids))
+                    kernel_remote_block_ids = kernel_remote_block_ids[:num_kernel_blocks]
+                    kernel_local_block_ids = kernel_local_block_ids[:num_kernel_blocks]
+                    if num_group_pulls == 1:
+                        grouped_remote_block_ids, grouped_local_block_ids = base_group_concurrent_contiguous(
+                            kernel_remote_block_ids, kernel_local_block_ids
+                        )
+                    else:
+                        grouped_remote_block_ids = [[block_id] for block_id in kernel_remote_block_ids]
+                        grouped_local_block_ids = [[block_id] for block_id in kernel_local_block_ids]
 
                 for layer_idx, remote_layer_idx in layer_pairs:
                     cache_pairs = resolve_group_cache_slot_pairs(
@@ -1182,36 +1200,6 @@ class D2RHThread(threading.Thread):
                         num_group_pulls,
                     )
                     for cache_idx, remote_cache_idx in cache_pairs:
-                        if is_mamba_group:
-                            slot_remote_block_ids = grouped_remote_block_ids
-                            slot_local_block_ids = grouped_local_block_ids
-                        else:
-                            local_scale = self.cpu_block_size_scale[layer_idx][cache_idx]
-                            remote_scale = remote_block_size_scale[remote_layer_idx][remote_cache_idx]
-                            scale_pair = (local_scale, remote_scale)
-                            cached_groups = grouped_blocks_by_scale.get(scale_pair)
-                            if cached_groups is None:
-                                kernel_local_block_ids = expand_block_ids(local_group_block_ids, local_scale)
-                                kernel_remote_block_ids = expand_block_ids(remote_group_block_ids, remote_scale)
-                                # Absolute HBM-prefix slicing was already applied to both
-                                # remote_group_block_ids and local_group_block_ids before
-                                # host-cache filtering.  Do not slice the expanded staging
-                                # ids a second time. Sliding groups deliberately keep their
-                                # complete live tail.
-                                num_kernel_blocks = min(len(kernel_remote_block_ids), len(kernel_local_block_ids))
-                                kernel_remote_block_ids = kernel_remote_block_ids[:num_kernel_blocks]
-                                kernel_local_block_ids = kernel_local_block_ids[:num_kernel_blocks]
-                                if num_group_pulls == 1:
-                                    cached_groups = base_group_concurrent_contiguous(
-                                        kernel_remote_block_ids, kernel_local_block_ids
-                                    )
-                                else:
-                                    cached_groups = (
-                                        [[block_id] for block_id in kernel_remote_block_ids],
-                                        [[block_id] for block_id in kernel_local_block_ids],
-                                    )
-                                grouped_blocks_by_scale[scale_pair] = cached_groups
-                            slot_remote_block_ids, slot_local_block_ids = cached_groups
                         src_layer_base_addr = self.cpu_kv_caches_base_addr[layer_idx][cache_idx]
                         dst_layer_base_addr = remote_base_addrs[remote_layer_idx][remote_cache_idx]
                         block_len = self.cpu_block_len_per_addr[layer_idx][cache_idx]
@@ -1219,8 +1207,8 @@ class D2RHThread(threading.Thread):
                         remote_block_stride = remote_block_stride_per_addr[remote_layer_idx][remote_cache_idx]
                         inner_block_len = block_len // num_group_pulls
                         transfer_remote_block_ids, transfer_local_block_ids = split_if_not_byte_contiguous(
-                            slot_remote_block_ids,
-                            slot_local_block_ids,
+                            grouped_remote_block_ids,
+                            grouped_local_block_ids,
                             src_block_stride=remote_block_stride,
                             dst_block_stride=block_stride,
                             block_len=inner_block_len,
