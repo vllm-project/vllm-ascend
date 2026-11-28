@@ -8,7 +8,7 @@
     - Greedy mode (`temperature == 0`): `sample = argmax_i x_i`.
     - Random mode (`temperature != 0`): `P(sample=i) = exp(x_i) / sum_j exp(x_j)`.
     - For numerical stability, each coarse block `b` uses `m_b = max_{i in b} x_i` and `S_b = sum_{i in b} exp(x_i - m_b)`. With `M = max_b m_b`, the global block mass is `W_b = S_b * exp(m_b - M)`.
-    - A stateless uniform draw `u(seed, pos)` defines `threshold = u * sum_b W_b`. The same threshold is propagated through coarse-block, fine-block, and token-level cumulative masses; no additional random draw is used.
+    - A stateless uniform draw keyed by the request seed and position defines `threshold = u * sum_b W_b`. Draft sampling also uses the cache column as the speculative step when provided, so a position revisited at a different step receives a fresh draw. The same threshold is propagated through coarse-block, fine-block, and token-level cumulative masses.
 - **Algorithm flow** (processed row by row, independently):
   1. Split each vocabulary row into 8192-element coarse blocks. Flatten `(token, coarse_block)` tasks and distribute them across at most the available Vector Cores.
   2. `_categorical_prepare_mass_kernel` loads each coarse block, optionally stores raw pre-temperature logits into `logits_cache`, applies temperature when requested, computes the block max/argmax, and computes probability masses. Each 8192-element block is further reduced into eight 1024-element fine-block masses.

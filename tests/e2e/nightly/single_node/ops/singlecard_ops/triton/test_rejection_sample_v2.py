@@ -343,6 +343,33 @@ def test_block_verification_preserves_target_distribution(num_speculative_steps,
     get_ascend_device_type() not in (AscendDeviceType.A2, AscendDeviceType.A3, AscendDeviceType.A5),
     reason="Requires Ascend A2/A3/A5",
 )
+@torch.inference_mode()
+def test_block_verification_revisited_position_preserves_target_distribution():
+    """Check the second generated token when verification revisits its position."""
+    num_trials, num_steps = 8192, 2
+    logits = torch.zeros(2, device="npu")
+    inputs = _build_rejection_sample_inputs(logits, logits, num_steps, 1.0, num_trials)
+    inputs["draft_logits"] = None
+    inputs["draft_sampled"].zero_()
+
+    def verify(start):
+        inputs["pos"] = inputs["expanded_local_pos"] + start
+        return rejection_sample(
+            **inputs, num_speculative_steps=num_steps, use_block_verification=True, use_entropy_verify=False
+        )
+
+    first, first_counts = verify(1)
+    inputs["draft_sampled"].view(num_trials, num_steps + 1)[:, 0] = first[:, 0]
+    second, _ = verify(2)
+    # A second round is needed only when the first committed a single token.
+    token_at_position_2 = torch.where(first_counts == 1, second[:, 0], first[:, 1])
+    assert (token_at_position_2 == 0).float().mean().item() == pytest.approx(0.5, abs=0.03)
+
+
+@pytest.mark.skipif(
+    get_ascend_device_type() not in (AscendDeviceType.A2, AscendDeviceType.A3, AscendDeviceType.A5),
+    reason="Requires Ascend A2/A3/A5",
+)
 @pytest.mark.parametrize("placeholder_step", [0, 1])
 @pytest.mark.parametrize("method", ["standard", "synthetic", "block"])
 @pytest.mark.parametrize("has_draft_logits", [True, False])
