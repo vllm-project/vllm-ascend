@@ -397,7 +397,8 @@ class Qwen4ExpPreparedInputAdapter:
             **common,
         )
         main.qsa_gbsa_metadata = (
-            generated if getattr(main, "qsa_request_cu_q", None) is not None
+            generated
+            if getattr(main, "qsa_request_cu_q", None) is not None
             else self._persistent_metadata(signature, generated)
         )
         prepared_this_step[signature] = main.qsa_gbsa_metadata
