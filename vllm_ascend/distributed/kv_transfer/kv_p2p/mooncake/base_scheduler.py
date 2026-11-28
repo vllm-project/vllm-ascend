@@ -189,7 +189,13 @@ class MooncakeMetadataThread(threading.Thread):
                 for tp_rank, worker_metadata in workers_by_tp_rank.items():
                     mismatched_fields = [
                         field_name
-                        for field_name in ("block_size", "num_blocks", "cp_kv_cache_interleave_size")
+                        for field_name in (
+                            "block_size",
+                            "num_blocks",
+                            "cp_kv_cache_interleave_size",
+                            "hisparse_host_layers",
+                            "hisparse_shared_host",
+                        )
                         if getattr(worker_metadata, field_name) != getattr(reference, field_name)
                     ]
                     if mismatched_fields:
@@ -217,11 +223,15 @@ class MooncakeMetadataThread(threading.Thread):
                         )
                     if reference_layer_names is None:
                         reference_layer_names = worker_layer_names
-                    elif not self.use_kv_pp and worker_layer_names != reference_layer_names:
-                        raise ValueError(
-                            "Mooncake workers expose different KV-cache layers while KVPP is disabled: "
-                            f"PP rank {pp_rank}, PCP/TP rank {pcp_rank}/{tp_rank}"
-                        )
+                    elif not self.use_kv_pp:
+                        expected = reference_layer_names
+                        if reference.hisparse_shared_host and tp_rank != 0:
+                            expected = expected.difference(reference.hisparse_host_layers)
+                        if worker_layer_names != expected:
+                            raise ValueError(
+                                "Mooncake workers expose different KV-cache layers while KVPP is disabled: "
+                                f"PP rank {pp_rank}, PCP/TP rank {pcp_rank}/{tp_rank}"
+                            )
                     for local_layer_index, layer_name in enumerate(worker_metadata.layer_names):
                         layer_signature = (
                             worker_metadata.group_indices[local_layer_index],
@@ -303,6 +313,7 @@ class MooncakeMetadataThread(threading.Thread):
                 metadata_by_pcp_rank[pcp_rank] = MooncakePCPTransferMetadata(metadata_by_tp_rank=metadata_by_tp_rank)
 
             merged[pp_rank] = MooncakePPTransferMetadata(
+                hisparse_host_layers=reference.hisparse_host_layers,
                 block_size=reference.block_size,
                 cp_kv_cache_interleave_size=reference.cp_kv_cache_interleave_size,
                 num_blocks=reference.num_blocks,

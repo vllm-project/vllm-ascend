@@ -1,0 +1,7 @@
+pr: 23495
+entries:
+  - category: feature
+    text: >-
+      Prefill instances using layerwise AscendStore KV offload can now send KV to HiSparse Decode
+      through MooncakeConnectorV2 on Ascend 950. Set use_layerwise to true and select the memfabric
+      transfer backend on both Mooncake endpoints.

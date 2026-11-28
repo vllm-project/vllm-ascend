@@ -37,6 +37,13 @@ class MemfabricBackend:
     def register_memory(self, ptr: int, size: int) -> int:
         return 0 if self._engine.register_memory(ptr, size) == 0 else -1
 
+    def batch_transfer_sync_write(self, session_id, local_buffers, peer_buffers, length_list) -> int:
+        status = self._engine.batch_transfer_sync_write(session_id, local_buffers, peer_buffers, length_list)
+        if status:
+            logger.error("MemFabric WRITE failed (ret=%s) for session %s", status, session_id)
+            return -1
+        return 0
+
     def batch_transfer_sync_read(
         self,
         session_id: str,
@@ -66,6 +73,7 @@ class GlobalMemfabricTE:
     def __init__(self):
         self._engine: MemfabricBackend | None = None
         self._role: str | None = None
+        self._store_server_role = MEMFABRIC_ROLE_PREFILL
         self._device_id: int | None = None
         self._transfer_protocol: str | None = None
         self._hostname: str | None = None
@@ -86,6 +94,7 @@ class GlobalMemfabricTE:
         role: str,
         device_id: int,
         transfer_protocol: str | None = None,
+        store_server_role: str = MEMFABRIC_ROLE_PREFILL,
     ) -> None:
         """Bind this process singleton to one MemFabric role, device and protocol.
 
@@ -98,6 +107,8 @@ class GlobalMemfabricTE:
         """
         if role not in _VALID_MEMFABRIC_ROLES:
             raise ValueError(f"Invalid MemFabric role {role!r}; expected one of {_VALID_MEMFABRIC_ROLES}")
+        if store_server_role not in _VALID_MEMFABRIC_ROLES:
+            raise ValueError(f"Invalid MemFabric store_server_role {store_server_role!r}")
         if device_id < 0:
             raise ValueError(f"MemFabric device_id must be non-negative, got {device_id}")
         protocol = (transfer_protocol or _DEFAULT_MEMFABRIC_TRANSFER_PROTOCOL).strip().lower()
@@ -109,19 +120,21 @@ class GlobalMemfabricTE:
 
         with self._engine_lock:
             configured = self._role is not None
-            if configured and (role, device_id, protocol) != (
+            if configured and (role, device_id, protocol, store_server_role) != (
                 self._role,
                 self._device_id,
                 self._transfer_protocol,
+                self._store_server_role,
             ):
                 raise RuntimeError(
                     "MemFabric transfer engine is already configured for "
                     f"role={self._role}, device_id={self._device_id}, "
-                    f"transfer_protocol={self._transfer_protocol}; cannot "
+                    f"transfer_protocol={self._transfer_protocol}, store_server_role={self._store_server_role}; cannot "
                     f"reconfigure it for role={role}, device_id={device_id}, "
-                    f"transfer_protocol={protocol}"
+                    f"transfer_protocol={protocol}, store_server_role={store_server_role}"
                 )
             self._role = role
+            self._store_server_role = store_server_role
             self._device_id = device_id
             self._transfer_protocol = protocol
 
@@ -190,7 +203,7 @@ class GlobalMemfabricTE:
             hostname,
             self._role,
             self._device_id,
-            store_server_role=MEMFABRIC_ROLE_PREFILL,
+            store_server_role=self._store_server_role,
             data_op_type=data_op_type,
         )
         if ret != 0:
