@@ -132,6 +132,7 @@ def test_memory_budget_sources_preserve_physical_capacity(monkeypatch, budget_so
     worker._kvpp_cache_allocation_plan = None
     worker._apply_kv_offload_decode_memory_constraints = Mock(side_effect=lambda size: size)
     profile = SimpleNamespace(
+        non_kv_cache_memory=3,
         non_torch_increase=1,
         weights_memory=1,
         before_profile=SimpleNamespace(torch_peak=0),
