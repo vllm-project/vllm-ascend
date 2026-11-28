@@ -14,6 +14,7 @@ class KVTraceConfig:
     """KV address diagnostics configured through additional_config."""
 
     enabled: StrictBool = False
+    slot: StrictBool = True
     action: Literal["log", "raise"] = "log"
 
     @classmethod
