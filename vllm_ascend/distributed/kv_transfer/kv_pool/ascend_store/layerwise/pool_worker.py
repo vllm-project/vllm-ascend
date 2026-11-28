@@ -724,21 +724,20 @@ class LayerwiseKVPoolWorker(BaseKVPoolWorker):
         return self._is_layerwise_save_leader() or self.group_uses_align_state[group_id]
 
     def _groups_for_layerwise_transfer(self, local_layer: int) -> list[tuple[int, int]]:
-        if self.use_block_key_layerwise:
-            # The map and buffer builders both use stage-local physical layer
-            # indices. A group's dense layer index is a third, distinct axis.
-            if self.num_kv_cache_groups == 1 and not getattr(self, "use_kvpp", False):
-                return [(0, local_layer)]
-            groups = self.physical_layer_to_group_layers.get(local_layer)
-            if groups is None:
-                if getattr(self, "use_kvpp", False) or getattr(self, "has_shared_kv", False):
-                    return []
+        use_kvpp = getattr(self, "use_kvpp", False)
+        if self.use_block_key_layerwise and self.num_kv_cache_groups == 1 and not use_kvpp:
+            return [(0, local_layer)]
+        # Registration maps stage-local layers to dense indices in each owner's buffers.
+        groups = self.physical_layer_to_group_layers.get(local_layer)
+        if groups is None:
+            if use_kvpp or getattr(self, "has_shared_kv", False):
+                return []
+            if self.use_block_key_layerwise:
                 raise RuntimeError(f"Mooncake layerwise: no KV cache group for local layer {local_layer}")
+            return [(0, local_layer)]
+        if self.use_block_key_layerwise:
             return [(group_id, layer_idx) for group_id, layer_idx in groups if group_id in self.cacheable_group_ids]
-        # GVA groups use stage-local indices too; PP offsets apply to pool keys and remote addresses.
-        if getattr(self, "use_kvpp", False) or getattr(self, "has_shared_kv", False):
-            return self.physical_layer_to_group_layers.get(local_layer, [])
-        return self.physical_layer_to_group_layers.get(local_layer, [(0, local_layer)])
+        return groups
 
     def _masked_block_runs_cached(
         self,

@@ -45,6 +45,7 @@ from vllm.v1.kv_cache_interface import (
 
 from vllm_ascend.distributed.kv_transfer.kv_pool.ascend_store.ascend_store_connector import (
     AscendStoreConnector,
+    create_kv_pool_scheduler,
     create_kv_pool_worker,
 )
 from vllm_ascend.distributed.kv_transfer.kv_pool.ascend_store.buffer import BufferDescriptor, MemoryLocation
@@ -192,6 +193,7 @@ def make_worker(
         config.model_config.compile_factors.side_effect = lambda: {"identity": config.model_config.compute_hash()}
         config.cache_config.compile_factors.side_effect = lambda: {"identity": config.cache_config.compute_hash()}
         config.cache_config.cache_dtype = "auto"
+        config.attention_config.indexer_kv_dtype = "auto"
         config.speculative_config = None
     config.additional_config = {"enable_kvpp": use_kvpp}
     config.kv_transfer_config.kv_role = kv_role
@@ -849,13 +851,22 @@ class TestLayerwiseAttentionSave(unittest.TestCase):
 
 class TestKVPPPoolWorker(unittest.TestCase):
     @patch.dict("os.environ", {"VLLM_PP_LAYER_PARTITION": "42,36"})
-    def test_memcache_layerwise_tasks_follow_registered_kvpp_owners(self):
-        for stage, (start, num_layers) in enumerate(((0, 42), (42, 36))):
-            sizes = [num_layers // 8 + (rank < num_layers % 8) for rank in range(8)]
+    def test_memcache_layerwise_prefix_hits_after_every_kvpp_owner_publishes(self):
+        published: set[str] = set()
+        block_hash = b"prefix"
+
+        def publish(keys, statuses):
+            self.assertEqual(statuses, [0] * len(keys))
+            published.update(keys)
+            return statuses
+
+        # Save PP0/PCP1 last so the scheduler can observe exactly one missing shard.
+        stages = ((1, 42, 36), (0, 0, 42))
+        for stage, start, num_layers in stages:
             names = [f"model.layers.{layer}.attn" for layer in range(start, start + num_layers)]
             spec = FullAttentionSpec(block_size=16, num_kv_heads=1, head_size=8, dtype=torch.float32)
             caches = {name: torch.zeros((4, 16, 8)) for name in names}
-            for rank in range(8):
+            for rank in (0, 2, 3, 4, 5, 6, 7, 1):
                 with self.subTest(stage=stage, rank=rank):
                     cache_config = SimpleNamespace(kv_cache_groups=[KVCacheGroupSpec(names, spec)], num_blocks=4)
                     worker = make_worker(
@@ -872,30 +883,59 @@ class TestKVPPPoolWorker(unittest.TestCase):
                         use_layerwise=True,
                         extra_config={"backend": "memcache"},
                     )
-                    worker._transfer_threads_started = True
+                    self.addCleanup(worker.shutdown)
+                    store = worker.m_store
+                    store.batch_is_exist.side_effect = lambda keys: [int(key in published) for key in keys]
+                    store.batch_alloc.return_value = [1 << 20]
+                    store.store.batch_copy.return_value = 0
+                    store.batch_write_finish.side_effect = publish
                     worker.register_kv_caches(caches)
-                    worker._data_plane.prepare_sessions = MagicMock(return_value={})
                     request = ReqMeta(
                         req_id="req",
-                        token_len_chunk=32,
-                        block_ids=[1, 2],
-                        block_hashes=["h0", "h1"],
+                        token_len_chunk=17,
+                        save_end_token=16,
+                        block_ids_by_group=[[1]],
+                        block_ids_by_group_np=[np.asarray([1])],
+                        block_hashes=[block_hash],
                         can_save=True,
-                        load_spec=LoadSpec(0, 16, True),
                     )
-                    worker.process_layer_data([request])
+                    metadata = AscendConnectorMetadata(preempted_req_ids=set())
+                    metadata.add_request(request)
+                    worker.prepare_layerwise_step(metadata)
 
-                    first = sum(sizes[:rank])
-                    expected = list(range(first, first + sizes[rank]))
-                    builder = worker._build_group_layer_builders()[0]
-                    for task_lists in (worker.layer_save_tasks, worker.layer_load_tasks):
-                        tasks = [task for layer_tasks in task_lists for task in layer_tasks]
-                        self.assertEqual([task.layer_id for task in tasks], expected)
-                        for task in tasks:
-                            addrs, _, _ = builder._build_transfer_arrays(
-                                np.array([0]), np.array([1024]), task.layer_idx_in_group
-                            )
-                            self.assertEqual(addrs.tolist(), [caches[names[task.layer_id]].data_ptr()])
+                    if (stage, rank) == (0, 1):
+                        with patch.object(worker.layerwise_backend, "create_scheduler_client", return_value=store):
+                            scheduler = create_kv_pool_scheduler(worker.vllm_config, True, worker.kv_cache_config)
+                        store.batch_is_readable.side_effect = lambda keys: [key in published for key in keys]
+                        hit_request = SimpleNamespace(
+                            request_id="hit", prompt_token_ids=[1] * 17, num_tokens=17, block_hashes=[block_hash]
+                        )
+                        keys = set(scheduler._make_layerwise_hit_check_keys(0, block_hash_to_str(block_hash)))
+                        self.assertEqual(len(keys), 16)
+                        self.assertEqual(keys - published, set(request.save_keys))
+                        self.assertEqual(len(published), 15)
+
+                        # PCP1 owns layers 6 through 11 in PP0. Block publication until layer 11 is saved.
+                        for _ in range(11):
+                            worker.save_kv_layer(metadata)
+                        events = worker.layer_save_finished_events
+                        self.assertTrue(events[10].wait(timeout=5))
+                        self.assertFalse(events[11].is_set())
+                        store.batch_write_finish.assert_not_called()
+                        self.assertEqual(scheduler.get_num_new_matched_tokens(hit_request, 0), (0, False))
+
+                        worker.save_kv_layer(metadata)
+                        self.assertTrue(events[11].wait(timeout=5))
+                        self.assertFalse(events[41].is_set())
+                        store.batch_write_finish.assert_called_once_with(request.save_keys, [0])
+                        self.assertEqual(store.store.batch_copy.call_count, 6)
+                        self.assertEqual(published, keys)
+                        self.assertEqual(scheduler.get_num_new_matched_tokens(hit_request, 0), (16, False))
+
+                    while worker.current_layer < num_layers:
+                        worker.save_kv_layer(metadata)
+                    worker.wait_for_previous_save()
+                    store.batch_write_finish.assert_called_once_with(request.save_keys, [0])
                     self.doCleanups()
 
     def test_load_completion_is_shared_and_reset_at_step_binding(self):
