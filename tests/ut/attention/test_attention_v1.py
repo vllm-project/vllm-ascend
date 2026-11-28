@@ -1065,6 +1065,7 @@ class TestAscendAttentionBackendImpl(TestBase):
         metadata = AscendMetadata(model_runner_type="pooling", causal=True, actual_seq_lengths_q=[query.shape[0]])
 
         with (
+            patch.object(attn_module, "_EXTRA_CTX", SimpleNamespace(capturing=False)),
             patch("torch_npu.npu_fusion_attention", return_value=(encoder_output,)) as encoder_attention,
             patch.object(self.impl, "forward_impl", return_value=output),
         ):

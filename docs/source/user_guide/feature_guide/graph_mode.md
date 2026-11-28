@@ -108,6 +108,12 @@ On Ascend, the current attention backend support levels are:
 
 This is why the effective graph mode on Ascend may differ from the mode requested in configuration.
 
+### Encoder-only pooling attention
+
+When an encoder-only pooling model uses full-graph capture, its attention path registers updatable FIA tasks with contiguous query, key, and value inputs. Replay updates the cumulative query and key/value sequence boundaries together, including requests that share a token-count bucket but have different document lengths. These models do not use paged decoder KV caches or a causal attention mask.
+
+This attention path does not override the upstream pooling-model compilation compatibility checks or enable full graphs globally. Check the effective graph mode in the startup log before attributing a benchmark to full-graph execution.
+
 ### Troubleshooting capture resource exhaustion
 
 If ACLGraph capture fails because the configured graph sizes exceed the runtime resources available on the current stack, vLLM Ascend now raises a dedicated error with mitigation guidance. In practice, the most useful actions are:

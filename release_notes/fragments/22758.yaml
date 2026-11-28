@@ -1,0 +1,8 @@
+pr: 22758
+entries:
+  - category: bugfix
+    text: >-
+      Fix full-graph encoder-only pooling attention so replays use the current
+      document boundaries, including batches with the same token count and
+      different sequence lengths. This does not enable full graphs for
+      unsupported pooling configurations.
