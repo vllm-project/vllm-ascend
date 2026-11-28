@@ -153,9 +153,7 @@ class MooncakeDecodeListenerThread(threading.Thread):
             sock.send_multipart([identity, *delimiter, msgspec.msgpack.encode(reply)])
         except ZMQError:
             logger.exception("Failed to acknowledge Push completion")
-            if completion is not None:
-                # Preserve request failure while waiting for the other sources.
-                completion["status"] = "error"
+        # The validated DONE carries the WRITE result independently of the ACK.
         if completion is not None:
             self.result_queue.put(("done", completion["request_id"], completion))
 

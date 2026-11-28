@@ -1,7 +1,11 @@
 # SPDX-License-Identifier: Apache-2.0
 # SPDX-FileCopyrightText: Copyright contributors to the vLLM-Ascend project
 
+import time
 from concurrent.futures import ThreadPoolExecutor
+from queue import Queue
+from threading import Event
+from types import SimpleNamespace
 from unittest.mock import Mock
 
 import msgspec
@@ -30,12 +34,30 @@ def done_params():
         "producer_engine_id": "p",
         "producer_rank": [0, 0, 0],
         "consumer_engine_id": "d",
-        "consumer_rank": 0,
+        "consumer_rank": [0, 0, 0],
     }
 
 
+@pytest.fixture
+def consumer(done_params):
+    worker = push_worker.MooncakePushConnectorWorker.__new__(push_worker.MooncakePushConnectorWorker)
+    worker._stop_event = Event()
+    worker.engine_id = done_params["consumer_engine_id"]
+    worker.pp_rank, worker.pcp_rank, worker.tp_rank = done_params["consumer_rank"]
+    worker.side_channel_host = "127.0.0.1"
+    worker.handshake_port = 0
+    worker.kv_transfer_config = SimpleNamespace(is_kv_producer=False)
+    worker._result_queue = Queue()
+    worker._finished_requests = {}
+    worker._pending_completions = {}
+    request_id = done_params["request_id"]
+    worker._reqs_recv_state = {request_id: push_worker._ReceiveState(request_id, time.monotonic())}
+    worker._decode_listener_thread = push_worker.MooncakeDecodeListenerThread(worker)
+    return worker
+
+
 @pytest.mark.parametrize("error", [None, "WRITE failed"])
-def test_done_retries_on_fresh_socket_after_lost_ack(producer, done_params, monkeypatch, error):
+def test_done_retries_on_fresh_socket_after_lost_ack(producer, consumer, done_params, monkeypatch, error):
     monkeypatch.setattr(push_worker.envs, "VLLM_MOONCAKE_CONNECTOR_TIMEOUT", 0.1)
     with Context() as context, context.socket(SocketType.ROUTER) as listener, ThreadPoolExecutor(1) as executor:
         listener.setsockopt(SocketOption.RCVTIMEO, 2000)
@@ -44,9 +66,16 @@ def test_done_retries_on_fresh_socket_after_lost_ack(producer, done_params, monk
         done_params["completion_address"] = listener.getsockopt(SocketOption.LAST_ENDPOINT).decode()
         completion = executor.submit(producer._send_done, done_params, error)
 
-        first_id, first_delimiter, first_payload = listener.recv_multipart()
-        # Drop the first ACK and require a replay of the entire DONE message.
-        second_id, second_delimiter, second_payload = listener.recv_multipart()
+        first_frames = listener.recv_multipart()
+        failed_ack = Mock()
+        failed_ack.send_multipart.side_effect = Again()
+        consumer._decode_listener_thread._handle_done_message(failed_ack, first_frames)
+        failed_ack.send_multipart.assert_called_once()
+        first_result = consumer.get_transfer_results()
+
+        second_frames = listener.recv_multipart()
+        first_id, first_delimiter, first_payload = first_frames
+        second_id, second_delimiter, second_payload = second_frames
         assert first_id != second_id
         assert first_delimiter == second_delimiter == b""
         assert first_payload == second_payload
@@ -58,9 +87,15 @@ def test_done_retries_on_fresh_socket_after_lost_ack(producer, done_params, monk
             **({"error": error} if error else {}),
         }
 
-        ack = msgspec.msgpack.encode({"kind": "done_ack", "request_id": done_params["request_id"]})
-        listener.send_multipart([second_id, second_delimiter, ack])
+        consumer._decode_listener_thread._handle_done_message(listener, second_frames)
         assert completion.result(timeout=2)
+
+        request_id = done_params["request_id"]
+        assert first_result.finished_recving == {request_id}
+        assert first_result.failed_recving == ({request_id} if error else set())
+        replay_result = consumer.get_transfer_results()
+        assert not replay_result.finished_recving
+        assert not replay_result.failed_recving
 
 
 @pytest.mark.parametrize("request_id", ["d-request", "wrong-request"])
