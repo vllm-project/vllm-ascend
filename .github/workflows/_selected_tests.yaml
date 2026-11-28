@@ -204,7 +204,7 @@ jobs:
       # runtime and build-system requirements select the same Torch ABI.
       - name: Set up the PR-specific PyTorch 2.14 dependencies
         id: torch-214
-        if: ${{ github.repository == 'vllm-project/vllm-ascend' && github.event.pull_request.number == 22176 && inputs.vllm == '4fd24951cc374300b8172debd2e550863ce7115b' }}
+        if: ${{ github.repository == 'vllm-project/vllm-ascend' && github.event.pull_request.number == 22176 && inputs.vllm == 'e4ac319d203f3dad675d71b0b36e35e293ec291f' }}
         run: |
           python3 - <<'PY'
           import re
