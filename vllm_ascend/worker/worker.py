@@ -345,16 +345,10 @@ class NPUWorker(GPUWorker):
                     stdout=subprocess.DEVNULL,
                     stderr=subprocess.DEVNULL,
                     start_new_session=True,
+                    pass_fds=(lock_fd.fileno(),),
                 )
             except (BlockingIOError, OSError):
                 return
-            finally:
-                try:
-                    fcntl.flock(lock_fd, fcntl.LOCK_UN)
-                    if os.path.exists(lock_file_path):
-                        os.remove(lock_file_path)
-                except Exception:
-                    return
 
     def set_metrics_level(self, level: str) -> str:
         """Set this worker process's MS metric level. Called by collective RPC."""
