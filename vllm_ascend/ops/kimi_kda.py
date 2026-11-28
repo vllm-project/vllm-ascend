@@ -200,7 +200,8 @@ class _KDAFusedBFGLinear(MergedColumnParallelLinear):
             )
         param_shard.copy_(fused_weight)
         # F is composed locally, so its rows never pass through the merged loader.
-        if hasattr(self, "pop_missing_shards"):
+        # Older loaders only accept a shard ID and do not track loaded parameters.
+        if hasattr(self, "validate_shard_id") and hasattr(self, "pop_missing_shards"):
             self.validate_shard_id(_F_PROJ_SHARD_ID, self.weight)
 
 
