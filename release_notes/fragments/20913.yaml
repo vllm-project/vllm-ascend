@@ -1,0 +1,4 @@
+pr: 20913
+entries:
+  - category: bugfix
+    text: Fixed a scheduler-side KV-pool load-spec leak for AscendStore requests that were aborted or finished before being scheduled.
