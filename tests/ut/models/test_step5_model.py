@@ -255,8 +255,8 @@ def dsa_env(monkeypatch):
     monkeypatch.setattr(step5_model, "RowParallelLinear", fake_row_parallel)
     monkeypatch.setattr(step5_model, "get_rope", fake_get_rope)
     monkeypatch.setattr(step5_model, "AscendStep5DSAImpl", fake_impl)
-    monkeypatch.setattr(step5_model, "AscendStep5SparseSummaryCacheLayer", fake_summary)
-    monkeypatch.setattr(step5_model, "AscendStep5CSATailRing", fake_ring)
+    monkeypatch.setattr(step5_model, "Step5SparseSummaryCacheLayer", fake_summary)
+    monkeypatch.setattr(step5_model, "Step5CSATailRing", fake_ring)
     monkeypatch.setattr(step5_model, "_validate_step5_dsa_parallel_geometry", fake_validate)
     monkeypatch.setattr(step5_model, "get_tensor_model_parallel_world_size", lambda: 1)
     return built

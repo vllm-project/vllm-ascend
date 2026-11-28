@@ -1,7 +1,7 @@
 # SPDX-License-Identifier: Apache-2.0
-"""Ascend Step5 DSA (sparse attention) backend for vLLM 0.33 / MRV2.
+"""Ascend Step5 DSA (sparse attention) backend for MRV2.
 
-Structure follows the CUDA implementation shipped in vLLM 0.33
+Structure follows the upstream CUDA implementation
 (``vllm.models.step5.nvidia.sparse_attention``): CSA region state lives in
 the upstream deterministic layout --
 
@@ -33,13 +33,7 @@ from typing import Any, ClassVar
 
 import torch
 from vllm.config import VllmConfig
-from vllm.forward_context import get_forward_context, is_forward_context_available
-from vllm.models.step5.common.csa_tail_ring import Step5CSATailRing  # type: ignore[import-not-found]
-from vllm.models.step5.common.sparse_summary_cache import (  # type: ignore[import-not-found]
-    Step5SparseSummaryBackend,
-    Step5SparseSummaryCacheLayer,
-    Step5SparseSummaryMetadataBuilder,
-)
+from vllm.forward_context import get_forward_context
 from vllm.v1.attention.backend import (
     AttentionBackend,
     AttentionCGSupport,
@@ -68,77 +62,6 @@ from vllm_ascend.ops.triton.step5.summary_update import (
     update_prefill,
     update_verify,
 )
-
-
-class AscendStep5CSATailRing(Step5CSATailRing):
-    """Tail ring on the main KV page, sized exactly as upstream sizes it.
-
-    The inherited spec keeps the ring's ``CircularBufferSpec`` on the main
-    layer's page bytes (96 KiB here, capacity 96 rows for the required
-    ``7 + num_speculative_tokens``), so the ring group and the attention
-    groups share one stride class inside the single envelope backing
-    (vllm_ascend.models.step5.cache_config): every per-id byte span is
-    aligned to the same grid, so spans of different groups can only
-    intersect at identical block ids, which the exclusive id pool already
-    forbids. The recycled-block zeroer likewise sees one whole-page stride
-    per start address, so no per-class stack shift is needed.
-    """
-
-
-class AscendStep5SparseSummaryCacheLayer(Step5SparseSummaryCacheLayer):
-    def __init__(
-        self,
-        *,
-        prefix: str,
-        target_impl: Any,
-        static_forward_context: dict[str, Any],
-    ) -> None:
-        super().__init__(
-            prefix=prefix,
-            target_impl=target_impl,
-            static_forward_context=static_forward_context,
-        )
-        # The DSA impl reads this group's metadata from the forward context;
-        # naming it here keeps the lookup independent of name construction.
-        target_impl.summary_layer_name = self.layer_name
-
-    def get_attn_backend(self) -> type[AscendStep5SparseSummaryBackend]:
-        return AscendStep5SparseSummaryBackend
-
-
-@dataclass
-class AscendStep5SparseSummaryMetadata(AttentionMetadata):
-    """Addresses from the summary KV group, in full-batch token/request order.
-
-    The summary layer forms its own KV cache group on Ascend, so its manager
-    block ids differ from the DSA layer's. Every summary read and write must
-    go through these tensors -- the MRV2 runner swaps the common metadata to
-    each group's own slot mapping / block table before calling this builder,
-    and graph replay refreshes those persistent buffers in place.
-    """
-
-    slot_mapping: torch.Tensor
-    block_table: torch.Tensor
-
-
-class AscendStep5SparseSummaryMetadataBuilder(Step5SparseSummaryMetadataBuilder):
-    def build(
-        self,
-        common_prefix_len: int,
-        common_attn_metadata: CommonAttentionMetadata,
-        fast_build: bool = False,
-    ) -> AscendStep5SparseSummaryMetadata:
-        # Retain the runner's device buffers; graph replay refreshes them in place.
-        return AscendStep5SparseSummaryMetadata(
-            slot_mapping=common_attn_metadata.slot_mapping,
-            block_table=common_attn_metadata.block_table_tensor,
-        )
-
-
-class AscendStep5SparseSummaryBackend(Step5SparseSummaryBackend):
-    @staticmethod
-    def get_builder_cls() -> type[AscendStep5SparseSummaryMetadataBuilder]:
-        return AscendStep5SparseSummaryMetadataBuilder
 
 
 class AscendStep5DSABackend(AttentionBackend):
@@ -598,32 +521,10 @@ class AscendStep5DSAImpl(AttentionImplBase[AscendStep5DSAMetadata]):
         self._max_regions = -(-self.max_model_len // self.region_size)
         # Injected by the model after construction (upstream wiring):
         # ``summary_cache`` is the Step5SparseSummaryCache bound to the
-        # per-block FP8 summary page; ``csa_ring`` is the Step5CSATailRing;
-        # ``summary_layer_name`` locates this group's own metadata.
+        # per-block FP8 summary page (sharing this DSA layer's KV cache group
+        # and block IDs); ``csa_ring`` is the Step5CSATailRing.
         self.summary_cache: Any = None
-        self.summary_layer_name: str | None = None
         self.csa_ring: Any = None
-
-    def _dsa_virtual_engine(self) -> int:
-        if is_forward_context_available():
-            return int(getattr(get_forward_context(), "virtual_engine", 0) or 0)
-        return 0
-
-    def _summary_metadata(self) -> AscendStep5SparseSummaryMetadata:
-        """This DSA layer's summary-group addresses from the forward context.
-
-        The summary layer forms its own KV cache group whose manager block
-        ids are distinct from the DSA layer's; under the shared hybrid
-        backing, addressing the summary pages with DSA ids would land on the
-        DSA group's live K/V bytes.
-        """
-        attn_metadata = get_forward_context().attn_metadata
-        summary_md = attn_metadata.get(self.summary_layer_name)
-        if not isinstance(summary_md, AscendStep5SparseSummaryMetadata):
-            raise RuntimeError(
-                f"Step5 summary group metadata is missing or invalid for layer {self.summary_layer_name!r}."
-            )
-        return summary_md
 
     def _update_summary_state(
         self,
@@ -641,8 +542,8 @@ class AscendStep5DSAImpl(AttentionImplBase[AscendStep5DSAMetadata]):
         carry-over rows stored by an earlier chunk -- then stores the open
         rows. Mixed batches run the decode rows first (they lead the batch).
 
-        Summary pages are addressed with the summary group's own slot
-        mapping; ring rows keep the ring group's block-table addressing.
+        Summary pages share the DSA layer's KV cache group and slot mapping;
+        ring rows keep the ring group's block-table addressing.
         """
         num_tokens = int(md.num_actual_tokens)
         if num_tokens <= 0:
@@ -653,9 +554,8 @@ class AscendStep5DSAImpl(AttentionImplBase[AscendStep5DSAMetadata]):
             raise RuntimeError(
                 "Step5 DSA requires the CSA ring and summary cache to be bound before the first forward."
             )
-        summary_md = self._summary_metadata()
         mean = summary.mean
-        slots = summary_md.slot_mapping[:num_tokens]
+        slots = md.slot_mapping[:num_tokens]
         ring_md = ring.metadata()
         index_k = index_k[:num_tokens].contiguous()
         index_z = index_z[:num_tokens].contiguous()
@@ -730,17 +630,14 @@ class AscendStep5DSAImpl(AttentionImplBase[AscendStep5DSAMetadata]):
         assert d is not None and d.query_len == 1
         n = md.num_decodes
         seq_lens_i32 = d.seq_lens.to(torch.int32)
-        summary_md = self._summary_metadata()
         # Fused score + causal topk + ascending sort via aclnn; the exact
         # attention is the aclnn GenericBlockSparseAttention operator, which
         # appends the current region (floor(pos / region_size)) and applies
         # the per-token causal truncation itself. actual_kv_lengths is the
         # effective KV length including the current query (seq_len); the
         # query token's own 0-based position (seq_len - 1) feeds the
-        # attention operator's current-region append. The summary table is
-        # the summary group's own block table; the ids it returns are
-        # request-relative, so GBSA keeps translating them through the DSA
-        # layer's table.
+        # attention operator's current-region append. Summary pages share the
+        # DSA layer's KV cache group and block table.
         cu_seq_lens = torch.arange(n + 1, device=index_q.device, dtype=torch.int32)
         positions = seq_lens_i32.to(torch.int64) - 1
         actual_kv_lengths = seq_lens_i32
@@ -748,7 +645,7 @@ class AscendStep5DSAImpl(AttentionImplBase[AscendStep5DSAMetadata]):
             index_q[:n],
             weights[:n],
             self.summary_cache.mean.view(torch.float8_e4m3fn).unsqueeze(2),
-            summary_md.block_table[:n],
+            d.block_table[:n],
             cu_seq_lens,
             actual_kv_lengths,
             max_region_len=self._max_regions,
@@ -808,12 +705,11 @@ class AscendStep5DSAImpl(AttentionImplBase[AscendStep5DSAMetadata]):
         cu_seq_lens = md.query_start_loc[: num_decodes + 1]
         cu_seqlens_q = md.query_start_loc_int64[: num_decodes + 1]
         actual_kv_lengths = seq_lens
-        summary_md = self._summary_metadata()
         ids = indexer_score_topk(
             index_q[:total_tokens],
             weights[:total_tokens],
             self.summary_cache.mean.view(torch.float8_e4m3fn).unsqueeze(2),
-            summary_md.block_table[:num_decodes],
+            decode_md.block_table[:num_decodes],
             cu_seq_lens,
             actual_kv_lengths,
             max_region_len=self._max_regions,
@@ -875,12 +771,11 @@ class AscendStep5DSAImpl(AttentionImplBase[AscendStep5DSAMetadata]):
         # causally truncates it to the token's position.
         cu_seq_lens = p.query_start_loc
         actual_kv_lengths = p.seq_lens[:num_reqs].to(torch.int32)
-        summary_md = self._summary_metadata()
         ids = indexer_score_topk(
             index_q[:num_query_tokens],
             weights[:num_query_tokens],
             self.summary_cache.mean.view(torch.float8_e4m3fn).unsqueeze(2),
-            summary_md.block_table[md.num_decodes : md.num_decodes + num_reqs],
+            p.block_table[:num_reqs],
             cu_seq_lens,
             actual_kv_lengths,
             max_region_len=width,
