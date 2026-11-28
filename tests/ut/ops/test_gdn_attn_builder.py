@@ -2676,7 +2676,7 @@ def test_long_fixed_drafts_use_strided_recurrent_route(monkeypatch, builder_cls,
     monkeypatch.setattr(
         ascend_gdn_attn_builder, "get_current_hardware_profile", lambda: get_hardware_profile(device_type)
     )
-    expected_fused = False
+    expected_fused = device_type == AscendDeviceType.A2 and num_speculative_tokens >= 8
     builder = _make_builder(
         device=torch.device("cpu"),
         num_heads=32,
