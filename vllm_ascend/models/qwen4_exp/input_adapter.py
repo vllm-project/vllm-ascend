@@ -333,7 +333,7 @@ class Qwen4ExpPreparedInputAdapter:
             positions.add(1).clamp_min(0),
             raw.seq_lens[token_to_req],
         ).to(torch.int32)
-        counts = visible.add(GBSA_COMPRESS_RATIO - 1).floor_divide(GBSA_COMPRESS_RATIO)
+        counts = visible.floor_divide(GBSA_COMPRESS_RATIO)
         max_groups = int(layer.indexer.token_topk // layer.indexer.compress_ratio)
         counts = counts.clamp_max(max_groups)
         num_kv_heads = int(layer.num_kv_heads)
@@ -372,7 +372,7 @@ class Qwen4ExpPreparedInputAdapter:
             mask_mode=1,
             quant_mode=0,
             softmax_precision=0,
-            residual_block_mode=0,
+            residual_block_mode=1,
             is_consistent_topk=False,
         )
         generated = generic_block_sparse_attention_metadata(

@@ -128,6 +128,7 @@ public:
         input_groups_ = tiling->input_groups;
         topk_ = tiling->topk;
         width_ = tiling->width;
+        output_width_ = tiling->output_width;
         compact_row_stride_ = tiling->compact_row_stride;
         sort_tmp_bytes_ = tiling->sort_tmp_bytes;
         groups_per_core_ = tiling->groups_per_core;
@@ -141,12 +142,12 @@ public:
             reinterpret_cast<__gm__ int32_t*>(group_row_map),
             groups_ * UNION_SIZE);
         union_idx_gm_.SetGlobalBuffer(
-            reinterpret_cast<__gm__ int32_t*>(union_idx), groups_ * width_);
+            reinterpret_cast<__gm__ int32_t*>(union_idx), groups_ * output_width_);
         union_count_gm_.SetGlobalBuffer(
             reinterpret_cast<__gm__ int32_t*>(union_count), groups_);
         exact_mask_gm_.SetGlobalBuffer(
             reinterpret_cast<__gm__ int32_t*>(exact_mask),
-            groups_ * width_ * BLOCK_Y);
+            groups_ * output_width_ * BLOCK_Y);
 #if __CCE_AICORE__ != 220
         GM_ADDR user_workspace = GetUserWorkspace(workspace);
         count_workspace_gm_.SetGlobalBuffer(
@@ -359,8 +360,6 @@ private:
                 WaitFlag<HardEvent::MTE2_V>(row_ready);
             }
             meta.SetValue(UNION_SIZE + lane, visible);
-            const bool has_tail = visible > 0 && visible % BLOCK_Y != 0;
-            const uint32_t capacity = topk_ - static_cast<uint32_t>(has_tail);
             if (row >= 0 && static_cast<uint32_t>(row) < rows_) {
                 const int32_t visible_group = visible / BLOCK_Y;
                 // Convert the scalar filter/compact walk into vector work:
@@ -407,13 +406,6 @@ private:
                     GetTPipePtr()->FetchEventID(HardEvent::V_S));
                 SetFlag<HardEvent::V_S>(compact_ready);
                 WaitFlag<HardEvent::V_S>(compact_ready);
-                if (has_tail) {
-                    const uint32_t kept = Min(
-                        capacity, static_cast<uint32_t>(kept_count));
-                    keys.SetValue(lane * topk_ + kept,
-                                  visible_group * static_cast<int32_t>(UNION_SIZE) +
-                                      static_cast<int32_t>(lane));
-                }
             }
         }
         event_t scalar_done = static_cast<event_t>(
@@ -483,7 +475,10 @@ private:
             --exact_count;
         }
         if (exact_count == 0) {
-            return 0;
+            const uint32_t tail_count = MergeAndStageTails(
+                meta, unique_keys, scratch1, 0);
+            WriteStagedTails(group, 0, tail_count, meta);
+            return tail_count;
         }
 
         // Decode exact keys into block/lane vectors.  Keep blocks in sorted
@@ -654,10 +649,110 @@ private:
 
         const uint32_t rank = static_cast<uint32_t>(union_count_u64);
         if (rank == 0 || packed_count_u64 != union_count_u64) {
-            return 0;
+            const uint32_t tail_count = MergeAndStageTails(
+                meta, scratch0, scratch1, 0);
+            WriteStagedTails(group, 0, tail_count, meta);
+            return tail_count;
         }
+        const uint32_t tail_count = MergeAndStageTails(
+            meta, scratch0, scratch1, rank);
         WritePackedOutput(group, scratch0, scratch1, rank);
-        return rank;
+        WriteStagedTails(group, rank, tail_count, meta);
+        return rank + tail_count;
+    }
+
+    __aicore__ inline uint32_t MergeAndStageTails(
+        LocalTensor<int32_t>& meta,
+        LocalTensor<int32_t>& union_blocks,
+        LocalTensor<int32_t>& packed_masks,
+        uint32_t rank)
+    {
+        LocalTensor<int32_t> tail_blocks = output_tile_buf_.Get<int32_t>();
+        LocalTensor<int32_t> tail_masks = tail_blocks[OUTPUT_TILE];
+        ResetOutputTile(tail_blocks, tail_masks, UNION_SIZE);
+        uint32_t count = 0;
+        for (uint32_t lane = 0; lane < UNION_SIZE; ++lane) {
+            const int32_t row = meta.GetValue(lane);
+            const int32_t visible = meta.GetValue(UNION_SIZE + lane);
+            const int32_t residual = visible % static_cast<int32_t>(BLOCK_Y);
+            if (row < 0 || static_cast<uint32_t>(row) >= rows_ || residual == 0) {
+                continue;
+            }
+            const int32_t block = visible / static_cast<int32_t>(BLOCK_Y);
+            uint32_t destination = rank + count;
+            for (uint32_t index = 0; index < rank; ++index) {
+                if (union_blocks.GetValue(index) == block) {
+                    destination = index;
+                    break;
+                }
+            }
+            if (destination == rank + count) {
+                for (uint32_t index = 0; index < count; ++index) {
+                    if (tail_blocks.GetValue(index) == block) {
+                        destination = rank + index;
+                        break;
+                    }
+                }
+            }
+            const int32_t lane_bit = 1 << lane;
+            int32_t contribution = 0;
+            for (int32_t token = 0; token < residual; ++token) {
+                contribution |= lane_bit << (token * 8);
+            }
+            if (destination < rank) {
+                packed_masks.SetValue(
+                    destination,
+                    packed_masks.GetValue(destination) | contribution);
+            } else {
+                const uint32_t tail = destination - rank;
+                if (tail == count) {
+                    tail_blocks.SetValue(count++, block);
+                }
+                tail_masks.SetValue(
+                    tail, tail_masks.GetValue(tail) | contribution);
+            }
+        }
+        for (uint32_t index = 0; index < count; ++index) {
+            meta.SetValue(index, tail_blocks.GetValue(index));
+            meta.SetValue(UNION_SIZE + index, tail_masks.GetValue(index));
+        }
+        event_t ready = static_cast<event_t>(
+            GetTPipePtr()->FetchEventID(HardEvent::S_V));
+        SetFlag<HardEvent::S_V>(ready);
+        WaitFlag<HardEvent::S_V>(ready);
+        return count;
+    }
+
+    __aicore__ inline void WriteStagedTails(
+        uint32_t group, uint32_t base, uint32_t count,
+        LocalTensor<int32_t>& meta)
+    {
+        if (count == 0) {
+            return;
+        }
+        LocalTensor<int32_t> blocks = output_tile_buf_.Get<int32_t>();
+        LocalTensor<int32_t> masks = blocks[OUTPUT_TILE];
+        LocalTensor<int32_t> packed = fill_buf_.Get<int32_t>();
+        ResetOutputTile(blocks, masks, UNION_SIZE);
+        for (uint32_t index = 0; index < count; ++index) {
+            blocks.SetValue(index, meta.GetValue(index));
+            packed.SetValue(index, meta.GetValue(UNION_SIZE + index));
+        }
+        event_t packed_ready = static_cast<event_t>(
+            GetTPipePtr()->FetchEventID(HardEvent::S_V));
+        SetFlag<HardEvent::S_V>(packed_ready);
+        WaitFlag<HardEvent::S_V>(packed_ready);
+#if __CCE_AICORE__ == 310
+        UnpackPackedMasks(masks, packed, count);
+#else
+        UnpackPackedMasks(masks, packed, count,
+                          fill_buf_.Get<int32_t>()[UNION_SIZE]);
+#endif
+        event_t unpack_ready = static_cast<event_t>(
+            GetTPipePtr()->FetchEventID(HardEvent::V_MTE3));
+        SetFlag<HardEvent::V_MTE3>(unpack_ready);
+        WaitFlag<HardEvent::V_MTE3>(unpack_ready);
+        FlushOutputTile(group, base, count, blocks, masks);
     }
 
     __aicore__ inline void WritePackedOutput(
@@ -710,12 +805,13 @@ private:
             GetTPipePtr()->FetchEventID(HardEvent::S_MTE3));
         SetFlag<HardEvent::S_MTE3>(ready);
         WaitFlag<HardEvent::S_MTE3>(ready);
-        const uint32_t union_copy = AlignUp(count, 8);
-        const uint32_t mask_copy = AlignUp(count * BLOCK_Y, 8);
-        DataCopy(union_idx_gm_[group * width_ + base], union_tile,
-                 union_copy);
-        DataCopy(exact_mask_gm_[group * width_ * BLOCK_Y + base * BLOCK_Y],
-                 mask_tile, mask_copy);
+        DataCopyPad(union_idx_gm_[group * output_width_ + base], union_tile,
+                    DataCopyExtParams(1, count * sizeof(int32_t), 0, 0, 0));
+        DataCopyPad(
+            exact_mask_gm_[group * output_width_ * BLOCK_Y + base * BLOCK_Y],
+            mask_tile,
+            DataCopyExtParams(
+                1, count * BLOCK_Y * sizeof(int32_t), 0, 0, 0));
         event_t complete = static_cast<event_t>(
             GetTPipePtr()->FetchEventID(HardEvent::MTE3_S));
         SetFlag<HardEvent::MTE3_S>(complete);
@@ -724,9 +820,9 @@ private:
 
     __aicore__ inline uint32_t ProcessGroup(uint32_t group)
     {
-        FillOutput(union_idx_gm_, group * width_, width_, -1);
-        FillOutput(exact_mask_gm_, group * width_ * BLOCK_Y,
-                   width_ * BLOCK_Y, 0);
+        FillOutput(union_idx_gm_, group * output_width_, output_width_, -1);
+        FillOutput(exact_mask_gm_, group * output_width_ * BLOCK_Y,
+                   output_width_ * BLOCK_Y, 0);
 
         LocalTensor<int32_t> keys = keys_buf_.Get<int32_t>();
         LocalTensor<int32_t> sorted = sorted_buf_.Get<int32_t>();
@@ -787,6 +883,7 @@ private:
     uint32_t input_groups_;
     uint32_t topk_;
     uint32_t width_;
+    uint32_t output_width_;
     uint32_t compact_row_stride_;
     uint32_t sort_tmp_bytes_;
     uint32_t groups_per_core_;

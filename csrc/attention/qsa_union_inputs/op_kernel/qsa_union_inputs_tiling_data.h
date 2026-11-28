@@ -15,6 +15,7 @@ struct QsaUnionInputsTilingData {
     uint32_t input_groups{0};
     uint32_t topk{0};
     uint32_t width{0};
+    uint32_t output_width{0};
     uint32_t compact_row_stride{0};
     uint32_t sort_tmp_bytes{0};
     uint32_t groups_per_core{0};

@@ -54,6 +54,7 @@ ge::graphStatus Tiling4QsaUnionInputs(gert::TilingContext* context)
                 OP_LOGE(context, "QsaUnionInputs supports power-of-two topk up to 512"),
                 return ge::GRAPH_FAILED);
     const uint32_t width = UNION_SIZE * topk;
+    const uint32_t output_width = UNION_SIZE * (input_groups + 1);
 
     auto platform = platform_ascendc::PlatformAscendC(context->GetPlatformInfo());
     uint64_t ub_size = 0;
@@ -91,6 +92,7 @@ ge::graphStatus Tiling4QsaUnionInputs(gert::TilingContext* context)
     tiling.set_input_groups(input_groups);
     tiling.set_topk(topk);
     tiling.set_width(width);
+    tiling.set_output_width(output_width);
     tiling.set_compact_row_stride(compact_columns);
     tiling.set_sort_tmp_bytes(sort_tmp_bytes);
     tiling.set_groups_per_core(groups_per_core);
