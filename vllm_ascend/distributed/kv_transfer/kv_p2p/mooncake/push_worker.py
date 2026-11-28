@@ -636,72 +636,10 @@ class MooncakePushConnectorWorker(MooncakeBaseConnectorWorker):
         # Backend contract: synchronous WRITE returns only after host/device
         # accesses finish, including on failure. The connector waits for this
         # return before notifying D or allowing source blocks to be reused.
-        src_list: list[int] = []
-        dst_list: list[int] = []
-        length_list: list[int] = []
         try:
-            local_index = self._layer_indices[batch.layer_name]
-            remote = batch.remote_metadata
-            pp = remote.metadata_by_pp_rank[batch.remote_rank[0]]
-            remote_index = pp.layer_names.index(batch.layer_name)
+            pp = batch.remote_metadata.metadata_by_pp_rank[batch.remote_rank[0]]
             worker = pp.metadata_by_pcp_rank[batch.remote_rank[1]].metadata_by_tp_rank[batch.remote_rank[2]]
-            spec = self.kv_cache_specs[self.layer_name_to_spec_index[batch.layer_name]]
-            if isinstance(spec, MambaSpec):
-                self._append_mamba_transfer_addresses(
-                    spec,
-                    batch.remote_rank[1],
-                    batch.remote_rank[2],
-                    remote.tp_size,
-                    {
-                        (local_index, remote_index): [
-                            (req.request_id, list(req.local_block_ids), list(req.remote_block_ids))
-                            for req in batch.requests
-                        ]
-                    },
-                    pp,
-                    src_list,
-                    dst_list,
-                    length_list,
-                )
-            else:
-                partition = self._get_transfer_partition(batch.layer_name, remote, batch.remote_rank)
-                assert partition is not None
-                local_offset, remote_offset, heads = partition
-                whole = isinstance(spec, (MLAAttentionSpec, SlidingWindowMLASpec)) or is_circular_kv_cache_spec(spec)
-                local = self.transfer_metadata
-                for req in batch.requests:
-                    if len(req.local_block_ids) != len(req.remote_block_ids):
-                        raise ValueError("P/D block counts differ")
-                # Reuse the request-ordered block arrays across cache components.
-                local_blocks = np.fromiter(
-                    (block for req in batch.requests for block in req.local_block_ids), dtype=np.uint64
-                )
-                remote_blocks = np.fromiter(
-                    (block for req in batch.requests for block in req.remote_block_ids), dtype=np.uint64
-                )
-                for cache_index, (local_addr, remote_addr) in enumerate(
-                    zip(local.kv_caches_base_addr[local_index], worker.kv_caches_base_addr[remote_index], strict=True)
-                ):
-                    local_len = local.block_lens[local_index][cache_index]
-                    remote_len = pp.block_lens[remote_index][cache_index]
-                    if not whole:
-                        local_len //= local.block_shapes[local_index][cache_index][0]
-                        remote_len //= pp.block_shapes[remote_index][cache_index][0]
-                    if local_len != remote_len:
-                        raise ValueError("P/D cache slice lengths differ")
-                    src_list.extend(
-                        (
-                            local_blocks * np.uint64(local.block_strides[local_index][cache_index])
-                            + np.uint64(local_addr + local_offset * local_len)
-                        ).tolist()
-                    )
-                    dst_list.extend(
-                        (
-                            remote_blocks * np.uint64(pp.block_strides[remote_index][cache_index])
-                            + np.uint64(remote_addr + remote_offset * remote_len)
-                        ).tolist()
-                    )
-                    length_list.extend([local_len * heads] * len(local_blocks))
+            src_list, dst_list, length_list = self._get_write_addresses(batch, pp, worker)
             batch.event.synchronize()
             if src_list:
                 session = f"{worker.local_ip}:{worker.te_rpc_port}"
@@ -711,6 +649,72 @@ class MooncakePushConnectorWorker(MooncakeBaseConnectorWorker):
         except Exception as exc:
             return str(exc) or type(exc).__name__
         return None
+
+    def _get_write_addresses(self, batch, pp, worker):
+        src_list: list[int] = []
+        dst_list: list[int] = []
+        length_list: list[int] = []
+        local_index = self._layer_indices[batch.layer_name]
+        remote_index = pp.layer_names.index(batch.layer_name)
+        remote = batch.remote_metadata
+        spec = self.kv_cache_specs[self.layer_name_to_spec_index[batch.layer_name]]
+        if isinstance(spec, MambaSpec):
+            self._append_mamba_transfer_addresses(
+                spec,
+                batch.remote_rank[1],
+                batch.remote_rank[2],
+                remote.tp_size,
+                {
+                    (local_index, remote_index): [
+                        (req.request_id, list(req.local_block_ids), list(req.remote_block_ids))
+                        for req in batch.requests
+                    ]
+                },
+                pp,
+                src_list,
+                dst_list,
+                length_list,
+            )
+        else:
+            partition = self._get_transfer_partition(batch.layer_name, remote, batch.remote_rank)
+            assert partition is not None
+            local_offset, remote_offset, heads = partition
+            whole = isinstance(spec, (MLAAttentionSpec, SlidingWindowMLASpec)) or is_circular_kv_cache_spec(spec)
+            local = self.transfer_metadata
+            for req in batch.requests:
+                if len(req.local_block_ids) != len(req.remote_block_ids):
+                    raise ValueError("P/D block counts differ")
+            # Reuse the request-ordered block arrays across cache components.
+            local_blocks = np.fromiter(
+                (block for req in batch.requests for block in req.local_block_ids), dtype=np.uint64
+            )
+            remote_blocks = np.fromiter(
+                (block for req in batch.requests for block in req.remote_block_ids), dtype=np.uint64
+            )
+            for cache_index, (local_addr, remote_addr) in enumerate(
+                zip(local.kv_caches_base_addr[local_index], worker.kv_caches_base_addr[remote_index], strict=True)
+            ):
+                local_len = local.block_lens[local_index][cache_index]
+                remote_len = pp.block_lens[remote_index][cache_index]
+                if not whole:
+                    local_len //= local.block_shapes[local_index][cache_index][0]
+                    remote_len //= pp.block_shapes[remote_index][cache_index][0]
+                if local_len != remote_len:
+                    raise ValueError("P/D cache slice lengths differ")
+                src_list.extend(
+                    (
+                        local_blocks * np.uint64(local.block_strides[local_index][cache_index])
+                        + np.uint64(local_addr + local_offset * local_len)
+                    ).tolist()
+                )
+                dst_list.extend(
+                    (
+                        remote_blocks * np.uint64(pp.block_strides[remote_index][cache_index])
+                        + np.uint64(remote_addr + remote_offset * remote_len)
+                    ).tolist()
+                )
+                length_list.extend([local_len * heads] * len(local_blocks))
+        return src_list, dst_list, length_list
 
     def _process_sending_requests(
         self,

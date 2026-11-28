@@ -1,0 +1,9 @@
+pr: 23445
+entries:
+  - category: feature
+    text: >-
+      Enable direct Device RDMA writes into the HiSparse Host KV pool on Ascend A3
+      with TP1 and Mooncake layerwise Push. Set memfabric_host_allocator to pinned
+      in the Decode MooncakeConnectorV2 configuration.
+    model: glm-5.3
+    hardware: [A3]

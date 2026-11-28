@@ -1610,7 +1610,7 @@ __all__ = [
 ]
 
 
-class _MemFabricPullWorker(MooncakePullConnectorWorker):
+class _MemFabricTransport(MooncakeBaseConnectorWorker):
     def _get_transfer_engine(self, device_name: str | None):
         extra = self.kv_transfer_config.kv_connector_extra_config or {}
         protocol = extra.get("memfabric_transfer_protocol", "device_urma")
@@ -1618,8 +1618,14 @@ class _MemFabricPullWorker(MooncakePullConnectorWorker):
             role=MEMFABRIC_ROLE_DECODE if self.kv_transfer_config.is_kv_consumer else MEMFABRIC_ROLE_PREFILL,
             device_id=torch.npu.current_device(),
             transfer_protocol=protocol,
+            # The target of the transfer publishes the MemFabric session.
+            store_server_role=MEMFABRIC_ROLE_DECODE if extra.get("use_layerwise") else MEMFABRIC_ROLE_PREFILL,
         )
         return global_memfabric_te.get_transfer_engine(self.side_channel_host)
 
     def _register_transfer_buffers(self, ptrs: list[int], lengths: list[int]) -> None:
         global_memfabric_te.register_buffer(ptrs, lengths)
+
+
+class _MemFabricPullWorker(_MemFabricTransport, MooncakePullConnectorWorker):
+    pass

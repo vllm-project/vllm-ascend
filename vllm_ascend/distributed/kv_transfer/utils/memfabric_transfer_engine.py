@@ -9,9 +9,12 @@ unchanged.
 from __future__ import annotations
 
 import threading
-from typing import Any
+from typing import TYPE_CHECKING, Any
 
 from vllm.logger import logger
+
+if TYPE_CHECKING:
+    from torch import Tensor
 
 BACKEND_MEMFABRIC = "memfabric"
 MEMFABRIC_ROLE_PREFILL = "Prefill"
@@ -36,6 +39,13 @@ class MemfabricBackend:
 
     def register_memory(self, ptr: int, size: int) -> int:
         return 0 if self._engine.register_memory(ptr, size) == 0 else -1
+
+    def batch_transfer_sync_write(self, session_id, local_buffers, peer_buffers, length_list) -> int:
+        status = self._engine.batch_transfer_sync_write(session_id, local_buffers, peer_buffers, length_list)
+        if status:
+            logger.error("MemFabric WRITE failed (ret=%s) for session %s", status, session_id)
+            return -1
+        return 0
 
     def batch_transfer_sync_read(
         self,
@@ -66,11 +76,13 @@ class GlobalMemfabricTE:
     def __init__(self):
         self._engine: MemfabricBackend | None = None
         self._role: str | None = None
+        self._store_server_role = MEMFABRIC_ROLE_PREFILL
         self._device_id: int | None = None
         self._transfer_protocol: str | None = None
         self._hostname: str | None = None
         self._unique_id: str | None = None
         self._is_buffer_registered = False
+        self._pinned_host_buffer: Tensor | None = None
         self._engine_lock = threading.Lock()
         self._register_buffer_lock = threading.Lock()
 
@@ -86,6 +98,7 @@ class GlobalMemfabricTE:
         role: str,
         device_id: int,
         transfer_protocol: str | None = None,
+        store_server_role: str = MEMFABRIC_ROLE_PREFILL,
     ) -> None:
         """Bind this process singleton to one MemFabric role, device and protocol.
 
@@ -98,6 +111,8 @@ class GlobalMemfabricTE:
         """
         if role not in _VALID_MEMFABRIC_ROLES:
             raise ValueError(f"Invalid MemFabric role {role!r}; expected one of {_VALID_MEMFABRIC_ROLES}")
+        if store_server_role not in _VALID_MEMFABRIC_ROLES:
+            raise ValueError(f"Invalid MemFabric store_server_role {store_server_role!r}")
         if device_id < 0:
             raise ValueError(f"MemFabric device_id must be non-negative, got {device_id}")
         protocol = (transfer_protocol or _DEFAULT_MEMFABRIC_TRANSFER_PROTOCOL).strip().lower()
@@ -109,19 +124,21 @@ class GlobalMemfabricTE:
 
         with self._engine_lock:
             configured = self._role is not None
-            if configured and (role, device_id, protocol) != (
+            if configured and (role, device_id, protocol, store_server_role) != (
                 self._role,
                 self._device_id,
                 self._transfer_protocol,
+                self._store_server_role,
             ):
                 raise RuntimeError(
                     "MemFabric transfer engine is already configured for "
                     f"role={self._role}, device_id={self._device_id}, "
-                    f"transfer_protocol={self._transfer_protocol}; cannot "
+                    f"transfer_protocol={self._transfer_protocol}, store_server_role={self._store_server_role}; cannot "
                     f"reconfigure it for role={role}, device_id={device_id}, "
-                    f"transfer_protocol={protocol}"
+                    f"transfer_protocol={protocol}, store_server_role={store_server_role}"
                 )
             self._role = role
+            self._store_server_role = store_server_role
             self._device_id = device_id
             self._transfer_protocol = protocol
 
@@ -190,7 +207,7 @@ class GlobalMemfabricTE:
             hostname,
             self._role,
             self._device_id,
-            store_server_role=MEMFABRIC_ROLE_PREFILL,
+            store_server_role=self._store_server_role,
             data_op_type=data_op_type,
         )
         if ret != 0:
@@ -203,6 +220,18 @@ class GlobalMemfabricTE:
         self._unique_id = f"{hostname}:{advertised_rpc_port}"
         return MemfabricBackend(raw_engine, advertised_rpc_port)
 
+    def register_pinned_host_buffer(self, buffer: Tensor) -> None:
+        """Register and retain the Decode Host allocation for the engine's lifetime."""
+        with self._register_buffer_lock:
+            if self._engine is None or self._is_buffer_registered:
+                raise RuntimeError("MemFabric must register the pinned Host pool before the KV buffers")
+            if self._pinned_host_buffer is not None:
+                raise RuntimeError("MemFabric pinned Host pool has already been registered")
+            ret = self._engine.register_memory(buffer.data_ptr(), buffer.nbytes)
+            if ret != 0:
+                raise RuntimeError(f"MemFabric pinned Host pool registration failed with ret_value={ret}")
+            self._pinned_host_buffer = buffer
+
     def register_buffer(self, ptrs: list[int], sizes: list[int]) -> None:
         if len(ptrs) != len(sizes):
             raise ValueError(f"MemFabric registration pointer/size counts differ: {len(ptrs)} != {len(sizes)}")
@@ -211,7 +240,15 @@ class GlobalMemfabricTE:
                 raise RuntimeError("MemFabric transfer engine must be initialized")
             if self._is_buffer_registered:
                 return
+            pinned = self._pinned_host_buffer
+            pinned_ptr = None if pinned is None else pinned.data_ptr()
+            if pinned is not None and any(
+                ptr == pinned_ptr and size != pinned.nbytes for ptr, size in zip(ptrs, sizes)
+            ):
+                raise ValueError("MemFabric pinned Host pool registration extent changed")
             for ptr, size in zip(ptrs, sizes):
+                if ptr == pinned_ptr:
+                    continue
                 ret = self._engine.register_memory(ptr, size)
                 if ret != 0:
                     raise RuntimeError(f"MemFabric memory registration failed with ret_value={ret}")

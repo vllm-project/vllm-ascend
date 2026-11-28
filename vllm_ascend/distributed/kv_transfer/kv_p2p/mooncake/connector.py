@@ -287,7 +287,21 @@ class MooncakePushConnector(MooncakeBaseConnector):
         if role == KVConnectorRole.SCHEDULER:
             self.connector_scheduler = MooncakePushConnectorScheduler(vllm_config, str(self.engine_id), kv_cache_config)
         elif role == KVConnectorRole.WORKER:
-            self.connector_worker = MooncakePushConnectorWorker(vllm_config, str(self.engine_id), kv_cache_config)
+            worker_cls = MooncakePushConnectorWorker
+            if transfer_config.kv_connector == "MooncakeConnectorV2" and (
+                transfer_config.kv_connector_extra_config.get("transfer_backend") == "memfabric"
+            ):
+                from vllm_ascend.distributed.kv_transfer.kv_p2p.hisparse_pd import (
+                    _HiSparsePushWorker,
+                    _MemFabricPushWorker,
+                )
+
+                worker_cls = (
+                    _HiSparsePushWorker
+                    if transfer_config.is_kv_consumer and kv_cache_config.hisparse_host_num_blocks is not None
+                    else _MemFabricPushWorker
+                )
+            self.connector_worker = worker_cls(vllm_config, str(self.engine_id), kv_cache_config)
         else:
             raise ValueError(f"Unsupported KVConnectorRole: {role}")
 

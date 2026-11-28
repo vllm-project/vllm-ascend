@@ -303,30 +303,80 @@ def _uses_memfabric(transfer: KVTransferConfig | None) -> bool:
     )
 
 
-def uses_memfabric_pd(transfer: KVTransferConfig | None) -> bool:
+def _memfabric_pd_config(transfer: KVTransferConfig | None) -> dict | None:
     if transfer is None or transfer.kv_connector != "MultiConnector":
-        return False
+        return None
     for child in (transfer.kv_connector_extra_config or {}).get("connectors", []):
         if child.get("kv_connector") != "MooncakeConnectorV2" or child.get("kv_role") not in ("kv_consumer", "kv_both"):
             continue
         extra = child.get("kv_connector_extra_config") or {}
-        if extra.get("transfer_backend") == "memfabric" and not extra.get("use_layerwise", False):
-            return True
-    return False
+        if extra.get("transfer_backend") == "memfabric":
+            return extra
+    return None
+
+
+def uses_memfabric_pd(transfer: KVTransferConfig | None) -> bool:
+    return _memfabric_pd_config(transfer) is not None
+
+
+def _allocate_memfabric_pinned_host(size: int) -> torch.Tensor:
+    from vllm.utils.network_utils import get_ip
+    from vllm.v1.hisparse.runtime import check_hisparse_host_memory
+
+    from vllm_ascend.distributed.kv_transfer.utils.memfabric_transfer_engine import (
+        MEMFABRIC_ROLE_DECODE,
+        global_memfabric_te,
+    )
+
+    allocated_bytes = triton.cdiv(size, mmap.PAGESIZE) * mmap.PAGESIZE
+    check_hisparse_host_memory(allocated_bytes)
+    backing = torch.empty(allocated_bytes, dtype=torch.int8, pin_memory=True)
+    address = backing.data_ptr()
+    if address % mmap.PAGESIZE:
+        raise RuntimeError("MemFabric pinned HiSparse Host storage is not page aligned")
+
+    runtime = ctypes.CDLL("libascendcl.so")
+    get_device_pointer = runtime.aclrtHostGetDevicePointer
+    get_device_pointer.argtypes = [ctypes.c_void_p, ctypes.POINTER(ctypes.c_void_p), ctypes.c_uint32]
+    get_device_pointer.restype = ctypes.c_int
+    global_memfabric_te.configure(
+        role=MEMFABRIC_ROLE_DECODE,
+        device_id=torch.npu.current_device(),
+        transfer_protocol="device_rdma",
+        store_server_role=MEMFABRIC_ROLE_DECODE,
+    )
+    global_memfabric_te.get_transfer_engine(get_ip())
+    # Device RDMA creates the mapping. Reuse it for AIV accesses to the same Host pool.
+    global_memfabric_te.register_pinned_host_buffer(backing)
+    mapped = ctypes.c_void_p()
+    status = get_device_pointer(address, ctypes.byref(mapped), 0)
+    if status or not mapped.value:
+        raise RuntimeError(f"MemFabric HiSparse Host device address lookup failed: {status}")
+
+    source = backing[:size]
+    source._hisparse_registration = MappedHostTensor(backing, memfabric_device_ptr=mapped.value)
+    return source
 
 
 class AscendHiSparseOffloadManager:
-    def __init__(self, size: int, *, shared: bool) -> None:
+    def __init__(self, size: int, *, shared: bool, pinned: bool = False) -> None:
         from vllm.distributed import get_tp_group
 
         if size <= 0:
             raise ValueError("HiSparse Source must be nonempty")
-        group = get_tp_group() if shared else None
-        region = MemFabricSharedHostRegion([size], group=group)
-        self.shared_region = region if group is not None else None
-        self.is_host_writer = group is None or group.rank_in_group == 0
-        self.source = region.base_tensor[:size]
-        self.source._hisparse_registration = region.base_tensor._hisparse_registration
+        if pinned:
+            if shared or get_tp_group().world_size != 1:
+                raise ValueError("MemFabric pinned HiSparse Host storage requires TP=1")
+            self.shared_region = None
+            self.is_host_writer = True
+            self.source = _allocate_memfabric_pinned_host(size)
+        else:
+            group = get_tp_group() if shared else None
+            region = MemFabricSharedHostRegion([size], group=group)
+            self.shared_region = region if group is not None else None
+            self.is_host_writer = group is None or group.rank_in_group == 0
+            self.source = region.base_tensor[:size]
+            self.source._hisparse_registration = region.base_tensor._hisparse_registration
         self.source._hisparse_registration.offload_manager = self
 
     @classmethod
@@ -373,13 +423,19 @@ def install() -> None:
     @wraps(original)
     def allocate(pool, size):
         shared = pool.kv_cache_config.hisparse_shared_host_pool
-        if (
-            pool.backing is not None
-            or not isinstance(get_hisparse_backend(), AscendHiSparseBackend)
-            or not (shared or uses_memfabric_pd(pool.vllm_config.kv_transfer_config))
-        ):
+        if pool.backing is not None or not isinstance(get_hisparse_backend(), AscendHiSparseBackend):
             return original(pool, size)
-        manager = AscendHiSparseOffloadManager(size, shared=shared)
+        config = _memfabric_pd_config(pool.vllm_config.kv_transfer_config)
+        if not shared and config is None:
+            return original(pool, size)
+        extra = config or {}
+        allocator = extra.get("memfabric_host_allocator", "shared")
+        if allocator not in ("shared", "pinned"):
+            raise ValueError(f"Unsupported MemFabric HiSparse Host allocator {allocator!r}")
+        pinned = allocator == "pinned"
+        if pinned and (not extra.get("use_layerwise") or extra.get("memfabric_transfer_protocol") != "device_rdma"):
+            raise ValueError("MemFabric pinned HiSparse Host storage requires layerwise Push with device_rdma")
+        manager = AscendHiSparseOffloadManager(size, shared=shared, pinned=pinned)
         registration = manager.source._hisparse_registration
         registered = registration.tensor.view(torch.int8)
         registered._hisparse_registration = registration

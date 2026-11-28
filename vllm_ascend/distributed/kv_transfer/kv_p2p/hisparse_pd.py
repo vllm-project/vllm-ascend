@@ -1,6 +1,6 @@
 # SPDX-License-Identifier: Apache-2.0
 # SPDX-FileCopyrightText: Copyright contributors to the vLLM Ascend project
-"""Pull P KV into HiSparse's Host Source and NPU Indexer groups."""
+"""Adapt Mooncake transfers to HiSparse Host Source and NPU Indexer groups."""
 
 import ctypes
 import threading
@@ -13,12 +13,15 @@ import torch
 from vllm.config import VllmConfig
 from vllm.v1.kv_cache_interface import KVCacheConfig
 
+from vllm_ascend.distributed.kv_transfer.kv_p2p.mooncake.base_worker import MooncakeBaseConnectorWorker
 from vllm_ascend.distributed.kv_transfer.kv_p2p.mooncake.connector import MooncakePullConnector
 from vllm_ascend.distributed.kv_transfer.kv_p2p.mooncake.metadata import MooncakeTransferMetadata
 from vllm_ascend.distributed.kv_transfer.kv_p2p.mooncake.pull_worker import (
     MooncakePullRecvingThread,
     _MemFabricPullWorker,
+    _MemFabricTransport,
 )
+from vllm_ascend.distributed.kv_transfer.kv_p2p.mooncake.push_worker import MooncakePushConnectorWorker
 from vllm_ascend.distributed.kv_transfer.kv_p2p.mooncake.utils import (
     as_kv_cache_tensors,
 )
@@ -155,36 +158,44 @@ class _HiSparsePullThread(MooncakePullRecvingThread):
         if len(self.kv_caches_base_addr[local_index]) != 1 or len(bases) not in (1, 2):
             raise ValueError("HiSparse Pull requires one Host Source and one or two P components")
 
-        tokens = spec.block_size
-        sizes = remote_metadata.block_lens[remote_index]
-        strides = remote_metadata.block_strides[remote_index]
-        if len(bases) == 1 and len(remote_metadata.block_shapes[remote_index][0]) == 1:
-            # Component-major MLA is advertised as one flat slot.
-            hf = self.model_config.hf_text_config
-            latent_bytes = tokens * hf.kv_lora_rank * spec.dtype.itemsize
-            rope_bytes = tokens * hf.qk_rope_head_dim * spec.dtype.itemsize
-            if latent_bytes + rope_bytes > sizes[0]:
-                raise ValueError("P MLA slot is smaller than its NoPE/RoPE payload")
-            bases = [bases[0], bases[0] + latent_bytes]
-            sizes = [latent_bytes, rope_bytes]
-            strides = [strides[0], strides[0]]
-
-        page_bytes = self.block_lens[local_index][0]
-        if sum(sizes) != page_bytes or any(size % tokens for size in sizes):
-            raise ValueError("HiSparse Pull MLA component sizes differ from Host Source")
-
-        row_offset = 0
-        components = []
-        for base, stride, size in zip(bases, strides, sizes, strict=True):
-            token_bytes = size // tokens
-            components.append((base, stride, token_bytes, row_offset))
-            row_offset += token_bytes
-        return row_offset, components
+        return _mla_components(
+            spec.block_size,
+            bases,
+            remote_metadata,
+            remote_index,
+            self.block_lens[local_index][0],
+            spec,
+            getattr(self, "model_config", None),
+        )
 
 
-class _HiSparsePDWorker(_MemFabricPullWorker):
-    receiving_thread_cls = _HiSparsePullThread
+def _mla_components(tokens, bases, source, index, page_bytes, spec, model_config):
+    sizes = source.block_lens[index]
+    strides = source.block_strides[index]
+    if len(bases) == 1 and len(source.block_shapes[index][0]) == 1:
+        # Component-major MLA is advertised as one flat slot.
+        hf = model_config.hf_text_config
+        latent_bytes = tokens * hf.kv_lora_rank * spec.dtype.itemsize
+        rope_bytes = tokens * hf.qk_rope_head_dim * spec.dtype.itemsize
+        if latent_bytes + rope_bytes > sizes[0]:
+            raise ValueError("P MLA slot is smaller than its NoPE/RoPE payload")
+        bases = [bases[0], bases[0] + latent_bytes]
+        sizes = [latent_bytes, rope_bytes]
+        strides = [strides[0], strides[0]]
 
+    if sum(sizes) != page_bytes or any(size % tokens for size in sizes):
+        raise ValueError("HiSparse Pull MLA component sizes differ from Host Source")
+
+    row_offset = 0
+    components = []
+    for base, stride, size in zip(bases, strides, sizes, strict=True):
+        token_bytes = size // tokens
+        components.append((base, stride, token_bytes, row_offset))
+        row_offset += token_bytes
+    return row_offset, components
+
+
+class _HiSparseDestinationCaches(MooncakeBaseConnectorWorker):
     def _register_transfer_buffers(self, ptrs: list[int], lengths: list[int]) -> None:
         # URMA is communication-based: both P sources and D Host/Indexer destinations need MRs.
         regions: dict[int, int] = {}
@@ -263,7 +274,7 @@ class _HiSparsePDWorker(_MemFabricPullWorker):
                     if stride > 1:
                         caches[name] = [cache[::stride] for cache in as_kv_cache_tensors(caches[name])]
 
-    def _create_recving_thread(self, ready_event: threading.Event) -> MooncakePullRecvingThread:
+    def _set_host_handshake_layout(self) -> None:
         metadata = self.xfer_handshake_metadata
         assert isinstance(metadata, MooncakeTransferMetadata)
         config = self.kv_cache_config
@@ -275,8 +286,93 @@ class _HiSparsePDWorker(_MemFabricPullWorker):
             if group_id in host_groups:
                 parts = as_kv_cache_tensors(self.kv_caches[name])
                 scales[index] = [cache.shape[0] // host_blocks for cache in parts[: len(scales[index])]]
-        self.xfer_handshake_metadata = replace(metadata, block_size_scales=scales)
+        host_layers = tuple(sorted(name for i in host_groups for name in config.kv_cache_groups[i].layer_names))
+        self.xfer_handshake_metadata = replace(
+            metadata,
+            block_size_scales=scales,
+            hisparse_host_layers=host_layers,
+            hisparse_shared_host=config.hisparse_shared_host_pool,
+        )
+
+
+class _HiSparsePDWorker(_HiSparseDestinationCaches, _MemFabricPullWorker):
+    receiving_thread_cls = _HiSparsePullThread
+
+    def _create_recving_thread(self, ready_event: threading.Event) -> MooncakePullRecvingThread:
+        self._set_host_handshake_layout()
         return super()._create_recving_thread(ready_event)
+
+
+class _MemFabricPushWorker(_MemFabricTransport, MooncakePushConnectorWorker):
+    """Send restored and newly computed P pages while AscendStore holds the layer slot."""
+
+    def _get_remote_metadata(self, params):
+        remote = super()._get_remote_metadata(params)
+        if any(pp.hisparse_host_layers for pp in remote.metadata_by_pp_rank.values()):
+            if (
+                self.tp_size != remote.tp_size
+                or self.pcp_size != 1
+                or remote.pcp_size != 1
+                or self.dcp_size != 1
+                or remote.dcp_size != 1
+                or self.pp_size != 1
+                or remote.pp_size != 1
+            ):
+                raise ValueError("Layerwise HiSparse Push requires equal TP and PP=PCP=DCP=1 on both endpoints")
+            layers = set(remote.metadata_by_pp_rank[0].layer_names)
+            if layers != set(self._layer_indices):
+                raise ValueError("P and D layerwise HiSparse transfer layers differ")
+        return remote
+
+    def _get_write_addresses(self, batch, pp, worker):
+        if batch.layer_name not in pp.hisparse_host_layers:
+            return super()._get_write_addresses(batch, pp, worker)
+        local = self.transfer_metadata
+        i = self._layer_indices[batch.layer_name]
+        j = pp.layer_names.index(batch.layer_name)
+        bases = local.kv_caches_base_addr[i]
+        dests = worker.kv_caches_base_addr[j]
+        if len(bases) not in (1, 2) or len(dests) != 1:
+            raise ValueError("HiSparse Push requires one Host Source and one or two P components")
+        spec = self.kv_cache_specs[self.layer_name_to_spec_index[batch.layer_name]]
+        tokens = local.layer_block_sizes[i] // local.block_size_scales[i][0]
+        row_bytes, components = _mla_components(
+            tokens, bases, local, i, pp.block_lens[j][0], spec, self.vllm_config.model_config
+        )
+        return _host_write_addresses(batch.requests, tokens, components, row_bytes, dests[0], pp.block_strides[j][0])
+
+
+def _host_write_addresses(requests, tokens, components, row_bytes, host_base, host_stride):
+    """Write only the valid part of each page directly into token-major Host Source."""
+    sources, destinations, lengths = [], [], []
+    for req in requests:
+        first_page = req.start_token // tokens
+        for n, (local_id, remote_id) in enumerate(zip(req.local_block_ids, req.remote_block_ids, strict=True)):
+            page_start = (first_page + n) * tokens
+            start = max(0, req.start_token - page_start)
+            stop = min(tokens, req.end_token - page_start)
+            host_page = host_base + remote_id * host_stride
+            for base, stride, width, offset in components:
+                source_page = base + local_id * stride
+                if width == row_bytes:
+                    sources.append(source_page + start * width)
+                    destinations.append(host_page + start * row_bytes)
+                    lengths.append((stop - start) * width)
+                else:
+                    for row in range(start, stop):
+                        sources.append(source_page + row * width)
+                        destinations.append(host_page + row * row_bytes + offset)
+                        lengths.append(width)
+    return sources, destinations, lengths
+
+
+class _HiSparsePushWorker(_HiSparseDestinationCaches, _MemFabricPushWorker):
+    """Publish only the D Host Source owner and each rank's NPU Indexer."""
+
+    def register_kv_caches(self, kv_caches):
+        validate_hisparse_pd_config(self.kv_transfer_config, self.kv_cache_config)
+        super().register_kv_caches(kv_caches)
+        self._set_host_handshake_layout()
 
 
 def validate_hisparse_pd_config(transfer, kv_cache_config: KVCacheConfig) -> None:
