@@ -94,7 +94,7 @@ import json
 import os
 import sys
 import uuid
-from contextlib import asynccontextmanager
+from contextlib import aclosing, asynccontextmanager
 
 import httpx
 from fastapi import FastAPI, HTTPException, Request
@@ -107,10 +107,10 @@ from vllm_ascend.distributed.kv_transfer.kv_p2p.sfa_pd_rd2h.protocol import (
 
 try:
     # Imported as a package module (tests).
-    from examples.disaggregated_prefill_v1.sse_frame_parser import SSEFrameParser
+    from examples.disaggregated_prefill_v1.sse_frame_parser import iter_response_frames
 except ImportError:
     # Run as a standalone script: the script's own directory is on sys.path.
-    from sse_frame_parser import SSEFrameParser
+    from sse_frame_parser import iter_response_frames
 
 logger = init_logger(__name__)
 
@@ -538,37 +538,25 @@ async def _handle_completions(api: str, request: Request):
             retry_count = 0
             retry = True
             completion_tokens = 0
-            frame_parser = SSEFrameParser()
-            # Only one await per chunk, minimal logic in loop
             try:
                 while retry:
                     retry = False
-                    # Each decoder attempt emits a self-contained stream, so the
-                    # frame buffer must be reset at every attempt boundary.
-                    frame_parser = SSEFrameParser()
-                    async for chunk in stream_service_response_with_retry(
+                    gen = stream_service_response_with_retry(
                         decoder.client,
                         api,
                         req_data,
                         request_id=request_id,
                         max_retries=global_args.max_retries,
                         base_delay=global_args.retry_delay,
-                    ):
-                        # The decode backend speaks SSE, but the network does
-                        # not respect frame boundaries: one frame can arrive
-                        # split across two chunks, and two frames can be
-                        # coalesced into one chunk. Reassemble frames before
-                        # decoding them, so no frame is dropped.
-                        frames = frame_parser.feed(chunk)
-                        if not frames:
-                            # No complete frame yet; forward the raw bytes so
-                            # the client still sees them, and wait for the
-                            # rest of the frame.
-                            if chunk:
-                                yield chunk
-                            continue
-                        for frame in frames:
+                    )
+                    async with aclosing(iter_response_frames(gen)) as frames:
+                        async for frame in frames:
+                            if frame.payload is None:
+                                if stream_flag:
+                                    yield frame.raw
+                                continue
                             chunk_json = frame.payload
+                            chunk = frame.raw
                             choices = chunk_json.get("choices", [])
                             if not choices:
                                 yield chunk
@@ -585,7 +573,7 @@ async def _handle_completions(api: str, request: Request):
                             completion_tokens = (
                                 (completion_tokens + 1)
                                 if stream_flag
-                                else (completion_tokens + usage.get("completion_tokens"))
+                                else (completion_tokens + usage.get("completion_tokens", 0))
                             )
                             if stop_reason == "recomputed":
                                 retry = True
@@ -608,8 +596,6 @@ async def _handle_completions(api: str, request: Request):
                                     choice["text"] = generated_token
                                 chunk = json.dumps(chunk_json).encode("utf-8")
                             yield chunk
-                        if retry:
-                            break
             except Exception as e:
                 logger.error(
                     "Error during streaming from decoder %s: %s the aborted request %s "

@@ -127,7 +127,7 @@ import tempfile
 import threading
 import time
 import uuid
-from contextlib import asynccontextmanager
+from contextlib import aclosing, asynccontextmanager
 from dataclasses import dataclass, field
 from enum import Enum
 from multiprocessing.managers import BaseManager
@@ -140,10 +140,10 @@ from fastapi.responses import JSONResponse, Response, StreamingResponse
 
 try:
     # Imported as a package module (tests).
-    from examples.disaggregated_prefill_v1.sse_frame_parser import SSEFrameParser
+    from examples.disaggregated_prefill_v1.sse_frame_parser import iter_response_frames
 except ImportError:
     # Run as a standalone script: the script's own directory is on sys.path.
-    from sse_frame_parser import SSEFrameParser
+    from sse_frame_parser import iter_response_frames
 
 logger = logging.getLogger(__name__)
 
@@ -1072,10 +1072,11 @@ async def _replay_first_chunk(first_chunk: bytes, gen: Any):
     returned with the real HTTP status; this replays that chunk so the client
     still receives the full stream.
     """
-    if first_chunk:
-        yield first_chunk
-    async for chunk in gen:
-        yield chunk
+    async with aclosing(gen):
+        if first_chunk:
+            yield first_chunk
+        async for chunk in gen:
+            yield chunk
 
 
 async def handle_completions_impl(api: str, request: Request):
@@ -1156,7 +1157,6 @@ async def handle_completions_impl(api: str, request: Request):
             retry = True
             completion_tokens = 0
             reported_prefiller_cached_tokens = instance_info.prefiller_cached_tokens
-            frame_parser = SSEFrameParser()
 
             async def release_prefill_kv_once() -> None:
                 nonlocal released_kv
@@ -1169,9 +1169,6 @@ async def handle_completions_impl(api: str, request: Request):
             try:
                 while retry:
                     retry = False
-                    # Each decoder attempt emits a self-contained stream, so the
-                    # frame buffer must be reset at every attempt boundary.
-                    frame_parser = SSEFrameParser()
                     if preopened_gen is not None:
                         # First iteration: consume the decode stream pre-opened by the
                         # caller so initial 4xx/5xx could be returned with the real status.
@@ -1187,23 +1184,14 @@ async def handle_completions_impl(api: str, request: Request):
                             max_retries=args.max_retries,
                             base_delay=args.retry_delay,
                         )
-                    async for chunk in gen:
-                        if not released_kv and chunk:
-                            await release_prefill_kv_once()
-                        # The decode backend speaks SSE, but the network does
-                        # not respect frame boundaries: one frame can arrive
-                        # split across two chunks, and two frames can be
-                        # coalesced into one chunk. Reassemble frames before
-                        # decoding them, so no frame is dropped.
-                        frames = frame_parser.feed(chunk)
-                        if not frames:
-                            # No complete frame yet; forward the raw bytes so
-                            # the client still sees them, and wait for the
-                            # rest of the frame.
-                            if chunk:
-                                yield chunk
-                            continue
-                        for frame in frames:
+                    async with aclosing(iter_response_frames(gen)) as frames:
+                        async for frame in frames:
+                            if not released_kv and frame.raw:
+                                await release_prefill_kv_once()
+                            if frame.payload is None:
+                                if stream_flag:
+                                    yield frame.raw
+                                continue
                             chunk_json = frame.payload
                             is_sse = frame.is_sse
                             choices = chunk_json.get("choices", [])
@@ -1211,7 +1199,7 @@ async def handle_completions_impl(api: str, request: Request):
                             # rewrite its payload (cached-token injection, or
                             # the non-streaming reply). Otherwise the original
                             # bytes are forwarded unchanged.
-                            out_chunk = chunk
+                            out_chunk = frame.raw
                             if not choices:
                                 if update_cached_tokens_in_chunk(chunk_json, reported_prefiller_cached_tokens):
                                     out_chunk = encode_response_chunk(chunk_json, is_sse)
@@ -1263,8 +1251,6 @@ async def handle_completions_impl(api: str, request: Request):
                                     choice["text"] = generated_token
                                 out_chunk = encode_response_chunk(chunk_json, is_sse)
                             yield out_chunk
-                        if retry:
-                            break
             except asyncio.CancelledError:
                 logger.warning(
                     "Streaming from decoder %s:%s was cancelled; releasing request %s resources",

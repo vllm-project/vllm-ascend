@@ -4,8 +4,10 @@ The parser's job is to reassemble the decode backend's SSE stream into frames
 when the network does not respect frame boundaries.
 """
 
+import asyncio
 import json
 import sys
+from contextlib import aclosing
 from pathlib import Path
 
 import pytest
@@ -18,7 +20,7 @@ import pytest
 EXAMPLES_DIR = Path(__file__).resolve().parents[3] / "examples" / "disaggregated_prefill_v1"
 sys.path.insert(0, str(EXAMPLES_DIR))
 
-from examples.disaggregated_prefill_v1.sse_frame_parser import SSEFrameParser  # noqa: E402
+from examples.disaggregated_prefill_v1.sse_frame_parser import SSEFrameParser, iter_response_frames  # noqa: E402
 
 
 def _frame(content: str, **extra) -> bytes:
@@ -84,7 +86,7 @@ def test_byte_at_a_time_delivery_is_reassembled():
 def test_done_sentinel_terminates_the_stream():
     """The [DONE] sentinel yields no frame and drops trailing bytes."""
     parser = SSEFrameParser()
-    assert parser.feed(b"data: [DONE]\n\n") == []
+    assert parser.feed(b"data: [DONE]\n\n")[0].raw == b"data: [DONE]\n\n"
     assert parser.pending == b""
 
 
@@ -93,13 +95,15 @@ def test_done_sentinel_after_a_frame_keeps_the_frame():
     parser = SSEFrameParser()
     frames = parser.feed(_frame("before-done") + b"data: [DONE]\n\n")
 
-    assert [f.payload for f in frames] == [_payload("before-done")]
+    assert [f.payload for f in frames] == [_payload("before-done"), None]
+    assert frames[-1].raw == b"data: [DONE]\n\n"
 
 
 def test_non_sse_frame_is_reported_as_not_sse():
     """A frame without the data: prefix is parsed and flagged."""
     parser = SSEFrameParser()
-    frames = parser.feed(json.dumps(_payload("plain")).encode("utf-8") + b"\n\n")
+    assert parser.feed(json.dumps(_payload("plain")).encode("utf-8") + b"\n\n") == []
+    frames = [parser.flush()]
 
     assert len(frames) == 1
     assert frames[0].is_sse is False
@@ -140,3 +144,76 @@ def test_every_split_point_yields_the_same_frame(split_at):
     frames = parser.feed(frame[split_at:])
 
     assert [f.payload for f in frames] == [_payload("split-anywhere")]
+
+
+@pytest.mark.parametrize("separator", [b"\n\n", b"\r\n\r\n"])
+def test_raw_bytes_and_done_survive_every_split(separator):
+    first = _frame("one").replace(b"\n\n", separator)
+    second = _frame("two").replace(b"\n\n", separator)
+    done = b"data: [DONE]" + separator
+    wire = first + second + done
+    for cut in range(len(wire) + 1):
+        parser = SSEFrameParser()
+        frames = parser.feed(wire[:cut]) + parser.feed(wire[cut:])
+        assert [f.raw for f in frames] == [first, second, done]
+        assert parser.feed(_frame("after-done")) == []
+        assert parser.flush() is None
+
+
+def test_pretty_json_waits_for_eof_even_with_blank_lines():
+    raw = b'{\n\n"choices": [], "text": "hi"\n}'
+    parser = SSEFrameParser()
+    for value in raw:
+        assert parser.feed(bytes([value])) == []
+    frame = parser.flush()
+    assert frame.raw == raw
+    assert frame.payload == json.loads(raw)
+    assert not frame.is_sse
+
+
+def test_multiline_data_and_comments_preserve_wire_bytes():
+    raw = b'event: message\r\ndata: {"choices": [],\r\ndata: "text": "hi"}\r\n\r\n'
+    frames = SSEFrameParser().feed(b": ping\n\n" + raw)
+    assert frames[0].raw == b": ping\n\n"
+    assert frames[0].payload is None
+    assert frames[1].raw == raw
+    assert frames[1].payload == {"choices": [], "text": "hi"}
+
+
+def test_incomplete_json_is_not_forwarded_at_eof():
+    parser = SSEFrameParser()
+    assert parser.feed(b'data: {"choices":') == []
+    assert parser.flush() is None
+
+
+def test_early_exit_closes_decoder_stream():
+    async def run():
+        closed = False
+
+        async def source():
+            nonlocal closed
+            try:
+                yield _frame("first") + _frame("unused")
+            finally:
+                closed = True
+
+        async with aclosing(iter_response_frames(source())) as frames:
+            async for frame in frames:
+                assert frame.payload == _payload("first")
+                break
+        assert closed
+
+    asyncio.run(run())
+
+
+def test_transport_error_does_not_flush_partial_json():
+    async def run():
+        async def source():
+            yield b'{"choices": []'
+            raise ConnectionError("decoder disconnected")
+
+        with pytest.raises(ConnectionError, match="decoder disconnected"):
+            async for _ in iter_response_frames(source()):
+                pytest.fail("Partial JSON must not reach the client")
+
+    asyncio.run(run())

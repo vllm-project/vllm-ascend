@@ -1,8 +1,30 @@
 import asyncio
+from contextlib import aclosing
 
 import pytest
 
 from examples.disaggregated_prefill_v1 import load_balance_proxy_server_example as proxy
+
+
+def test_replayed_first_chunk_closes_preopened_decoder_on_retry():
+    async def run():
+        closed = False
+
+        async def source():
+            nonlocal closed
+            try:
+                yield b"first"
+                yield b"unused"
+            finally:
+                closed = True
+
+        decoder = source()
+        first = await anext(decoder)
+        async with aclosing(proxy._replay_first_chunk(first, decoder)) as replay:
+            assert await anext(replay) == first
+        assert closed
+
+    asyncio.run(run())
 
 
 @pytest.mark.parametrize(

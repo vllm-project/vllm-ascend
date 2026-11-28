@@ -473,7 +473,7 @@ def test_recompute(proxy_server):
     st, body = _post(proxy_server, _chat_req(stream=True), stream=True)
     assert st == 200
     assert b"done" in body
-    assert b"recomputed" not in body
+    assert body == _sse("done") + DONE
 
 
 def test_mid_stream_error(proxy_server):
@@ -607,7 +607,7 @@ def test_stream_frames_coalesced_in_one_chunk(proxy_server):
     assert st == 200
     # The recompute signal survived the coalesced read, so the proxy retried.
     assert b"done" in body
-    assert b"recomputed" not in body
+    assert body == _sse("done") + DONE
 
 
 def test_nonstream_frames_coalesced_in_one_chunk(proxy_server):
@@ -657,4 +657,67 @@ def test_recompute_detected_when_frame_split_across_chunks(proxy_server):
     assert st == 200
     # The retry happened, so the retried content is what the client sees.
     assert b"done" in body
-    assert b"recomputed" not in body
+    assert body == _sse("done") + DONE
+
+
+@pytest.mark.parametrize("layout", ["coalesced", "split", "unicode", "crlf"])
+def test_exact_stream_bytes(proxy_server, layout):
+    wire = _sse("one") + _sse("two") + DONE
+    if layout == "unicode":
+        wire = b'data: {"choices":[{"delta":{"content":"' + "你好".encode() + b'"}}]}\n\n' + DONE
+    if layout == "crlf":
+        wire = wire.replace(b"\n", b"\r\n")
+    chunks = [wire] if layout == "coalesced" else [bytes([b]) for b in wire]
+    _set_script(MOCK_DECODE_PORT, [{"kind": "stream", "chunks": chunks}])
+    st, body = _post(proxy_server, _chat_req(stream=True), stream=True)
+    assert st == 200
+    assert body == wire
+
+
+def test_recompute_discards_remainder_of_attempt(proxy_server):
+    first = _sse("before")
+    stopped = _sse("", stop_reason="recomputed")
+    _set_script(
+        MOCK_DECODE_PORT,
+        [
+            {"kind": "stream", "chunks": [first + stopped + _sse("discard") + DONE]},
+            {"kind": "stream", "chunks": [_sse("done") + DONE]},
+        ],
+    )
+    st, body = _post(proxy_server, _chat_req(stream=True), stream=True)
+    assert st == 200
+    assert body == first + _sse("done") + DONE
+
+
+def test_nonstream_json_recompute_at_eof(proxy_server):
+    def reply(content, reason=None):
+        return json.dumps(
+            {"choices": [{"message": {"content": content}, "stop_reason": reason}], "usage": {"completion_tokens": 1}}
+        ).encode()
+
+    first = reply("gen", "recomputed")
+    final = reply("done")
+    _set_script(
+        MOCK_DECODE_PORT,
+        [
+            {"kind": "stream", "chunks": [first[:10], first[10:]], "chunk_delay": 0.01},
+            {"kind": "stream", "chunks": [final[:7], final[7:]]},
+        ],
+    )
+    st, body = _post(proxy_server, _chat_req(stream=False))
+    assert st == 200
+    result = json.loads(body)
+    assert result["choices"][0]["message"]["content"] == "gendone"
+    assert result["choices"][0]["stop_reason"] is None
+
+
+def test_usage_rewrite_does_not_duplicate_coalesced_content(proxy_server):
+    usage = b'data: {"choices":[],"usage":{"prompt_tokens_details":{}}}\n\n'
+    _set_script(MOCK_DECODE_PORT, [{"kind": "stream", "chunks": [_sse("hello") + usage + DONE]}])
+    st, body = _post(proxy_server, _chat_req(stream=True), stream=True)
+    assert st == 200
+    events = body.split(b"\n\n")
+    assert len(events) == 4
+    assert events[0] + b"\n\n" == _sse("hello")
+    assert "cached_tokens" in json.loads(events[1][6:])["usage"]["prompt_tokens_details"]
+    assert events[2] == b"data: [DONE]"

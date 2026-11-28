@@ -16,163 +16,112 @@
 #
 # This file is a part of the vllm-ascend project.
 #
-"""Incremental SSE frame parsing for the PD load-balance proxies.
+"""Reassemble decoder responses before inspecting or forwarding their bytes.
 
-The decode backend always answers with SSE: one ``data: {json}`` frame per
-output chunk, terminated by a ``data: [DONE]`` sentinel. Network boundaries
-do not respect frame boundaries, so a proxy that parses each network chunk
-independently loses frames:
-
-* A frame's JSON split across two TCP segments fails to parse in both halves,
-  so the frame -- and the token it carries -- is silently dropped.
-* Two frames coalesced into a single read (``{"choices":[...]}`` followed by
-  ``data: [DONE]``) make ``json.loads`` fail, because it requires the whole
-  input to be a single JSON value. A complete response is dropped and the
-  client receives an empty body.
-
-``SSEFrameParser`` reassembles the byte stream into frames before decoding
-them, so both cases are handled.
+SSE frames retain their original bytes, including the delimiter. Non-streaming
+JSON is decoded at EOF: HTTP chunks and pretty-printed JSON blank lines are not
+response boundaries. Each decoder attempt must use a fresh parser.
 """
 
 import json
-from typing import Any, NamedTuple
+from collections.abc import AsyncGenerator
+from contextlib import aclosing
+from typing import NamedTuple
 
-# The SSE frame terminator: a blank line.
-SSE_FRAME_SEPARATOR = b"\n\n"
+import regex as re
 
-# Terminal sentinel emitted by the OpenAI-compatible streaming API.
-SSE_DONE_SENTINEL = "[DONE]"
+SSE_FRAME_SEPARATOR = re.compile(rb"\r?\n\r?\n")
 
 
 class SSEFrame(NamedTuple):
-    """One decoded SSE frame.
-
-    Attributes:
-        payload: the decoded JSON object of the frame.
-        is_sse: whether the frame carried the ``data:`` SSE prefix.
-    """
-
-    payload: dict[str, Any]
+    payload: dict | None
     is_sse: bool
-
-
-class _Sentinel:
-    """Marker object, compared by identity."""
-
-    def __init__(self, name: str) -> None:
-        self._name = name
-
-    def __repr__(self) -> str:
-        return self._name
-
-
-#: The buffered bytes do not yet form a complete JSON value.
-INCOMPLETE = _Sentinel("<incomplete>")
-
-#: The frame is the ``[DONE]`` terminal sentinel.
-DONE = _Sentinel("<done>")
-
-#: The frame is terminated but its body is not a valid JSON object.
-MALFORMED = _Sentinel("<malformed>")
+    raw: bytes
 
 
 class SSEFrameParser:
-    """Reassemble an SSE byte stream into decoded JSON frames.
-
-    Feed the raw network chunks to :meth:`feed`; it returns the frames that
-    became complete. Frames that are still arriving stay buffered until the
-    rest of their bytes show up.
-
-    The parser never mutates the caller's data: it only reads what it is given,
-    so the proxy can forward the original bytes to the client unchanged.
-    """
-
     def __init__(self) -> None:
-        self._buffer = b""
+        self._buffer = bytearray()
+        self._is_sse: bool | None = None
+        self._done = False
 
     @property
     def pending(self) -> bytes:
-        """Bytes held back because they do not form a complete frame yet."""
-        return self._buffer
+        return bytes(self._buffer)
 
     def feed(self, chunk: bytes) -> list[SSEFrame]:
-        """Add *chunk* to the buffer and return the frames it completes.
+        if self._done:
+            return []
+        self._buffer.extend(chunk)
+        if self._is_sse is None:
+            prefix = self._buffer.lstrip()
+            if not prefix:
+                return []
+            # JSON responses start with an object/array. All other prefixes
+            # may be partial SSE field names (data, event, id, or a comment).
+            self._is_sse = prefix[:1] not in (b"{", b"[")
+        if not self._is_sse:
+            return []
 
-        The ``[DONE]`` sentinel is not returned: it terminates the stream and
-        carries no payload.
-        """
-        self._buffer += chunk
-        frames: list[SSEFrame] = []
-        while True:
-            frame, self._buffer = self._split_next_frame(self._buffer)
-            if frame is INCOMPLETE:
-                break
-            if frame is DONE:
-                # Terminal sentinel: drop any trailing bytes and stop.
-                self._buffer = b""
-                break
-            if frame is MALFORMED:
-                # Unparsable frame: skip it and keep reading the stream.
-                continue
-            frames.append(frame)
+        frames = []
+        start = 0
+        while match := SSE_FRAME_SEPARATOR.search(self._buffer, start):
+            raw = bytes(self._buffer[start : match.end()])
+            start = match.end()
+            frame = self._decode_frame(raw)
+            if frame is not None:
+                frames.append(frame)
+            if self._done:
+                self._buffer.clear()
+                return frames
+        # Compact once per network chunk, rather than copying the remaining
+        # buffer for every frame in a coalesced read.
+        if start:
+            del self._buffer[:start]
         return frames
 
     def flush(self) -> SSEFrame | None:
-        """Decode a trailing frame that was never terminated by a blank line.
-
-        A backend may close the connection right after the last frame without
-        sending the final blank line. Returns the decoded frame, or ``None``
-        when the buffer holds nothing parseable.
-        """
-        remainder = self._buffer.strip()
-        self._buffer = b""
-        if not remainder:
+        raw = bytes(self._buffer)
+        self._buffer.clear()
+        if not raw.strip():
             return None
-        payload = self._decode_frame(remainder)
-        if payload is INCOMPLETE or payload is DONE or payload is MALFORMED:
-            return None
-        return payload
+        if not self._is_sse:
+            payload = json.loads(raw)
+            if not isinstance(payload, dict):
+                raise ValueError("Decoder response must be a JSON object")
+            return SSEFrame(payload, False, raw)
+        # Preserve the existing tolerance for a valid final event without a
+        # blank line, but never expose a partial JSON event to the client.
+        return self._decode_frame(raw.rstrip(b"\r\n") + b"\n\n")
 
-    @staticmethod
-    def _split_next_frame(buffer: bytes) -> tuple[Any, bytes]:
-        """Split the first frame off *buffer*.
-
-        Returns ``(INCOMPLETE, buffer)`` when the frame is not complete yet.
-        """
-        separator = buffer.find(SSE_FRAME_SEPARATOR)
-        if separator < 0:
-            return INCOMPLETE, buffer
-        raw = buffer[:separator]
-        rest = buffer[separator + len(SSE_FRAME_SEPARATOR) :]
-        payload = SSEFrameParser._decode_frame(raw)
-        if payload is INCOMPLETE:
-            # A terminated frame whose body is not valid JSON is malformed.
-            # Drop it instead of stalling the whole stream.
-            return MALFORMED, rest
-        return payload, rest
-
-    @staticmethod
-    def _decode_frame(raw: bytes) -> Any:
-        """Decode one raw SSE frame body.
-
-        Returns an :class:`SSEFrame`, ``INCOMPLETE`` when the body is not a
-        complete JSON value, ``DONE`` for the terminal sentinel, or
-        ``MALFORMED`` when the body is not a JSON object.
-        """
-        text = raw.strip()
-        if not text:
-            return INCOMPLETE
-        is_sse = text.startswith(b"data:")
-        if is_sse:
-            text = text[len(b"data:") :].strip()
-        if not text:
-            return INCOMPLETE
-        if text == SSE_DONE_SENTINEL.encode():
-            return DONE
+    def _decode_frame(self, raw: bytes) -> SSEFrame | None:
+        data = []
+        for line in raw.splitlines():
+            if line.startswith(b"data:"):
+                value = line[5:]
+                data.append(value[1:] if value.startswith(b" ") else value)
+        if not data:
+            return SSEFrame(None, True, raw)
+        value = b"\n".join(data).strip()
+        if value == b"[DONE]":
+            self._done = True
+            return SSEFrame(None, True, raw)
         try:
-            payload, _ = json.JSONDecoder().raw_decode(text.decode("utf-8"))
+            payload = json.loads(value)
         except (json.JSONDecodeError, UnicodeDecodeError):
-            return MALFORMED
+            return None
         if not isinstance(payload, dict):
-            return MALFORMED
-        return SSEFrame(payload, is_sse)
+            return None
+        return SSEFrame(payload, True, raw)
+
+
+async def iter_response_frames(source: AsyncGenerator[bytes, None]) -> AsyncGenerator[SSEFrame, None]:
+    """Yield complete events, and flush non-streaming JSON at clean EOF only."""
+    parser = SSEFrameParser()
+    async with aclosing(source):
+        async for chunk in source:
+            for frame in parser.feed(chunk):
+                yield frame
+        frame = parser.flush()
+        if frame is not None:
+            yield frame
