@@ -1339,11 +1339,6 @@ def _validate_direct_reload_config(vllm_config: VllmConfig, ascend_config: Ascen
             "no speculative decoding, and a separate shared expert. "
             "Set enable_fused_mc2=0 or use VLLM_RELOAD_MODE=layerwise."
         )
-    if ascend_config.weight_nz_mode:
-        raise ValueError(
-            "Direct reload with fused experts requires weight_nz_mode=0 for ordinary weights. "
-            "Set weight_nz_mode=0 or enable rl_config.enabled."
-        )
 
 
 def _check_ascend_config(vllm_config: VllmConfig, ascend_config) -> None:

@@ -52,12 +52,12 @@ from vllm_ascend.utils import (
         ({"enable_eplb": True}, "static expert placement"),
         ({"speculative_config": object()}, "no speculative decoding"),
         ({"megamoe_shared_expert_fusion": True}, "separate shared expert"),
-        ({"weight_nz_mode": 2}, "weight_nz_mode=0"),
-        ({"enable_fused_mc2": 0, "weight_nz_mode": 2}, None),
+        ({"enable_fused_mc2": 0, "dtype": torch.float16}, None),
+        ({"reload_mode": "layerwise", "quantization": "ascend"}, None),
     ],
 )
 def test_validate_direct_fused_reload_config(monkeypatch, overrides, message):
-    monkeypatch.setenv("VLLM_RELOAD_MODE", "direct")
+    monkeypatch.setenv("VLLM_RELOAD_MODE", overrides.get("reload_mode", "direct"))
     config = SimpleNamespace(
         model_config=SimpleNamespace(
             is_moe=True,
@@ -70,7 +70,6 @@ def test_validate_direct_fused_reload_config(monkeypatch, overrides, message):
     ascend_config = SimpleNamespace(
         enable_fused_mc2=overrides.get("enable_fused_mc2", 1),
         megamoe_shared_expert_fusion=overrides.get("megamoe_shared_expert_fusion", False),
-        weight_nz_mode=overrides.get("weight_nz_mode", 0),
     )
     if message is None:
         _validate_direct_reload_config(config, ascend_config)

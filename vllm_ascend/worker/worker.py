@@ -1390,11 +1390,6 @@ class NPUWorker(GPUWorker):
         self.model_runner.update_config(overrides)
 
     def reload_weights(self, *args, **kwargs) -> None:
-        if getattr(envs, "VLLM_RELOAD_MODE", None) == "direct" and get_ascend_config().enable_fused_mc2:
-            # Match the online worker's config context during expert post-processing.
-            with set_current_vllm_config(self.vllm_config):
-                self.model_runner.reload_weights(*args, **kwargs)
-            return
         self.model_runner.reload_weights(*args, **kwargs)
 
     def check_health(self) -> None:

@@ -2162,27 +2162,6 @@ class TestNPUWorker(TestBase):
                 weights_path="/tmp/weights", is_checkpoint_format=True
             )
 
-    @patch("vllm_ascend.worker.worker.get_ascend_config")
-    def test_disk_reload_sets_config_for_fused_experts(self, mock_config):
-        from vllm.config import get_current_vllm_config
-
-        from vllm_ascend.worker.worker import NPUWorker
-
-        mock_config.return_value.enable_fused_mc2 = 1
-        worker = NPUWorker.__new__(NPUWorker)
-        worker.vllm_config = VllmConfig()
-        worker.model_runner = MagicMock()
-
-        def reload_weights(**kwargs):
-            self.assertIs(get_current_vllm_config(), worker.vllm_config)
-
-        worker.model_runner.reload_weights.side_effect = reload_weights
-        with patch.dict("os.environ", {"VLLM_RELOAD_MODE": "direct"}):
-            worker.reload_weights(weights_path="/tmp/weights", is_checkpoint_format=True)
-        worker.model_runner.reload_weights.assert_called_once_with(
-            weights_path="/tmp/weights", is_checkpoint_format=True
-        )
-
 
 class TestNPUWorkerWeightUpdate(TestBase):
     def _make_worker(self, engine=None):

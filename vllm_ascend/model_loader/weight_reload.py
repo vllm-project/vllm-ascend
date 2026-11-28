@@ -8,7 +8,6 @@ import torch
 import torch_npu
 from torch._prims_common import compute_required_storage_length
 from vllm.model_executor.model_loader.reload import direct as vllm_direct
-from vllm.model_executor.model_loader.reload.direct import direct_reload_enabled
 from vllm.model_executor.utils import refill_derived
 
 from vllm_ascend.device.hardware_profile import HardwareCapability, get_current_hardware_profile
@@ -228,7 +227,7 @@ def refill_expert_list(layer, name, tensors):
     captured allocations. Validate every element before copying any of them.
     """
     old = getattr(layer, name, None)
-    if old is None or not direct_reload_enabled():
+    if old is None:
         setattr(layer, name, [tensor.clone() for tensor in tensors])
         return
     if len(old) != len(tensors):
@@ -246,9 +245,6 @@ def refill_expert_list(layer, name, tensors):
 def refill_runtime_parameter(layer, name, tensor, *, borrow_checkpoint=False):
     """Keep graph storage stable and choose how the loader receives its ND checkpoint."""
     parameter = getattr(layer, name)
-    if not direct_reload_enabled():
-        parameter.data = tensor
-        return
     ckpt = getattr(parameter, "_ckpt", None)
     if borrow_checkpoint and can_borrow_expert_storage(parameter, tensor):
         parameter._ascend_borrow_checkpoint = True
@@ -278,8 +274,7 @@ def refill_nz_weight(layer, name, *, force: bool = True, borrow_checkpoint: bool
     source = getattr(layer, name).data
     if not force and not _should_trans_nz(source):
         return
-    if direct_reload_enabled():
-        source = source.clone(memory_format=torch.contiguous_format)
+    source = source.clone(memory_format=torch.contiguous_format)
     tensor = torch_npu.npu_format_cast(source, ACL_FORMAT_FRACTAL_NZ)
     refill_runtime_parameter(layer, name, tensor, borrow_checkpoint=borrow_checkpoint)
 
