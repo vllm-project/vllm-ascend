@@ -1,0 +1,7 @@
+pr: 23388
+entries:
+  - category: feature
+    text: >-
+      SFA deployments can now force native preprocessing for target and MTP layers.
+      Set `"sfa_preprocess_mode": "native"` in `--additional-config` and restart the serving instance.
+      The default is `"auto"`.

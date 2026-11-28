@@ -121,6 +121,7 @@ def test_sfa_k31_identity_in_registered_inner_model_context(tmp_path, monkeypatc
         enable_sparse_sfa_c8=False,
         enable_sparse_sfa_turboquant=False,
         enable_mlapo=False,
+        sfa_preprocess_mode="auto",
         sparse_kv_offload_config=SimpleNamespace(enabled=False),
     )
     monkeypatch.setattr("vllm_ascend.attention.sfa_v1.get_ascend_config", lambda: ascend_config)
