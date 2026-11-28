@@ -504,9 +504,6 @@ jobs:
           ENABLE_COVERAGE: ${{ inputs.enable-coverage}}
         run: |
           . /usr/local/Ascend/ascend-toolkit/set_env.sh
-          if [ "${{ steps.torch-214.outcome == 'success' && contains(github.event.pull_request.labels.*.name, 'ready-precise') }}" = "true" ]; then
-            export ASCEND_PROCESS_LOG_PATH="$RUNNER_TEMP/torch214-cann-logs"
-          fi
           if [ "${{ inputs.enable-coverage }}" = "true" ]; then
             export ENABLE_COVERAGE=true
           fi
@@ -520,16 +517,6 @@ jobs:
             "with-device" \
             ${TIMING_FLAG} \
             ${{ matrix.group.tests }}
-
-      - name: Collect CANN fault signatures for the Torch trial
-        if: ${{ !cancelled() && steps.torch-214.outcome == 'success' && contains(github.event.pull_request.labels.*.name, 'ready-precise') && steps.tests-with-device.outcome == 'failure' }}
-        run: |
-          log_dir="$RUNNER_TEMP/torch214-cann-logs"
-          if [ -d "$log_dir" ]; then
-            find "$log_dir" -type f -name '*.log' -print0 \
-              | xargs -0 -r grep -hiE -m 20 'fault kernel_name=|MTE accesses an invalid GM address|rtEventSynchronize.*507011' \
-              | tail -n 80 || true
-          fi
 
       - name: Run selected tests without device
         id: tests-without-device
