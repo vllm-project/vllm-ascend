@@ -1,5 +1,5 @@
 from copy import copy
-from dataclasses import dataclass, fields
+from dataclasses import dataclass, fields, replace
 from typing import Any, ClassVar, NamedTuple, TypeVar
 
 import numpy as np
@@ -179,11 +179,23 @@ class AscendMLAAttention(MLAAttention):
 
     supports_pcp_dcp: ClassVar[bool] = True
 
-    def get_kv_cache_spec(self, vllm_config: VllmConfig) -> AscendMLAAttentionSpec:
+    def get_kv_cache_spec(self, vllm_config: VllmConfig) -> MLAAttentionSpec:
         """Publish the complete cache demand using the selected execution format."""
         spec = super().get_kv_cache_spec(vllm_config)
         if getattr(getattr(vllm_config, "attention_config", None), "hisparse_config", None) is not None:
-            return spec
+            # Keep Core's row-packed source spec, index-group ownership, and
+            # existing alignment (avoiding MultipleOf(128) padding in customize_attention_spec).
+            source_layout: dict[str, Any] = {}
+            if getattr(self.impl, "enable_sparse_sfa_c8", False):
+                from vllm_ascend.hisparse.c8 import C8_ROW_BYTES
+
+                source_layout.update(head_size=C8_ROW_BYTES, dtype=self.impl.c8_cache_dtype)
+            return replace(
+                spec,
+                is_index_group_leader=self.hisparse_cache.runtime.is_group_leader,
+                block_stride_alignment=spec.block_stride_alignment if spec.block_stride_alignment is not None else 1,
+                **source_layout,
+            )
         values = {field.name: getattr(spec, field.name) for field in fields(spec) if field.init}
         if isinstance(spec, SlidingWindowMLASpec):
             # DFlash precomputes every context row. Retain the full KV cache

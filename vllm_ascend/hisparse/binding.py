@@ -3,11 +3,12 @@
 """Bind shared-slab views while retaining Core HiSparse allocation."""
 
 import math
-from collections.abc import Sequence
+from collections.abc import Mapping, Sequence
 from dataclasses import replace
 from typing import Any
 
 import torch
+from vllm.config import VllmConfig
 from vllm.v1.kv_cache_interface import (
     HiSparseHotSpec,
     HiSparseResidentSpec,
@@ -109,6 +110,27 @@ def align_hisparse_indexer_specs(
             updates["block_stride_alignment"] = alignment
         aligned[name] = replace(spec, **updates) if updates else spec
     return aligned
+
+
+def resolve_ascend_hisparse_specs(
+    vllm_config: VllmConfig,
+    kv_cache_spec: dict[str, KVCacheSpec],
+    attn_layers: Mapping[str, Any],
+) -> dict[str, KVCacheSpec]:
+    """Resolve HiSparse specs and apply Ascend indexer/packed-row alignment."""
+    from vllm.v1.hisparse.binding import resolve_hisparse_specs
+
+    from vllm_ascend.ascend_config import get_ascend_config
+
+    packed_row_bytes = None
+    if get_ascend_config().enable_sparse_sfa_c8:
+        from vllm_ascend.hisparse.c8 import C8_ROW_BYTES
+
+        packed_row_bytes = C8_ROW_BYTES
+    return align_hisparse_indexer_specs(
+        resolve_hisparse_specs(vllm_config, kv_cache_spec, attn_layers),
+        packed_row_bytes=packed_row_bytes,
+    )
 
 
 def get_hisparse_indexer_specs(

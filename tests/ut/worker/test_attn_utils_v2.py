@@ -3916,10 +3916,15 @@ def test_hisparse_get_kv_cache_spec_end_to_end_characterization(monkeypatch, use
     assert isinstance(res, HiSparseResidentSpec)
     assert isinstance(hot, HiSparseHotSpec)
     assert res.page_size == hot.page_size == src.page_size_bytes
+    from vllm_ascend.utils import vllm_version_is
+
     row_bytes = src.page_size_bytes // 128
+    # vLLM v0.34.0's HiSparseHotSpec returns lcm(page_size, block_stride_alignment),
+    # whereas newer vLLM returns lcm(row_bytes, block_stride_alignment or 1).
+    base_hot_stride = hot.page_size if vllm_version_is("0.34.0") else row_bytes
     if use_c8:
         assert res.get_block_stride_alignment() == C8_ROW_BYTES
-        assert hot.get_block_stride_alignment() == math.lcm(row_bytes, C8_ROW_BYTES)
+        assert hot.get_block_stride_alignment() == math.lcm(base_hot_stride, C8_ROW_BYTES)
     else:
         assert res.get_block_stride_alignment() == 1
-        assert hot.get_block_stride_alignment() == row_bytes
+        assert hot.get_block_stride_alignment() == base_hot_stride
