@@ -50,6 +50,7 @@ from vllm_ascend.ops.head_parallel import (
     get_head_parallel_size,
 )
 from vllm_ascend.ops.kda import run_chunk_kda, run_recurrent_kda
+from vllm_ascend.ops.kda_recoverssm_records import AscendKDARecords
 from vllm_ascend.ops.recurrent_pcp import PCPRecurrentMetadataBuilderMixin
 from vllm_ascend.ops.triton.kda.recoverssm import kda_recoverssm_verify
 from vllm_ascend.quantization.methods.w4a8.w4a8_mxfp4 import (
@@ -244,6 +245,9 @@ class KimiKDARecoverSSMMetadataBackend(KimiKDAHostMetadataBackend):
 class AscendKimiK3DeltaAttention(KimiK3DeltaAttention):
     """Kimi K3 KDA using AscendC prefill and recurrent kernels."""
 
+    conv1d: ColumnParallelLinear
+    recoverssm_records: AscendKDARecords | None
+
     # Worker startup prepares this layer after KV-cache binding.
     _requires_kda_state_copy = True
     use_contiguous_conv_indices = True
@@ -265,6 +269,16 @@ class AscendKimiK3DeltaAttention(KimiK3DeltaAttention):
         self.pcp_rank = self.pcp_group.rank_in_group if self.pcp_group is not None else 0
         if self.pcp_size > 1:
             self._init_pcp_projections(vllm_config, prefix)
+        if self.recoverssm_records is not None:
+            del self.recoverssm_records
+            self.recoverssm_records = AscendKDARecords.allocate(
+                vllm_config.scheduler_config.max_num_seqs,
+                self.local_num_heads,
+                self.spec_query_len,
+                self.head_dim,
+                vllm_config.model_config.dtype,
+                self.conv1d.weight.device,
+            )
         self.uses_mixed_projection = uses_mixed_projection
         self._ascend_kda_state_copy = None
         self.qkv_layout: KDAInputProjectionTPLayout | None = None
@@ -964,6 +978,9 @@ class AscendKimiK3DeltaAttention(KimiK3DeltaAttention):
                     attn_metadata.spec_query_start_loc,
                     attn_metadata.spec_state_indices_tensor[:, 0],
                     self.num_spec + 1,
+                    decay_cache=records.decay_cache,
+                    normalized_key_cache=records.normalized_key_cache,
+                    store_raw_gate=records.decay_cache is None,
                 )
             else:
                 core_spec = self._run_recurrent(

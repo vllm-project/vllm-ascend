@@ -27,7 +27,7 @@ def make_layer(*, pages=11, rows=4, heads=2, dim=4, capacity=4):
     state = torch.zeros(pages, heads, dim, dim)
     correction = torch.zeros(rows, heads, capacity, dim)
     key_gate = torch.zeros(rows, heads, capacity, 2 * dim, dtype=torch.bfloat16)
-    records = SimpleNamespace(correction=correction, key_gate=key_gate)
+    records = SimpleNamespace(correction=correction, key_gate=key_gate, decay_cache=None, normalized_key_cache=None)
     return SimpleNamespace(
         kv_cache=(conv, state),
         recoverssm_records=records,
@@ -57,11 +57,35 @@ def test_context_binds_request_records_and_detects_rebinding():
     context = recoverssm.KDARecoverSSMCommitContext.create(layers, spec_query_len=4, max_num_reqs=4)
     assert context.is_bound_to(layers)
     assert context.correction_caches[0] is layers[0].recoverssm_records.correction
+    assert context.decay_base_addrs is None
+    assert context.normalized_key_base_addrs is None
     old = layers[0].kv_cache
     layers[0].kv_cache = (old[0].clone(), *old[1:])
     assert not context.is_bound_to(layers)
     layers[0].kv_cache = old
     layers[0].recoverssm_records.key_gate = layers[0].recoverssm_records.key_gate.clone()
+    assert not context.is_bound_to(layers)
+
+
+@pytest.mark.parametrize("key_gate_dtype", [torch.float16, torch.bfloat16])
+def test_context_binds_normalized_key_record(monkeypatch, key_gate_dtype):
+    monkeypatch.setattr(recoverssm, "is_950", lambda: True)
+    layers = [make_layer(), make_layer()]
+    for layer in layers:
+        records = layer.recoverssm_records
+        records.key_gate = records.key_gate.to(key_gate_dtype)
+        records.decay_cache, records.normalized_key_cache = recoverssm.allocate_kda_verify_caches(records.key_gate)
+        assert records.normalized_key_cache.shape == records.correction.shape
+        assert records.normalized_key_cache.dtype == records.decay_cache.dtype == torch.bfloat16
+        assert records.normalized_key_cache.data_ptr() != records.decay_cache.data_ptr()
+    context = recoverssm.KDARecoverSSMCommitContext.create(layers, spec_query_len=4, max_num_reqs=4)
+    assert context.decay_base_addrs.tolist() == [layer.recoverssm_records.decay_cache.data_ptr() for layer in layers]
+    assert context.normalized_key_base_addrs.tolist() == [
+        layer.recoverssm_records.normalized_key_cache.data_ptr() for layer in layers
+    ]
+    assert context.is_bound_to(layers)
+    records = layers[1].recoverssm_records
+    records.normalized_key_cache = records.normalized_key_cache.clone()
     assert not context.is_bound_to(layers)
 
 

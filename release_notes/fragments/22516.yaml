@@ -1,0 +1,10 @@
+pr: 22516
+entries:
+  - category: performance
+    hardware: [A5]
+    text: >-
+      With `--use-replayssm`, Kimi and GLM5Next KDA state commit took 10.41%–28.28% less time across 12 single-A5 cases,
+      reducing combined verify and commit time by 0.98%–7.75%.
+      In a Kimi K3.1 W4A8 DSpark benchmark on eight A5 nodes (4P4D, 128K input tokens, 1K output tokens, concurrency 128),
+      steady-state output throughput rose by 31.16 tokens/s (0.79%) and full-run output throughput by 19.18 tokens/s (0.51%).
+      Steady-state mean inter-token latency fell by 0.3 ms (0.38%) and P99 by 0.1 ms (0.10%).

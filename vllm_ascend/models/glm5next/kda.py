@@ -45,7 +45,7 @@ from vllm_ascend.ops.recurrent_pcp import prepare_recurrent_pcp_config
 from vllm_ascend.ops.triton.kda.recoverssm import kda_recoverssm_verify
 
 if TYPE_CHECKING:
-    from vllm.models.kimi_k3.nvidia.ops.recoverssm import KDARecoverSSMRecords
+    from vllm_ascend.ops.kda_recoverssm_records import AscendKDARecords
 
 
 def prepare_glm_pcp_config(vllm_config):
@@ -485,11 +485,11 @@ class Glm5NextLinearAttention(GatedDeltaNetAttention):
 
         self.A_log = nn.Parameter(torch.empty(1, 1, self.local_num_heads, 1, dtype=torch.float32))
         set_weight_attrs(self.A_log, {"weight_loader": self._a_log_weight_loader})
-        self.recoverssm_records: KDARecoverSSMRecords | None = None
+        self.recoverssm_records: AscendKDARecords | None = None
         if self.use_recoverssm:
             # Importing Kimi's package can load FLA and initialize an NPU.
             # Defer it until the worker has selected its device.
-            from vllm.models.kimi_k3.nvidia.ops.recoverssm import KDARecoverSSMRecords as KDARecords
+            from vllm_ascend.ops.kda_recoverssm_records import AscendKDARecords as KDARecords
 
             self.recoverssm_records = KDARecords.allocate(
                 vllm_config.scheduler_config.max_num_seqs,
@@ -849,6 +849,9 @@ class Glm5NextLinearAttention(GatedDeltaNetAttention):
                     spec_query_start_loc,
                     spec_state_indices_tensor[:, 0],
                     self.num_spec + 1,
+                    decay_cache=records.decay_cache,
+                    normalized_key_cache=records.normalized_key_cache,
+                    store_raw_gate=records.decay_cache is None,
                 )
             else:
                 spec_output = recurrent_kda(
