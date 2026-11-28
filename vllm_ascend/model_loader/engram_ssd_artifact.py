@@ -1,8 +1,8 @@
 # SPDX-License-Identifier: Apache-2.0
 """CPU-only, persistent preparation of local Engram SSD tables.
 
-Checkpoint tensors are streamed directly into the runtime's INT8[256] +
-FP32[8] row layout. Completed files are immutable from the serving path.
+Checkpoint tensors use the native DDR lookup layout: INT8/FP32 on A3
+and FP8/E8M0 on A5. Completed files are immutable from the serving path.
 """
 
 import fcntl
@@ -22,8 +22,24 @@ TILE_ROWS = 4096
 CHUNK_ROWS = 65536
 MAX_HEADER_BYTES = 64 * 1024 * 1024
 FORMAT_VERSION = "engram-int8-fp32-aos288-v1"
+FP8_FORMAT_VERSION = "engram-fp8-e8m0-aos264-v1"
 SPACE_MARGIN_BYTES = 64 * 1024 * 1024
 SAMPLE_BYTES = 64 * 1024
+
+
+def _packed_row_bytes(sources):
+    fp8 = [s["weight"]["dtype"] != "I8" for s in sources]
+    if any(fp8) != all(fp8):
+        raise ValueError("Engram SSD requires a uniform code encoding across cached layers")
+    if all(fp8):
+        if any(s["scale"]["dtype"] != "F8_E8M0" for s in sources):
+            raise ValueError("Native FP8 Engram SSD requires E8M0 checkpoint scales")
+        return 264
+    return ROW_BYTES
+
+
+def _format_version(sources):
+    return FP8_FORMAT_VERSION if _packed_row_bytes(sources) == 264 else FORMAT_VERSION
 
 
 def _sample_hash(path):
@@ -87,7 +103,10 @@ def _sources(model, layers):
     result = []
     for layer, rows in sorted(layers.items()):
         entry = dict(layer=layer, rows=rows)
-        for part, width, dtypes in [("weight", 256, ("I8",)), ("scale", 8, ("F8_E8M0", "F32"))]:
+        for part, width, dtypes in [
+            ("weight", 256, ("I8", "F8_E4M3", "F8_E4M3FN")),
+            ("scale", 8, ("F8_E8M0", "F32")),
+        ]:
             suffix = f"layers.{layer}.engram.embed.{part}"
             keys = [key for key in mapping if key == suffix or key.endswith("." + suffix)]
             if len(keys) != 1:
@@ -120,6 +139,7 @@ def _read_rows(stream, offset, start, count, width):
 
 
 def _write_table(path, sources, bases, file_bytes):
+    row_bytes = _packed_row_bytes(sources)
     digest = hashlib.sha256()
     started = last_log = time.monotonic()
     with path.open("wb") as out:
@@ -133,11 +153,11 @@ def _write_table(path, sources, bases, file_bytes):
                 for start in range(0, padded, CHUNK_ROWS):
                     count = min(CHUNK_ROWS, padded - start)
                     valid = max(0, min(count, src["rows"] - start))
-                    packed = np.zeros((count, ROW_BYTES), dtype=np.uint8)
+                    packed = np.zeros((count, row_bytes), dtype=np.uint8)
                     packed[:valid, :256] = _read_rows(weight, src["weight_offset"], start, valid, 256)
                     width = 32 if src["scale"]["dtype"] == "F32" else 8
                     raw = _read_rows(scale, src["scale_offset"], start, valid, width)
-                    if width == 8:
+                    if width == 8 and row_bytes == ROW_BYTES:
                         bits = raw.astype("<u4") << 23
                         bits[raw == 0] = 0x00400000
                         bits[raw == 255] = 0x7FC00000
@@ -153,7 +173,7 @@ def _write_table(path, sources, bases, file_bytes):
                             time.monotonic() - started,
                         )
                         last_log = time.monotonic()
-                assert out.tell() == (base + padded) * ROW_BYTES
+                assert out.tell() == (base + padded) * row_bytes
         out.flush()
         os.fsync(out.fileno())
     return digest.hexdigest()
@@ -168,7 +188,7 @@ def _reusable(manifest, table, version, sources, bases, file_bytes):
             and meta["version"] == version
             and meta["sources"] == sources
             and meta["layer_row_bases"] == bases
-            and meta["format"] == FORMAT_VERSION
+            and meta["format"] == _format_version(sources)
             and meta["file_bytes"] == st.st_size == file_bytes
             and meta["table_mtime_ns"] == st.st_mtime_ns
             and meta["table_ctime_ns"] == st.st_ctime_ns
@@ -195,14 +215,14 @@ def prepare_artifact(model: str | Path, directory: str | Path, layers: dict[int,
     Sampling also catches changes in sampled regions on coarse-timestamp filesystems.
     """
     sources = _sources(model, layers)
-    identity = dict(format=FORMAT_VERSION, sources=sources)
+    identity = dict(format=_format_version(sources), sources=sources)
     version = hashlib.sha256(json.dumps(identity, sort_keys=True).encode()).hexdigest()
     bases = []
     total_rows = 0
     for src in sources:
         bases.append(total_rows)
         total_rows += (src["rows"] + TILE_ROWS - 1) // TILE_ROWS * TILE_ROWS
-    file_bytes = total_rows * ROW_BYTES
+    file_bytes = total_rows * _packed_row_bytes(sources)
     root = Path(directory).expanduser().resolve()
     root.mkdir(parents=True, exist_ok=True)
     target = root / version
@@ -235,7 +255,7 @@ def prepare_artifact(model: str | Path, directory: str | Path, layers: dict[int,
             meta = dict(
                 complete=True,
                 version=version,
-                format=FORMAT_VERSION,
+                format=_format_version(sources),
                 sources=sources,
                 layer_row_bases=bases,
                 file_bytes=file_bytes,

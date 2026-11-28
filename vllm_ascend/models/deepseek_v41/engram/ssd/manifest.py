@@ -28,8 +28,8 @@ from typing import Any
 
 ROW_BYTES = 288
 SUPPORTED_SCHEMA = ("complete", "version", "sources", "layer_row_bases")
-SUPPORTED_CODE_DTYPE = ("I8",)          # INT8[256]
-SUPPORTED_SCALE_DTYPE = ("F8_E8M0", "F32")  # packed as FP32[8] rows
+SUPPORTED_CODE_DTYPE = ("I8", "F8_E4M3", "F8_E4M3FN")  # 256 raw code bytes
+SUPPORTED_SCALE_DTYPE = ("F8_E8M0", "F32")  # source encodings; A5 keeps E8M0 bytes
 
 
 class SSDManifestError(ValueError):
@@ -68,6 +68,7 @@ class SSDManifest:
         self.raw = raw
         self.version = version
         self.file_bytes = file_bytes
+        self.row_bytes = specs[0].row_bytes
         self.total_logical_rows = sum(s.logical_rows for s in specs)
 
     @classmethod
@@ -122,20 +123,37 @@ class SSDManifest:
                 raise SSDManifestError(
                     f"layer {layer} rows mismatch: manifest={rows} expected={exp['rows']}")
             weight = src.get("weight", {})
-            if weight.get("dtype") != exp.get("codes_dtype", "I8"):
+            code_dtype = weight.get("dtype")
+            expected_dtype = exp.get("codes_dtype", "I8")
+            # Safetensors readers use both names for E4M3FN.
+            aliases = {"F8_E4M3FN": "F8_E4M3"}
+            if (code_dtype not in SUPPORTED_CODE_DTYPE
+                    or aliases.get(code_dtype, code_dtype) != aliases.get(expected_dtype, expected_dtype)):
                 raise SSDManifestError(
                     f"layer {layer} codes dtype {weight.get('dtype')} not supported "
-                    f"(expected {exp.get('codes_dtype', 'I8')}; BF16/MXFP8 explicitly rejected)")
+                    f"(expected {expected_dtype}; supported: {SUPPORTED_CODE_DTYPE})")
             shape = weight.get("shape", [])
             if len(shape) != 2 or shape[1] != int(exp.get("codes_dim", 256)) or shape[0] != rows:
                 raise SSDManifestError(f"layer {layer} codes shape invalid: {shape}")
             scale = src.get("scale", {})
+            if scale.get("dtype") not in SUPPORTED_SCALE_DTYPE:
+                raise SSDManifestError(f"layer {layer} scale dtype invalid: {scale.get('dtype')}")
+            fp8 = code_dtype != "I8"
+            row_bytes = 264 if fp8 else ROW_BYTES
+            if fp8 and (raw.get("format") != "engram-fp8-e8m0-aos264-v1"
+                        or scale.get("dtype") != "F8_E8M0"):
+                raise SSDManifestError("FP8 SSD format must preserve native E8M0 scales; regenerate the artifact")
             sshape = scale.get("shape", [])
             if len(sshape) != 2 or sshape[0] != rows or sshape[1] != 8:
                 raise SSDManifestError(f"layer {layer} scale shape invalid: {sshape}")
             specs.append(TableSpec(
                 layer_id=layer, logical_rows=rows, packed_global_base=int(base),
-                file_path="", file_row_origin=0))
+                file_path="", file_row_origin=0, codes_dtype=code_dtype,
+                row_bytes=row_bytes, scale_dtype="F8_E8M0" if fp8 else "F32"))
+
+        if len({s.row_bytes for s in specs}) != 1:
+            raise SSDManifestError("SSD cache requires uniform row layout across layers")
+        row_bytes = specs[0].row_bytes
 
         # 基址单调且区间不重叠; padding 行只允许出现在区间之间
         intervals = sorted(s.logical_interval for s in specs)
@@ -148,9 +166,9 @@ class SSDManifest:
         if n == 1:
             fb = Path(table_paths[0]).stat().st_size
             total_padded_rows = bases[-1] + specs[-1].logical_rows
-            if fb < (total_padded_rows - 1) * ROW_BYTES + ROW_BYTES:
+            if fb < total_padded_rows * row_bytes:
                 raise SSDManifestError(
-                    f"table file too small: {fb} < {total_padded_rows * ROW_BYTES}")
+                    f"table file too small: {fb} < {total_padded_rows * row_bytes}")
             for s in specs:
                 object.__setattr__(s, "file_path", str(table_paths[0]))
                 object.__setattr__(s, "file_row_origin", 0)
@@ -159,10 +177,10 @@ class SSDManifest:
             l1, l2 = specs[0], specs[1]
             fb1 = Path(table_paths[0]).stat().st_size
             fb2 = Path(table_paths[1]).stat().st_size
-            need1 = (l1.packed_global_base + l1.logical_rows) * ROW_BYTES
+            need1 = (l1.packed_global_base + l1.logical_rows) * row_bytes
             if fb1 < need1:
                 raise SSDManifestError(f"first file too small: {fb1} < {need1}")
-            need2 = l2.logical_rows * ROW_BYTES
+            need2 = l2.logical_rows * row_bytes
             if fb2 < need2:
                 raise SSDManifestError(
                     f"second file must be an exact L14 slice: {fb2} < {need2}")

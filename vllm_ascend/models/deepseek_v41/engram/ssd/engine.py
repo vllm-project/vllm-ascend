@@ -15,7 +15,7 @@
 """Engram SSD offload: reliable libaio row-read engine (native ABI v2).
 
 Python wrapper of ``native/ssd_fill.c``. Contract (phase-3 docs/04 §8):
-``fill`` returns only after every requested row's 256B codes + 32B scales
+``fill`` returns only after every requested row's 256B codes + native scales
 have been copied into the payload planes; any short read / IO error fails
 the whole batch without writing the failed rows, and in-flight requests
 are drained before returning. Completions are validated by batch
@@ -82,13 +82,15 @@ class CScatter(ctypes.Structure):
 
 
 def plan_row_extents(rows, slots, *, base1: int = 0, dual: bool = False,
-                     bmax: int = 16384):
+                     bmax: int = 16384, row_bytes: int = 288):
     """Sort unique miss rows and greedily merge them into 4K-aligned extents.
 
     Returns ``(extents, scatters, order)`` where ``order`` sorts ``rows`` and
     ``slots[order]`` aligns with the scatter entries. Cross-block rows force
     their extent to cover the full span; merged extents never exceed ``bmax``.
     """
+    if row_bytes not in (264, 288):
+        raise ValueError(f"Unsupported row size: {row_bytes}")
     order = np.argsort(rows, kind="stable")
     rows_s = rows[order]
     slots_s = slots[order]
@@ -97,9 +99,9 @@ def plan_row_extents(rows, slots, *, base1: int = 0, dual: bool = False,
         local = np.where(is_b, rows_s - np.uint64(base1), rows_s)
     else:
         local = rows_s
-    offs = local.astype(np.int64) * 288
+    offs = local.astype(np.int64) * row_bytes
     starts = (offs // 4096 * 4096).tolist()
-    ends = ((offs + 288 + 4095) // 4096 * 4096).tolist()
+    ends = ((offs + row_bytes + 4095) // 4096 * 4096).tolist()
     offs = offs.tolist()
     file_ids = (rows_s >= np.uint64(base1)).astype(np.int32).tolist() if dual \
         else [0] * len(rows_s)
@@ -145,6 +147,11 @@ def _bind(lib: ctypes.CDLL) -> ctypes.CDLL:
         ctypes.c_int, ctypes.c_int, ctypes.c_int, ctypes.c_int, ctypes.c_int,
         ctypes.POINTER(_CError),
     ]
+    if hasattr(lib, "ssdf_open_layout"):
+        lib.ssdf_open_layout.restype = ctypes.c_void_p
+        lib.ssdf_open_layout.argtypes = lib.ssdf_open.argtypes[:-1] + [ctypes.c_int, ctypes.POINTER(_CError)]
+        lib.ssdf_open_dual_layout.restype = ctypes.c_void_p
+        lib.ssdf_open_dual_layout.argtypes = lib.ssdf_open_dual.argtypes[:-1] + [ctypes.c_int, ctypes.POINTER(_CError)]
     lib.ssdf_fill.restype = ctypes.c_int
     lib.ssdf_fill.argtypes = [
         ctypes.c_void_p,
@@ -205,7 +212,7 @@ def load_native() -> ctypes.CDLL:
 
 
 class SSDFillEngine:
-    """Persistent libaio engine reading 288B rows (256B codes + 32B scales).
+    """Persistent libaio engine reading native rows (INT8/FP32: 288B; FP8/E8M0: 264B).
 
     Args:
         table_paths: one full packed file, or two files where the second is
@@ -225,13 +232,23 @@ class SSDFillEngine:
     def __init__(self, table_paths: list[str], *, layer_rows: list[int],
                  layer_bases: list[int], threads_per_disk: int = 16,
                  qd: int = 1024, io_nr: int | None = None,
-                 cpu_base: int = -1, cpu_base_second: int | None = None):
+                 cpu_base: int = -1, cpu_base_second: int | None = None,
+                 row_bytes: int = 288):
         if len(layer_rows) != len(layer_bases) or not layer_rows:
             raise SSDInputError(1, f"layer_rows/bases mismatch: {layer_rows} vs {layer_bases}")
         for p in table_paths:
             if not Path(p).exists():
                 raise SSDEngineError(6, f"table path not found: {p}")
+        if row_bytes not in (264, 288):
+            raise SSDInputError(1, f"Unsupported row size: {row_bytes}")
         lib = load_native()
+        self.row_bytes = row_bytes
+        self.scale_bytes = row_bytes - 256
+        if row_bytes == 264 and not hasattr(lib, "ssdf_open_layout"):
+            raise SSDEngineError(6, "Native FP8 SSD requires rebuilding the engram_ssd_c library")
+        layout_args = [row_bytes] if row_bytes == 264 else []
+        open_one = lib.ssdf_open_layout if layout_args else lib.ssdf_open
+        open_dual = lib.ssdf_open_dual_layout if layout_args else lib.ssdf_open_dual
         io_nr = 2 * qd if io_nr is None else io_nr
         self.layer_rows = list(layer_rows)
         self.layer_bases = list(layer_bases)
@@ -245,17 +262,17 @@ class SSDFillEngine:
         if self.dual:
             iv = np.array([0, layer_rows[0],
                            layer_bases[1], layer_bases[1] + layer_rows[1]], np.uint64)
-            self._h = lib.ssdf_open_dual(
+            self._h = open_dual(
                 str(table_paths[0]).encode(), str(table_paths[1]).encode(),
                 layer_bases[1], layer_rows[0], layer_rows[1],
                 threads_per_disk, qd, io_nr, cpu_base, cb2,
-                ctypes.byref(self._e))
+                *layout_args, ctypes.byref(self._e))
         else:
             iv = np.array([v for b, r in zip(layer_bases, layer_rows) for v in (b, b + r)],
                           np.uint64)
-            self._h = lib.ssdf_open(str(table_paths[0]).encode(), threads_per_disk, qd,
+            self._h = open_one(str(table_paths[0]).encode(), threads_per_disk, qd,
                                     io_nr, cpu_base, iv, len(layer_rows),
-                                    ctypes.byref(self._e))
+                                    *layout_args, ctypes.byref(self._e))
         if not self._h:
             raise SSDEngineError(6, self._e.detail.decode(errors="replace"))
 
@@ -265,7 +282,7 @@ class SSDFillEngine:
 
         ``ids`` are packed global row ids (uint64); ``slots`` the target DDR
         slot per id (int32, same length); ``codes``/``scales`` writable
-        C-contiguous uint8 planes of shape [capacity, 256] / [capacity, 32].
+        C-contiguous uint8 planes of shape [capacity, 256] / [capacity, scale_bytes].
         """
         if not self._h:
             raise SSDEngineError(5, "engine is closed")
@@ -279,14 +296,7 @@ class SSDFillEngine:
             raise SSDInputError(1, "ids/slots must be C-contiguous")
         if len(ids) != len(slots):
             raise SSDInputError(1, f"ids/slots length mismatch: {len(ids)} vs {len(slots)}")
-        if (codes.ndim != 2 or codes.dtype != np.uint8 or codes.shape[1] != 256
-                or not codes.flags["C_CONTIGUOUS"] or not codes.flags["WRITEABLE"]):
-            raise SSDInputError(1, f"codes must be writable uint8[cap,256], got {codes.shape} {codes.dtype}")
-        if (scales.ndim != 2 or scales.dtype != np.uint8 or scales.shape[1] != 32
-                or not scales.flags["C_CONTIGUOUS"] or not scales.flags["WRITEABLE"]):
-            raise SSDInputError(1, f"scales must be writable uint8[cap,32], got {scales.shape} {scales.dtype}")
-        if codes.shape[0] != scales.shape[0]:
-            raise SSDInputError(1, f"plane capacity mismatch: {codes.shape[0]} vs {scales.shape[0]}")
+        self._validate_planes(codes, scales)
         if len(ids) == 0:
             return {"rows": 0, "wall_ms": 0.0}
         wall = ctypes.c_double()
@@ -297,10 +307,21 @@ class SSDFillEngine:
             raise SSDReadError(rc, self._e.detail.decode(errors="replace"))
         return {"rows": len(ids), "wall_ms": wall.value}
 
+    def _validate_planes(self, codes, scales):
+        if (codes.ndim != 2 or codes.dtype != np.uint8 or codes.shape[1] != 256
+                or not codes.flags["C_CONTIGUOUS"] or not codes.flags["WRITEABLE"]):
+            raise SSDInputError(1, f"codes must be writable uint8[cap,256], got {codes.shape} {codes.dtype}")
+        if (scales.ndim != 2 or scales.dtype != np.uint8 or scales.shape[1] != self.scale_bytes
+                or not scales.flags["C_CONTIGUOUS"] or not scales.flags["WRITEABLE"]):
+            raise SSDInputError(1, f"scales must be writable uint8[cap,{self.scale_bytes}], got {scales.shape} {scales.dtype}")
+        if codes.shape[0] != scales.shape[0]:
+            raise SSDInputError(1, f"plane capacity mismatch: {codes.shape[0]} vs {scales.shape[0]}")
+
     def read_extents(self, extents, scatters, codes, scales) -> dict[str, Any]:
         """Prefill merged reads: one aligned read per extent, scatter rows."""
         if not self._h:
             raise SSDEngineError(5, "engine is closed")
+        self._validate_planes(codes, scales)
         n_ext, n_sct = len(extents), len(scatters)
         if n_ext == 0:
             return {"extents": 0, "rows": 0, "wall_ms": 0.0}

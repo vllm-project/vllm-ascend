@@ -154,17 +154,19 @@ class EngramSSDConfig:
             prefill_lookahead=lookahead_supported and self.prefill_lookahead is not False,
         )
 
-    def capacity(self) -> int:
+    def capacity(self, row_bytes: int = _ROW_BYTES_ENGRAM_SSD) -> int:
         """两层共享的载荷槽位数。"""
-        return self.cache_payload_bytes // _ROW_BYTES_ENGRAM_SSD
+        if row_bytes not in (264, 288):
+            raise ValueError(f"Unsupported Engram SSD row size: {row_bytes}")
+        return self.cache_payload_bytes // row_bytes
 
-    def resource_estimate(self) -> dict:
+    def resource_estimate(self, row_bytes: int = _ROW_BYTES_ENGRAM_SSD) -> dict:
         """常驻与峰值内存账本(bytes, 每 TP 共享组一份; 共享平面只计物理一份)。"""
-        cap = self.capacity()
+        cap = self.capacity(row_bytes)
         buckets = 8
         while buckets < cap * 3 // 2 + 1:
             buckets *= 2
-        payload = cap * _ROW_BYTES_ENGRAM_SSD
+        payload = cap * row_bytes
         directory = buckets * 8
         slot_meta = cap * _SLOT_META_BYTES_ENGRAM_SSD
         rebuild_peak = directory

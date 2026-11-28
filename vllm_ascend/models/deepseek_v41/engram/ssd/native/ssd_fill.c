@@ -107,7 +107,7 @@ typedef struct {
 typedef struct Handle Handle;
 
 typedef struct {
-    int fd, qd;
+    int fd, qd, row_bytes, scale_bytes;
     aio_context_t ctx;
     int ctx_ready;
     struct iocb *iocbs; struct iocb **pp; struct io_event *evs;
@@ -146,6 +146,7 @@ struct Handle {
     uint64_t rows1, rows2;
     uint64_t iv[2 * SSDF_MAX_INTERVALS];
     int n_iv;
+    int row_bytes;
 };
 
 typedef struct { Worker *w; Handle *h; } WArg;
@@ -176,15 +177,16 @@ static void handle_free(Handle *h) {
 }
 
 static void *ssdf_open_iv(const char *path, int threads, int qd, int io_nr, int cpubase,
-                          const uint64_t *iv, int n_iv, ssdf_error *err) {
+                          const uint64_t *iv, int n_iv, int row_bytes, ssdf_error *err) {
     if (!path || threads <= 0 || qd <= 0 || qd >= (1 << SSDF_SLOT_SHIFT) ||
-        io_nr <= 0 || n_iv <= 0 || n_iv > SSDF_MAX_INTERVALS) {
+        io_nr <= 0 || n_iv <= 0 || n_iv > SSDF_MAX_INTERVALS ||
+        (row_bytes != 264 && row_bytes != SSDF_ROW_BYTES)) {
         ssdf_set_err(err, SSDF_ERR_ARG, "bad open args: threads=%d qd=%d io_nr=%d n_iv=%d",
                      threads, qd, io_nr, n_iv);
         return NULL;
     }
     for (int i = 0; i < n_iv; i++)
-        if (iv[2 * i + 1] > UINT64_MAX / SSDF_ROW_BYTES) {   /* 空区间(lo==hi)允许 */
+        if (iv[2 * i + 1] > UINT64_MAX / (uint64_t)row_bytes) {   /* 空区间(lo==hi)允许 */
             ssdf_set_err(err, SSDF_ERR_ARG, "bad interval %d", i);
             return NULL;
         }
@@ -197,6 +199,7 @@ static void *ssdf_open_iv(const char *path, int threads, int qd, int io_nr, int 
     if (!h) { close(fd); ssdf_set_err(err, SSDF_ERR_SETUP, "oom handle"); return NULL; }
     h->fd_owned = fd;
     h->nthreads = threads;
+    h->row_bytes = row_bytes;
     pthread_mutex_init(&h->mu, NULL); pthread_mutex_init(&h->fill_mu, NULL);
     pthread_cond_init(&h->go, NULL); pthread_cond_init(&h->done, NULL);
     h->n_iv = n_iv;
@@ -209,6 +212,7 @@ static void *ssdf_open_iv(const char *path, int threads, int qd, int io_nr, int 
     for (int i = 0; i < threads; i++) {
         Worker *w = &h->w[i];
         w->fd = fd; w->qd = qd;
+        w->row_bytes = row_bytes; w->scale_bytes = row_bytes - 256;
         w->iocbs = calloc((size_t)qd, sizeof(struct iocb));
         w->pp = calloc((size_t)qd, sizeof(struct iocb *));
         w->evs = calloc((size_t)qd, sizeof(struct io_event));
@@ -294,9 +298,9 @@ void *worker_loop_main(void *arg) {
 /* ---------- 提交/完成核心 ---------- */
 
 static void build_iocb(Worker *w, int bslot, int64_t k, uint64_t gen) {
-    uint64_t off = w->ids[k] * SSDF_ROW_BYTES;      /* id 已由 fill 校验 */
+    uint64_t off = w->ids[k] * (uint64_t)w->row_bytes;      /* id 已由 fill 校验 */
     uint64_t blk = off / SSDF_BLK * SSDF_BLK;
-    uint32_t len = (off + SSDF_ROW_BYTES <= blk + SSDF_BLK) ? SSDF_BLK : SSDF_STRADDLE;
+    uint32_t len = (off + w->row_bytes <= blk + SSDF_BLK) ? SSDF_BLK : SSDF_STRADDLE;
     ssdf_req *r = &w->reqs[bslot];
     r->k = k; r->gen = gen; r->expected = len; r->row_off = (uint32_t)(off % SSDF_BLK);
     r->target = w->slots[k]; r->state = REQ_IDLE;
@@ -401,7 +405,7 @@ reap:
                 if (ev->res == (long)r->expected && ev->res2 == 0) {
                     const char *row = w->bufs + (size_t)bslot * SSDF_BUFSZ + r->row_off;
                     memcpy(w->codes + (size_t)r->target * 256, row, 256);
-                    memcpy(w->scales + (size_t)r->target * 32, row + 256, 32);
+                    memcpy(w->scales + (size_t)r->target * w->scale_bytes, row + 256, w->scale_bytes);
                     r->state = REQ_DONE;
                 } else {
                     r->state = REQ_FAILED;
@@ -511,7 +515,7 @@ reap2:
                         const ssdf_scatter *sc = &w->sct[e->scatter_begin + j];
                         const char *row = base + sc->rel_offset;
                         memcpy(w->codes + (size_t)sc->target_slot * 256, row, 256);
-                        memcpy(w->scales + (size_t)sc->target_slot * 32, row + 256, 32);
+                        memcpy(w->scales + (size_t)sc->target_slot * w->scale_bytes, row + 256, w->scale_bytes);
                     }
                     r->state = REQ_DONE;
                 } else {
@@ -635,7 +639,7 @@ int ssdf_read_extents(void *hv, const ssdf_extent *ext, int64_t n_ext,
         }
         for (int32_t j = 0; j < e->scatter_count; j++) {
             const ssdf_scatter *sc = &sct[e->scatter_begin + j];
-            if (sc->rel_offset < 0 || sc->rel_offset + SSDF_ROW_BYTES > e->length ||
+            if (sc->rel_offset < 0 || (int64_t)sc->rel_offset + h->row_bytes > e->length ||
                 sc->target_slot < 0 || (uint64_t)sc->target_slot >= (uint64_t)capacity) {
                 pthread_mutex_unlock(&h->fill_mu);
                 ssdf_set_err(err, SSDF_ERR_RANGE, "extent[%lld] scatter[%d] oob", (long long)i, j);
@@ -792,21 +796,21 @@ int ssdf_fill(void *hv, const uint64_t *ids, const int32_t *slots, int64_t n,
 
 void *ssdf_open(const char *path, int threads, int qd, int io_nr, int cpubase,
                 const uint64_t *iv, int n_iv, ssdf_error *err) {
-    return ssdf_open_iv(path, threads, qd, io_nr, cpubase, iv, n_iv, err);
+    return ssdf_open_iv(path, threads, qd, io_nr, cpubase, iv, n_iv, SSDF_ROW_BYTES, err);
 }
 
-void *ssdf_open_dual(const char *pa, const char *pb, uint64_t base1, uint64_t rows1, uint64_t rows2,
-                     int threads, int qd, int io_nr, int cpuA, int cpuB, ssdf_error *err) {
+void *ssdf_open_dual_layout(const char *pa, const char *pb, uint64_t base1, uint64_t rows1, uint64_t rows2,
+                     int threads, int qd, int io_nr, int cpuA, int cpuB, int row_bytes, ssdf_error *err) {
     uint64_t iv_a[4] = {0, rows1, base1, base1 + rows2};
     ssdf_error e1;
-    Handle *a = ssdf_open_iv(pa, threads, qd, io_nr, cpuA, iv_a, 2, &e1);
+    Handle *a = ssdf_open_iv(pa, threads, qd, io_nr, cpuA, iv_a, 2, row_bytes, &e1);
     if (!a) {
         ssdf_set_err(err, SSDF_ERR_SETUP, "dual first open failed: %s", e1.detail);
         return NULL;
     }
     uint64_t iv_b[2] = {0, rows2};
     ssdf_error e2;
-    Handle *b = ssdf_open_iv(pb, threads, qd, io_nr, cpuB, iv_b, 1, &e2);
+    Handle *b = ssdf_open_iv(pb, threads, qd, io_nr, cpuB, iv_b, 1, row_bytes, &e2);
     if (!b) {
         /* 第二盘失败: 完整回收第一盘(线程 join + 资源释放) */
         pthread_mutex_lock(&a->mu);
@@ -820,6 +824,18 @@ void *ssdf_open_dual(const char *pa, const char *pb, uint64_t base1, uint64_t ro
     }
     a->other = b; a->base1 = base1; a->rows1 = rows1; a->rows2 = rows2;
     return a;
+}
+
+/* Layout-aware entry points retain the original INT8 ABI for existing callers. */
+void *ssdf_open_layout(const char *path, int threads, int qd, int io_nr, int cpubase,
+                      const uint64_t *iv, int n_iv, int row_bytes, ssdf_error *err) {
+    return ssdf_open_iv(path, threads, qd, io_nr, cpubase, iv, n_iv, row_bytes, err);
+}
+
+void *ssdf_open_dual(const char *pa, const char *pb, uint64_t base1, uint64_t rows1, uint64_t rows2,
+                     int threads, int qd, int io_nr, int cpuA, int cpuB, ssdf_error *err) {
+    return ssdf_open_dual_layout(pa, pb, base1, rows1, rows2, threads, qd, io_nr,
+                                cpuA, cpuB, SSDF_ROW_BYTES, err);
 }
 
 /* ---------- close(幂等, 含 dual 另一盘) ---------- */

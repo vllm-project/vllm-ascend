@@ -1499,12 +1499,23 @@ class DeepseekV41Model(nn.Module, EagleModelMixin):
 
         tp_size = get_tensor_model_parallel_world_size()
         tp_rank = get_tensor_model_parallel_rank()
+        layer_code_dtypes = {}
+        for layer_id in config.engram_layer_ids:
+            dtype = engram_storage_dtype(self.engram_weight_root, layer_id)
+            if dtype == torch.int8:
+                layer_code_dtypes[int(layer_id)] = "I8"
+            elif dtype == torch.float8_e4m3fn:
+                if not get_current_hardware_profile().supports(HardwareCapability.ENGRAM_MXFP8):
+                    raise ValueError("FP8 Engram SSD tables require native MXFP8 hardware support")
+                layer_code_dtypes[int(layer_id)] = "F8_E4M3"
+            else:
+                raise ValueError(f"Engram SSD requires INT8 or FP8 E4M3 codes, got {dtype}")
         model_layout = {
             "version": ssd_cfg.artifact_version,
             "layers": {
                 int(layer_id): {
                     "rows": int(rows),
-                    "codes_dtype": "I8",
+                    "codes_dtype": layer_code_dtypes[int(layer_id)],
                     "codes_dim": int(config.engram_head_dim),
                     "scale_dtype": "F8_E8M0",
                 }
@@ -1513,6 +1524,10 @@ class DeepseekV41Model(nn.Module, EagleModelMixin):
             },
         }
         manifest = SSDManifest.load(ssd_cfg.manifest, model_layout, ssd_cfg.table_paths)
+        row_bytes = manifest.row_bytes
+        codes_dtype = torch.int8 if row_bytes == 288 else torch.float8_e4m3fn
+        if not ssd_cfg.resource_estimate(row_bytes)["within_budget"]:
+            raise ValueError("Engram SSD native row layout exceeds total_host_budget_bytes")
         n_hash_cols = (config.engram_max_ngram_size - 1) * config.engram_n_heads
         if n_hash_cols % tp_size:
             raise ValueError(
@@ -1540,7 +1555,7 @@ class DeepseekV41Model(nn.Module, EagleModelMixin):
                 and tp_size == 1
                 and get_pp_group().world_size == 1
                 and expected_group_size > 1
-                and max_tokens * 2 * part_cols * expected_group_size <= ssd_cfg.capacity()
+                and max_tokens * 2 * part_cols * expected_group_size <= ssd_cfg.capacity(row_bytes)
                 and sorted(config.engram_layer_ids) == list(config.engram_layer_ids)
             ),
             lookahead_supported=(
@@ -1566,8 +1581,8 @@ class DeepseekV41Model(nn.Module, EagleModelMixin):
                     "engram_ssd with DP>1 requires a node-local engram DP group")
             # aclrtHostRegisterV2 需要设备上下文已初始化
             torch.zeros(1, device=torch.device("npu", torch.npu.current_device()))
-            shared_planes = SSDPlanes(ssd_cfg.capacity(), torch.device(
-                "npu", torch.npu.current_device()), group=dp_group)
+            shared_planes = SSDPlanes(ssd_cfg.capacity(row_bytes), torch.device(
+                "npu", torch.npu.current_device()), group=dp_group, codes_dtype=codes_dtype)
             rollback.callback(shared_planes.close)
             if dp_group.rank_in_group == 0:
                 cpu_base = ssd_cfg.io_cpu_list[0] if ssd_cfg.io_cpu_list else -1
@@ -1578,11 +1593,11 @@ class DeepseekV41Model(nn.Module, EagleModelMixin):
                     threads_per_disk=ssd_cfg.threads_per_disk,
                     qd=ssd_cfg.queue_depth,
                     io_nr=ssd_cfg.io_setup_events,
-                    cpu_base=cpu_base)
+                    cpu_base=cpu_base, row_bytes=row_bytes)
                 rollback.callback(shared_engine.close)
                 rebuild = ssd_cfg.rebuild_threshold or None
                 shared_cache = SSDRowCache(
-                    ssd_cfg.capacity(),
+                    ssd_cfg.capacity(row_bytes),
                     row_limit=max(manifest.total_logical_rows,
                                   manifest.specs[-1].packed_global_base
                                   + manifest.specs[-1].logical_rows),

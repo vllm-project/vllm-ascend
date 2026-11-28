@@ -13,7 +13,7 @@
 # limitations under the License.
 """Payload planes for the SSD row cache.
 
-Two planes (int8 codes, float32 scales) of ``capacity`` rows each. The
+Two native DDR planes (INT8/FP32 or FP8/E8M0) of ``capacity`` rows each. The
 owner allocates; consumers map the same physical bytes at their own
 64KiB-aligned virtual addresses via :func:`am_map_shared_aligned`
 (native/aligned_mapping.c). Every rank then UVA-registers its own mapping
@@ -199,22 +199,27 @@ class SSDPlanes:
     node-local DP group consumes one physical copy.
     """
 
-    def __init__(self, capacity: int, device, group=None):
+    def __init__(self, capacity: int, device, group=None, *, codes_dtype=torch.int8):
+        if codes_dtype not in (torch.int8, torch.float8_e4m3fn):
+            raise ValueError(f"Unsupported SSD codes dtype: {codes_dtype}")
+        scale_bytes = 8 if codes_dtype == torch.float8_e4m3fn else 32
+        scale_dtype = torch.uint8 if scale_bytes == 8 else torch.float32
         self.capacity = capacity
         if group is not None:
-            self.codes = AlignedSharedUvaPlane(capacity, 256, torch.uint8, device, group)
-            self.scales = AlignedSharedUvaPlane(capacity, 32, torch.uint8, device, group)
+            self.codes = AlignedSharedUvaPlane(capacity, 256, codes_dtype, device, group)
+            self.scales = AlignedSharedUvaPlane(capacity, scale_bytes, scale_dtype, device, group)
             self.shared = True
         else:
             from vllm_ascend.models.deepseek_v41.engram.npu import HostUvaBuffer
 
-            self.codes = HostUvaBuffer((capacity, 256), torch.uint8, device)
-            self.scales = HostUvaBuffer((capacity, 32), torch.uint8, device)
+            self._module = torch.nn.Module()
+            self.codes = HostUvaBuffer((capacity, 256), codes_dtype, device, "_codes", self._module)
+            self.scales = HostUvaBuffer((capacity, 8), scale_dtype, device, "_scales", self._module)
             self.shared = False
 
     def numpy_views(self):
-        """(codes, scales) as writable numpy planes [cap,256]/[cap,32]."""
-        return self.codes.tensor.numpy(), self.scales.tensor.numpy()
+        """(codes, scales) as writable numpy planes [cap,256]/[cap,scale_bytes]."""
+        return self.codes.tensor.view(torch.uint8).numpy(), self.scales.tensor.view(torch.uint8).numpy()
 
     def close(self) -> None:
         for p in (self.scales, self.codes):

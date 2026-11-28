@@ -129,7 +129,8 @@ class EngramSSDRuntime:
         self.layer_bases = [s.packed_global_base for s in manifest.specs]
         self.layer_rows = [s.logical_rows for s in manifest.specs]
 
-        self.capacity = cfg.capacity()
+        self.capacity = cfg.capacity(manifest.row_bytes)
+        codes_dtype = torch.int8 if manifest.specs[0].codes_dtype == "I8" else torch.float8_e4m3fn
         self.layerwise_overlap = getattr(cfg, "layerwise_overlap", False)
         if self.layerwise_overlap and (
             tp_size != 1 or protocol is None or num_layers != 2
@@ -150,7 +151,7 @@ class EngramSSDRuntime:
         else:
             # aclrtMallocHost 需要设备上下文已初始化(裸进程直接分配返回 107002)
             torch.zeros(1, device=device)
-            self.planes = SSDPlanes(self.capacity, device)
+            self.planes = SSDPlanes(self.capacity, device, codes_dtype=codes_dtype)
         codes_np, scales_np = self.planes.numpy_views()
         if not self.planes.shared:
             # 私有平面初始化为安全值(row0 会被无效 slot 读取)
@@ -171,7 +172,7 @@ class EngramSSDRuntime:
                 cfg.table_paths, layer_rows=self.layer_rows,
                 layer_bases=self.layer_bases,
                 threads_per_disk=cfg.threads_per_disk, qd=cfg.queue_depth,
-                io_nr=cfg.io_setup_events, cpu_base=cpu_base)
+                io_nr=cfg.io_setup_events, cpu_base=cpu_base, row_bytes=manifest.row_bytes)
         if cache is not None:
             self.cache = cache
         elif self.engine is not None:
