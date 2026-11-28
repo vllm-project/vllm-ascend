@@ -1148,7 +1148,7 @@ def pad_sequence_parallel_tokens(hidden_states: torch.Tensor) -> torch.Tensor:
     from vllm.distributed import get_tensor_model_parallel_world_size
 
     tp_size = get_tensor_model_parallel_world_size()
-    padding = (-hidden_states.shape[0]) % tp_size
+    padding = (hidden_states.shape[0] + tp_size - 1) // tp_size * tp_size - hidden_states.shape[0]
     pad = (0, 0) * (hidden_states.ndim - 1) + (0, padding)
     return torch.nn.functional.pad(hidden_states, pad)
 
