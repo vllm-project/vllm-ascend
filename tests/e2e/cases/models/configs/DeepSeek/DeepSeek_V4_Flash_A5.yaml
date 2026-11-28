@@ -6,6 +6,7 @@ _envs: &envs
   OMP_NUM_THREADS: "10"
   PYTORCH_NPU_ALLOC_CONF: "expandable_segments:True"
   HCCL_BUFFSIZE: "512"
+
   ASCEND_RT_VISIBLE_DEVICES: "0,1,2,3,4,5,6,7"
 _server_cmd: &server_cmd
   - "--port"
