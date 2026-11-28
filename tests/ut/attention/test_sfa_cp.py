@@ -153,7 +153,6 @@ def test_sfa_pcp_dcp_compact_kv_selects_only_allocated_blocks(first_block_id):
     builder.arange_buffer = torch.arange(6, dtype=torch.int32)
     builder.kernel_block_size = builder.cp_kv_cache_interleave_size = 128
     builder.dcp_size = 2
-    builder.dcp_collective_rank_order = torch.tensor([0, 1], dtype=torch.int32)
     global_table = torch.tensor([[first_block_id, 91, 92], [4, 5, 93]], dtype=torch.int32)
     original_table = global_table.clone()
     context = SimpleNamespace(
@@ -593,17 +592,13 @@ def test_sfa_pcp_dcp_builds_pcp_ordered_indexer_slots_with_receiver_local_blocks
 
 
 @pytest.mark.parametrize("with_global_view", [False, True])
-def test_sfa_dcp_compact_kv_table_uses_logical_dcp_rank_order(with_global_view) -> None:
+def test_sfa_dcp_compact_kv_table_uses_dcp_rank_order(with_global_view) -> None:
     builder_cls = AscendSFAPCPDCPMetadataBuilder if with_global_view else AscendSFADCPMetadataBuilder
     builder = builder_cls.__new__(builder_cls)
     builder.device = torch.device("cpu")
     builder.arange_buffer = torch.arange(16, dtype=torch.int32)
     builder.kernel_block_size = builder.cp_kv_cache_interleave_size = 128
     builder.dcp_size = 8
-    builder.dcp_collective_rank_order = torch.tensor(
-        [0, 4, 1, 5, 2, 6, 3, 7],
-        dtype=torch.int32,
-    )
     dcp_block_table = torch.tensor([[5, 9]], dtype=torch.int32)
 
     if with_global_view:
@@ -622,7 +617,7 @@ def test_sfa_dcp_compact_kv_table_uses_logical_dcp_rank_order(with_global_view) 
     torch.testing.assert_close(
         block_table,
         torch.tensor(
-            [[0, 8, 2, 10, 4, 12, 6, 14, 1, 9, 3, 11, 5, 13, 7, 15]],
+            [[0, 2, 4, 6, 8, 10, 12, 14, 1, 3, 5, 7, 9, 11, 13, 15]],
             dtype=torch.int32,
         ),
     )
@@ -641,7 +636,6 @@ def test_sfa_pcp_dcp_compact_kv_uses_global_request_blocks(local_rows, expected_
     builder.arange_buffer = torch.arange(4, dtype=torch.int32)
     builder.kernel_block_size = builder.cp_kv_cache_interleave_size = 128
     builder.dcp_size = 2
-    builder.dcp_collective_rank_order = torch.arange(2, dtype=torch.int32)
     # Actual [8, 1] prefill layout: the second PCP rank has no row for
     # the one-token request (block 3), despite both tables having zero tails.
     global_dcp_block_table = torch.tensor([[3, 0], [4, 0]], dtype=torch.int32)
@@ -660,7 +654,7 @@ def test_sfa_pcp_dcp_compact_kv_uses_global_request_blocks(local_rows, expected_
 def test_sfa_pcp_dcp_compact_kv_requires_global_block_counts():
     builder = AscendSFAPCPDCPMetadataBuilder.__new__(AscendSFAPCPDCPMetadataBuilder)
     builder.arange_buffer = torch.arange(2, dtype=torch.int32)
-    builder.dcp_collective_rank_order = torch.arange(2, dtype=torch.int32)
+    builder.dcp_size = 2
     builder.kernel_block_size = builder.cp_kv_cache_interleave_size = 128
     block_table = torch.tensor([[3]], dtype=torch.int32)
     with pytest.raises(ValueError, match="requires valid block counts"):
@@ -1580,10 +1574,6 @@ def test_sfa_dcp_builder_sizes_replicated_view_from_padded_block_table() -> None
                 DCPMetadataBuilderMixin,
                 "__init__",
                 new=fake_base_init,
-            ),
-            patch(
-                "vllm_ascend.attention.context_parallel.sfa_cp.get_dcp_group",
-                return_value=SimpleNamespace(ranks=[0, 1]),
             ),
         ):
             builder = AscendSFADCPMetadataBuilder(

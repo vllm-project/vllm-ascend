@@ -27,8 +27,6 @@ def test_sfa_pcp_dcp_compact_kv_respects_interleave(interleave, world):
     builder.cp_kv_cache_interleave_size = interleave
     builder.arange_buffer = torch.arange(12 * world, dtype=torch.int32)
     builder.dcp_size = world
-    order = [0, 1] if world == 2 else [0, 4, 1, 5, 2, 6, 3, 7]
-    builder.dcp_collective_rank_order = torch.tensor(order, dtype=torch.int32)
     # Requests share a physical prefix page, but have different history and
     # stale tails. Each PCP receiver can have a different request-row order.
     global_table = torch.tensor(
@@ -49,7 +47,7 @@ def test_sfa_pcp_dcp_compact_kv_respects_interleave(interleave, world):
             owner = (position // interleave) % world
             local_position = position // (world * interleave) * interleave + position % interleave
             block_id = local_table[request, local_position // 128].item()
-            expected.append(order[owner] * len(ids) + ids.tolist().index(block_id))
+            expected.append(owner * len(ids) + ids.tolist().index(block_id))
         assert table[request].tolist() == expected
 
 
@@ -59,7 +57,7 @@ def test_sfa_compact_history_rejects_interleave_inside_kernel_blocks(interleave)
         build_sfa_dcp_compact_kv_metadata(
             torch.tensor([[0, 1]], dtype=torch.int32),
             torch.arange(4, dtype=torch.int32),
-            torch.arange(2, dtype=torch.int32),
+            2,
             128,
             interleave,
         )
@@ -71,7 +69,6 @@ def test_pcp_dcp_history_view_preserves_causal_topk_and_attention(world, interle
     torch.manual_seed(41)
     block_size, local_blocks, width = 128, 12, 8
     length = local_blocks * block_size * world
-    order = [0, 1] if world == 2 else [0, 4, 1, 5, 2, 6, 3, 7]
     # Two requests share a prefix page. Payloads differ across KV owners;
     # the receiver's query rows are deliberately not in global request order.
     global_table = torch.tensor([list(range(12)), list(range(6)) + list(range(12, 18))], dtype=torch.int32)
@@ -79,7 +76,7 @@ def test_pcp_dcp_history_view_preserves_causal_topk_and_attention(world, interle
     ids, table = build_sfa_dcp_compact_kv_metadata(
         global_table[requests],
         torch.arange(local_blocks * world, dtype=torch.int32),
-        torch.tensor(order, dtype=torch.int32),
+        world,
         block_size,
         interleave,
         global_dcp_block_table=global_table,
@@ -87,11 +84,8 @@ def test_pcp_dcp_history_view_preserves_causal_topk_and_attention(world, interle
     )
     keys = torch.randn(world, 18, block_size, 1, width).to(torch.float8_e4m3fn)
     scales = torch.rand(world, 18, block_size, 1, 1) + 0.25
-    # AllGather emits physical ProcessGroup order, not logical PCP-first order.
-    gathered_key = torch.cat(
-        [_index_select_kv_blocks(keys[order.index(rank)], ids).view(torch.uint8) for rank in range(world)]
-    ).view(keys.dtype)
-    gathered_scale = torch.cat([scales[order.index(rank)].index_select(0, ids) for rank in range(world)])
+    gathered_key = torch.cat([_index_select_kv_blocks(key, ids).view(torch.uint8) for key in keys]).view(keys.dtype)
+    gathered_scale = torch.cat([scale.index_select(0, ids) for scale in scales])
     positions = [world * interleave + 17, 127, world * interleave + 20]
     for row, request in enumerate(requests):
         # Build the oracle by assigning each owner's contiguous local token

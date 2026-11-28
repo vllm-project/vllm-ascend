@@ -189,7 +189,7 @@ def test_capture_preserves_dcp_dummy_metadata(use_dcp):
 
 @pytest.mark.parametrize("interleave", [1, 2, 4])
 @pytest.mark.parametrize("local_histories", [[0, 7, 12], [3, 6], [0, 0]])
-def test_chunk_reorg_maps_local_fragments_and_restores_logical_senders(interleave, local_histories):
+def test_chunk_reorg_maps_local_fragments_in_dcp_rank_order(interleave, local_histories):
     from vllm.v1.attention.backends.utils import get_dcp_local_seq_lens
 
     from vllm_ascend.attention.context_parallel.mla_cp import DCPChunkedContextMetadata
@@ -199,8 +199,6 @@ def test_chunk_reorg_maps_local_fragments_and_restores_logical_senders(interleav
     impl.kv_lora_rank = 1
     impl.qk_rope_head_dim = 1
     impl.pcp_group = SimpleNamespace(world_size=2)
-    # Physical HCCL senders [0,1,2,3], logical DCP order [0,2,1,3].
-    collective_rank_order = [0, 2, 1, 3]
     global_histories = torch.tensor([4, 12], dtype=torch.int32)
     local = torch.tensor(local_histories, dtype=torch.int32)
     local_lengths = get_dcp_local_seq_lens(local, dcp_size=4, cp_kv_cache_interleave_size=interleave)
@@ -222,15 +220,13 @@ def test_chunk_reorg_maps_local_fragments_and_restores_logical_senders(interleav
         local_chunk_starts=[[0, 0]],
         pcp_global_req_indices=table,
         padded_local_cu_seq_lens_lst=[offsets],
-        kv_rank_offsets=[[rank * sum(pad) for rank in collective_rank_order]],
     )
     senders = []
-    for physical_rank in range(4):
-        logical_rank = collective_rank_order.index(physical_rank)
+    for rank in range(4):
         rows = []
         for request, count in enumerate(pad):
             positions = torch.arange(count)
-            values = (positions // interleave) * (4 * interleave) + logical_rank * interleave + positions % interleave
+            values = (positions // interleave) * (4 * interleave) + rank * interleave + positions % interleave
             latent = (request * 100 + values).float().view(count, 1, 1)
             rows.append(torch.cat((latent, latent + 1000), dim=-1))
         senders.append(torch.cat(rows))
@@ -337,7 +333,6 @@ def test_pcp_dcp_chunk_plan_packs_requests_within_budget(workspace_size):
     builder.block_size = builder.cp_virtual_block_size = 2048
     builder.cp_local_block_size = 128
     builder.dcp_size = 16
-    builder.dcp_collective_rank_order = list(range(16))
     builder.device = torch.device("cpu")
     builder.num_decodes = 0
     builder.num_prefills = 64
@@ -375,7 +370,6 @@ def test_pcp_global_plan_keeps_local_fragment_mapping():
     builder.use_pcp = True
     builder.use_dcp = True
     builder.chunked_prefill_workspace_size = 64
-    builder.dcp_collective_rank_order = [0, 2, 1, 3]
     builder.pcp_size = 2
     builder.dcp_size = 4
     builder.cp_local_block_size = 1
@@ -438,7 +432,6 @@ def test_pcp_global_plan_keeps_local_fragment_mapping():
     assert result.chunk_seq_lens.shape == (2, 3)
     assert result.seq_tot == [7, 2]
     assert result.padded_local_cu_seq_lens_lst == [[0, 3, 7], [0, 0, 2]]
-    assert result.kv_rank_offsets == [[0, 14, 7, 21], [0, 4, 2, 6]]
     assert builder.num_prefills == 3 and builder.num_decodes == 0
 
 
@@ -498,7 +491,6 @@ def test_packed_chunks_reorg_covers_each_history_once(dcp_size, interleave, use_
     builder.cp_virtual_block_size = dcp_size * interleave
     builder.cp_local_block_size = interleave
     builder.dcp_size = dcp_size
-    builder.dcp_collective_rank_order = list(reversed(range(dcp_size)))
     builder.device = torch.device("cpu")
     builder.num_decodes = 0
     builder.num_prefills = len(histories)
@@ -522,8 +514,7 @@ def test_packed_chunks_reorg_covers_each_history_once(dcp_size, interleave, use_
     seen: list[list[float]] = [[] for _ in histories]
     for chunk, counts in enumerate(meta.padded_local_chunk_seq_lens):
         senders = []
-        for physical_rank in range(dcp_size):
-            rank = builder.dcp_collective_rank_order.index(physical_rank)
+        for rank in range(dcp_size):
             rows = []
             for request, count in enumerate(counts):
                 positions = torch.arange(count) + meta.local_chunk_starts[chunk][request]

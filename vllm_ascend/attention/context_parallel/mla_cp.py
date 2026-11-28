@@ -5,7 +5,6 @@ import numpy as np
 import torch
 import torch_npu
 from vllm.config import VllmConfig
-from vllm.distributed import get_dcp_group
 from vllm.utils.math_utils import cdiv
 from vllm.v1.attention.backends.utils import get_dcp_local_seq_lens
 
@@ -86,8 +85,6 @@ class DCPChunkedContextMetadata(ChunkedContextMetadata):
     padded_local_cu_seq_lens_lst: list[list[int]] | None = None
     pcp_global_req_indices: list[int] | None = None
     pcp_global_block_table: torch.Tensor | None = None
-    # Per-chunk offsets in the gathered buffer, indexed by logical DCP rank.
-    kv_rank_offsets: list[list[int]] | None = None
 
 
 @dataclass
@@ -162,11 +159,6 @@ class AscendMlaDCPMetadataBuilder(
         supports_dcp_with_varlen: bool = True,
     ):
         super().__init__(kv_cache_spec, layer_names, vllm_config, device, metadata_cls, supports_dcp_with_varlen)
-        # ProcessGroup payloads follow sorted global ranks. Keep logical DCP
-        # rank order for attention and translate it into source offsets below.
-        dcp_ranks = get_dcp_group().ranks
-        collective_ranks = sorted(dcp_ranks)
-        self.dcp_collective_rank_order = [collective_ranks.index(rank) for rank in dcp_ranks]
         self.cp_local_block_size = vllm_config.parallel_config.cp_kv_cache_interleave_size
         self.cp_virtual_block_size = self.cp_local_block_size * self.dcp_size
         self.block_size = (self.block_size * self.cp_virtual_block_size) // np.gcd(
@@ -302,7 +294,6 @@ class AscendMlaDCPMetadataBuilder(
             padded_local_cu_seq_lens_lst=padded_local_cu_chunk_seq_lens_cpu.tolist(),
             pcp_global_req_indices=local_rows,
             pcp_global_block_table=block_table,
-            kv_rank_offsets=[[rank * toks for rank in self.dcp_collective_rank_order] for toks in seq_tot],
         )
 
     def build_decode_metadata(
@@ -979,14 +970,12 @@ class AscendMlaDCPImpl(DCPImplMixin, AscendMLAImpl):
         assert chunked_context.cu_seq_lens_lst is not None
         assert chunked_context.max_seq_lens is not None
         assert chunked_context.local_chunk_starts is not None
-        assert chunked_context.kv_rank_offsets is not None
 
         padded_local_chunk_seq_lens_lst = chunked_context.padded_local_chunk_seq_lens[chunk_idx]
         local_context_lens_allranks = chunked_context.local_context_lens_allranks
         sum_seq_len = chunked_context.cu_seq_lens_lst[chunk_idx][-1]
         max_seq_len = chunked_context.max_seq_lens[chunk_idx]
         local_chunk_starts = chunked_context.local_chunk_starts[chunk_idx]
-        kv_rank_offsets = chunked_context.kv_rank_offsets[chunk_idx]
         cache_kv_c_k_pe = torch.cat([kv_c_normed, k_pe], dim=-1)
         cache_kv_c_k_pe = self._dcp_all_gather(cache_kv_c_k_pe, 0)
 
@@ -1015,7 +1004,7 @@ class AscendMlaDCPImpl(DCPImplMixin, AscendMLAImpl):
                     padded_local_chunk_seq_len,
                 )
                 if local_chunk_len != 0:
-                    src_start = kv_rank_offsets[rank] + src_token_idx
+                    src_start = rank * toks + src_token_idx
                     kv_c_segment = allgatered_kv_c_normed[src_start : src_start + local_chunk_len]
                     k_pe_segment = allgatered_k_pe[src_start : src_start + local_chunk_len]
                     kv_c_segments.append(kv_c_segment)

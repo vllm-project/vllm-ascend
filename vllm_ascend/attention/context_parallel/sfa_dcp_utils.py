@@ -25,7 +25,7 @@ def _index_select_kv_blocks(cache: torch.Tensor, indices: torch.Tensor) -> torch
 def build_sfa_dcp_compact_kv_metadata(
     dcp_block_table: torch.Tensor,
     column_indices: torch.Tensor,
-    collective_rank_order: torch.Tensor,
+    dcp_size: int,
     kernel_block_size: int,
     interleave: int,
     *,
@@ -48,11 +48,12 @@ def build_sfa_dcp_compact_kv_metadata(
         valid_mask = column_indices[: global_dcp_block_table.shape[1]].unsqueeze(0) < global_dcp_num_blocks.unsqueeze(1)
         valid_block_ids = global_dcp_block_table[valid_mask].unique()
 
-    world = collective_rank_order.numel()
-    columns = column_indices[: dcp_block_table.shape[1] * world]
+    columns = column_indices[: dcp_block_table.shape[1] * dcp_size]
     blocks_per_interleave = interleave // kernel_block_size
-    local_columns = columns // (world * blocks_per_interleave) * blocks_per_interleave + columns % blocks_per_interleave
-    owners = columns // blocks_per_interleave % world
+    local_columns = (
+        columns // (dcp_size * blocks_per_interleave) * blocks_per_interleave + columns % blocks_per_interleave
+    )
+    owners = columns // blocks_per_interleave % dcp_size
     num_blocks = valid_block_ids.numel()
     if num_blocks == 0:
         # No allocated history: all entries are padding and have no consumer.
@@ -66,8 +67,8 @@ def build_sfa_dcp_compact_kv_metadata(
     # or an in-range insertion point for an ID absent from the dictionary.
     compact_blocks.clamp_(max=num_blocks - 1)
     allocated = valid_block_ids[compact_blocks] == local_blocks
-    # Keep the large gathered tensor in HCCL order; only remap its addresses.
-    block_table = compact_blocks[:, local_columns] + collective_rank_order[owners] * num_blocks
+    # AllGather concatenates the compact KV blocks in DCP rank order.
+    block_table = compact_blocks[:, local_columns] + owners * num_blocks
     # Sequence lengths exclude padding. Keep its addresses in bounds as well,
     # without mapping a stale ID into another rank's segment or gathering it.
     block_table.masked_fill_(~allocated[:, local_columns], 0)

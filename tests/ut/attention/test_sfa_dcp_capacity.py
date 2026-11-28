@@ -48,10 +48,6 @@ def _create_attention_group(spec, config, indexer):
     with (
         patch.object(DCPMetadataBuilderMixin, "__init__", init_base),
         patch("vllm_ascend.attention.context_parallel.sfa_cp.is_dcp_enabled", return_value=True),
-        patch(
-            "vllm_ascend.attention.context_parallel.sfa_cp.get_dcp_group",
-            return_value=SimpleNamespace(ranks=list(range(8))),
-        ),
         patch("vllm_ascend.attention.indexer.enable_sfa_dcp_replicated_indexer", return_value=True),
         patch("vllm_ascend.attention.indexer.enable_sfa_dcp_sharded_indexer", return_value=False),
     ):

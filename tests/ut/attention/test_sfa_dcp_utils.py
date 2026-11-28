@@ -36,11 +36,10 @@ def test_compact_history_bounds_stale_tails_without_changing_valid_addresses(wor
     global_table = torch.tensor([[first_block, 9, -1, 0, 6, 999]], dtype=torch.int32)
     local_table = global_table.expand(2, -1).clone()
     original = local_table.clone()
-    order = [0, 1] if world == 2 else [0, 4, 1, 5, 2, 6, 3, 7]
     ids, table = build_sfa_dcp_compact_kv_metadata(
         local_table,
         torch.arange(local_table.shape[1] * world, dtype=torch.int32),
-        torch.tensor(order, dtype=torch.int32),
+        world,
         128,
         interleave,
         global_dcp_block_table=global_table,
@@ -61,7 +60,7 @@ def test_compact_history_bounds_stale_tails_without_changing_valid_addresses(wor
         owner = (position // interleave) % world
         local_position = position // (world * interleave) * interleave + position % interleave
         block_id = local_table[0, local_position // 128].item()
-        expected = order[owner] * len(ids) + ids.tolist().index(block_id) if block_id in ids.tolist() else 0
+        expected = owner * len(ids) + ids.tolist().index(block_id) if block_id in ids.tolist() else 0
         assert selected[:, global_column].tolist() == [expected, expected]
 
 
@@ -72,7 +71,7 @@ def test_compact_history_with_no_allocated_blocks_produces_padding_only(rows, wo
     ids, table = build_sfa_dcp_compact_kv_metadata(
         global_table[:rows],
         torch.arange(2 * world, dtype=torch.int32),
-        torch.arange(world, dtype=torch.int32),
+        world,
         128,
         128,
         global_dcp_block_table=global_table,
@@ -89,7 +88,7 @@ def test_empty_receiver_keeps_globally_allocated_history(world):
     ids, table = build_sfa_dcp_compact_kv_metadata(
         torch.empty((0, 2), dtype=torch.int32),
         torch.arange(2 * world, dtype=torch.int32),
-        torch.arange(world, dtype=torch.int32),
+        world,
         128,
         128,
         global_dcp_block_table=torch.tensor([[7, 999]], dtype=torch.int32),
