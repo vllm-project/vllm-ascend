@@ -33,6 +33,7 @@ from vllm.v1.worker.gpu.spec_decode.dspark.speculator import (
 from vllm.v1.worker.gpu.spec_decode.eagle.eagle3_utils import get_eagle3_aux_layers_from_config
 
 from vllm_ascend.attention.attention_v1 import AscendAttentionBackend, AscendAttentionState
+from vllm_ascend.attention.dsa_v41 import DeepseekV41CacheBackend
 from vllm_ascend.distributed.kv_transfer.kv_p2p.sfa_pd_rd2h.dspark_context import (
     DSparkContextChunk,
     initialize_draft_context_chunk,
@@ -43,6 +44,7 @@ from vllm_ascend.worker.v2.attn_utils import (
     build_attn_metadata_factory,
     build_attn_metadata_wrapper,
 )
+from vllm_ascend.worker.v2.spec_decode.dflash.aclgraph import DFlashAclGraphManager
 from vllm_ascend.worker.v2.spec_decode.dflash.speculator import (
     detect_draft_attn_architecture,
     draft_metadata_request_count,
@@ -317,12 +319,40 @@ class AscendDSparkSpeculator(LmheadTPDraftSamplingMixin, DSparkSpeculator):
 
         return [attn_metadata]
 
-    def _build_uniform_attn_metadata(self, batch_desc: BatchExecutionDescriptor, *args, **kwargs):
+    def _build_uniform_attn_metadata(
+        self,
+        batch_desc: BatchExecutionDescriptor,
+        num_reqs: int,
+        num_query_per_req: int,
+        seq_lens_cpu_upper_bound: torch.Tensor,
+        step: int,
+        causal: bool | Mapping[int, bool] = True,
+        dcp_local_seq_lens: torch.Tensor | None = None,
+    ) -> dict[str, Any] | None:
         # propose() discards this result for FULL replay. The graph manager
         # refreshes A3 schedules through build_draft_attn_metadatas instead.
         if batch_desc.cg_mode == CUDAGraphMode.FULL and getattr(self, "use_a3_mla_sink", False):
             return None
-        return super()._build_uniform_attn_metadata(batch_desc, *args, **kwargs)
+
+        if (
+            batch_desc.cg_mode == CUDAGraphMode.FULL
+            and num_reqs == getattr(self, "_draft_metadata_num_reqs", None)
+            and isinstance(getattr(self, "query_cudagraph_manager", None), DFlashAclGraphManager)
+        ):
+            if self.attn_backends and all(
+                backend is DeepseekV41CacheBackend for backend in self.attn_backends.values()
+            ):
+                # FULL replay builds the metadata it consumes using the padded graph shape.
+                return None
+        return super()._build_uniform_attn_metadata(
+            batch_desc=batch_desc,
+            num_reqs=num_reqs,
+            num_query_per_req=num_query_per_req,
+            seq_lens_cpu_upper_bound=seq_lens_cpu_upper_bound,
+            step=step,
+            causal=causal,
+            dcp_local_seq_lens=dcp_local_seq_lens,
+        )
 
     def _build_attn_metadata(
         self,
