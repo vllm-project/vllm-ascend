@@ -52,8 +52,6 @@
 #include "attention/indexer_region_score/indexer_region_score_torch_adpt.h"
 #include "moe/causal_conv1d_v310/causal_conv1d_310_torch_adpt.h"
 #include "attention/attn_res_fwd/attn_res_fwd_torch_adpt.h"
-#include "attention/kda_gate_cumsum_vllm/kda_gate_cumsum_vllm_torch_adpt.h"
-#include "attention/kda_layout_swap12/kda_layout_swap12_torch_adpt.h"
 #include "attention/recurrent_gated_delta_rule_v310/recurrent_gated_delta_rule_310_torch_adpt.h"
 #include "attention/k2q_csr/k2q_csr_torch_adpt.h"
 #include "attention/hisparse_resolve_residency/hisparse_resolve_residency_torch_adpt.h"
@@ -730,19 +728,6 @@ at::Tensor sgmv_expand(at::Tensor &x, at::Tensor &weight, at::Tensor &lora_indic
 }
 #endif
 
-at::Tensor npu_sign_bits_pack(const at::Tensor& input,
-                                   const int64_t size) {
-    int64_t ySize = (input.size(0) + 7) / 8;
-    int64_t outDim = 0;
-    if (size != 0) {
-        outDim = ySize / size;
-    }
-
-    at::Tensor out = torch::empty({size, outDim}, torch::TensorOptions().dtype(torch::kUInt8).device(input.device()));
-    EXEC_NPU_CMD(aclnnSignBitsPack, input, size, out);
-    return out;
-}
-
 std::tuple<at::Tensor, at::Tensor> npu_gemma_rms_norm(
     const at::Tensor& x,
     const at::Tensor& gamma,
@@ -922,41 +907,6 @@ void device_print(const at::Tensor& tensor)
     // The D2H copy and host callback are queued on the same stream so the
     // callback prints only after the host snapshot is ready.
     enqueue_device_print(std::move(payload), stream);
-}
-
-std::tuple<at::Tensor, at::Tensor, at::Tensor, at::Tensor, at::Tensor, at::Tensor>
-npu_copy_and_expand_eagle_inputs(
-    const at::Tensor &target_token_ids,
-    const at::Tensor &target_positions,
-    const at::Tensor &next_token_ids,
-    const at::Tensor &query_start_loc,
-    const at::Tensor &query_end_loc,
-    int64_t padding_token_id,
-    int64_t parallel_drafting_token_id,
-    int64_t num_padding_slots_per_request,
-    bool shift_input_ids,
-    int64_t total_draft_tokens)
-{
-    int64_t total_input_tokens = target_token_ids.size(0);
-    int64_t num_reqs = query_start_loc.size(0) - 1;
-
-    auto device = target_token_ids.device();
-    at::Tensor out_input_ids = at::zeros({total_draft_tokens}, at::dtype(at::kInt).device(device));
-    at::Tensor out_positions = at::zeros({total_draft_tokens}, at::dtype(at::kInt).device(device));
-    at::Tensor out_is_rejected_token_mask = at::zeros({total_draft_tokens}, at::dtype(at::kChar).device(device));
-    at::Tensor out_is_masked_token_mask = at::zeros({total_draft_tokens}, at::dtype(at::kChar).device(device));
-    at::Tensor out_new_token_indices = at::zeros({num_reqs * num_padding_slots_per_request}, at::dtype(at::kInt).device(device));
-    at::Tensor out_hidden_state_mapping = at::zeros({total_input_tokens}, at::dtype(at::kInt).device(device));
-
-    EXEC_NPU_CMD(aclnnCopyAndExpandEagleInputs,
-        target_token_ids, target_positions, next_token_ids, query_start_loc, query_end_loc,
-        padding_token_id, parallel_drafting_token_id, num_padding_slots_per_request,
-        shift_input_ids, total_input_tokens,
-        out_input_ids, out_positions, out_is_rejected_token_mask, out_is_masked_token_mask,
-        out_new_token_indices, out_hidden_state_mapping);
-
-    return {out_input_ids, out_positions, out_is_rejected_token_mask, out_is_masked_token_mask,
-            out_new_token_indices, out_hidden_state_mapping};
 }
 
 std::tuple<at::Tensor, at::Tensor, at::Tensor> moe_gating_top_k_hash(
@@ -2363,16 +2313,6 @@ bool is_minimax_sparse_attention_split_kv_available()
     return is_available;
 }
 
-std::vector<int64_t> get_npu_storage_shape(const at::Tensor& tensor)
-{
-    TORCH_CHECK(
-        tensor.is_privateuseone(),
-        "get_npu_storage_shape only supports NPU tensors, but got device ",
-        tensor.device());
-    const auto& desc = NPUBridge::GetNpuStorageImplDesc(tensor);
-    return std::vector<int64_t>(desc.storage_sizes_.begin(), desc.storage_sizes_.end());
-}
-
 #ifdef VLLM_ASCEND_ENABLE_SPARSE_KV_OFFLOAD
 #if defined(__GNUC__) || defined(__clang__)
   #define HOT_FUNCTION __attribute__((hot))
@@ -2954,15 +2894,7 @@ TORCH_LIBRARY_EXPAND(CONCAT(_C, _ascend), ops)
     );
     ops.impl("chunk_fwd_o_vllm", torch::kPrivateUse1, &vllm_ascend::chunk_fwd_o_vllm);
 
-    ops.def(
-        "kda_gate_cumsum_vllm(Tensor g, int chunk_size, *, Tensor? A_log=None, Tensor? dt_bias=None, int[]? cu_seqlens=None, bool? use_gate_in_kernel=False, bool? safe_gate=False, float? lower_bound=-5.0, str layout=\"BSND\") -> Tensor"
-    );
-    ops.impl("kda_gate_cumsum_vllm", torch::kPrivateUse1, &vllm_ascend::kda_gate_cumsum_vllm);
 
-    ops.def(
-        "kda_layout_swap12(Tensor x, *, Tensor? dependency=None) -> Tensor"
-    );
-    ops.impl("kda_layout_swap12", torch::kPrivateUse1, &vllm_ascend::kda_layout_swap12);
 }
 #else
 // Pybind on other platform
@@ -3157,9 +3089,6 @@ TORCH_LIBRARY_EXPAND(CONCAT(_C, _ascend), ops)
     ops.impl("device_print_tensor", c10::DispatchKey::CompositeExplicitAutograd,
              static_cast<void (*)(const at::Tensor&)>(&vllm_ascend::device_print));
 
-    ops.def("get_npu_storage_shape(Tensor tensor) -> int[]");
-    ops.impl("get_npu_storage_shape", c10::DispatchKey::CompositeExplicitAutograd,
-             &vllm_ascend::get_npu_storage_shape);
 
     ops.def(
         "grouped_matmul_swiglu_quant(Tensor x, Tensor weight, Tensor weight_scale, Tensor x_scale,"
@@ -3385,8 +3314,6 @@ TORCH_LIBRARY_EXPAND(CONCAT(_C, _ascend), ops)
     ops.impl("qsa_union_inputs", torch::kPrivateUse1,
              &vllm_ascend::npu_qsa_union_inputs);
 
-    ops.def("npu_sign_bits_pack(Tensor input, int size) -> Tensor");
-    ops.impl("npu_sign_bits_pack", torch::kPrivateUse1, &vllm_ascend::npu_sign_bits_pack);
 
     ops.def(
         "transpose_kv_cache_by_block(Tensor[] kCache, Tensor[] vCache, Tensor blockIDs, int blockSize, int headNum, int headDim, int splitNum, int layerNum) -> ()"
@@ -3401,15 +3328,6 @@ TORCH_LIBRARY_EXPAND(CONCAT(_C, _ascend), ops)
     ops.impl("npu_scatter_pa_kv_cache", torch::kPrivateUse1,
              &vllm_ascend::npu_scatter_pa_kv_cache);
 
-    ops.def(
-        "npu_copy_and_expand_eagle_inputs(Tensor target_token_ids, Tensor target_positions, "
-        "Tensor next_token_ids, Tensor query_start_loc, Tensor query_end_loc, "
-        "int padding_token_id, int parallel_drafting_token_id, int num_padding_slots_per_request, "
-        "bool shift_input_ids, int total_draft_tokens) -> "
-        "(Tensor out_input_ids, Tensor out_positions, Tensor out_is_rejected_token_mask, "
-        "Tensor out_is_masked_token_mask, Tensor out_new_token_indices, Tensor out_hidden_state_mapping)"
-    );
-    ops.impl("npu_copy_and_expand_eagle_inputs", torch::kPrivateUse1, &vllm_ascend::npu_copy_and_expand_eagle_inputs);
     ops.def(
         "moe_gating_top_k_hash("
         "Tensor x, "
@@ -3724,15 +3642,7 @@ TORCH_LIBRARY_EXPAND(CONCAT(_C, _ascend), ops)
     );
     ops.impl("chunk_fwd_o_vllm", torch::kPrivateUse1, &vllm_ascend::chunk_fwd_o_vllm);
 
-    ops.def(
-        "kda_gate_cumsum_vllm(Tensor g, int chunk_size, *, Tensor? A_log=None, Tensor? dt_bias=None, int[]? cu_seqlens=None, bool? use_gate_in_kernel=False, bool? safe_gate=False, float? lower_bound=-5.0, str layout=\"BSND\") -> Tensor"
-    );
-    ops.impl("kda_gate_cumsum_vllm", torch::kPrivateUse1, &vllm_ascend::kda_gate_cumsum_vllm);
 
-    ops.def(
-        "kda_layout_swap12(Tensor x, *, Tensor? dependency=None) -> Tensor"
-    );
-    ops.impl("kda_layout_swap12", torch::kPrivateUse1, &vllm_ascend::kda_layout_swap12);
 
     ops.def(
         "npu_fused_lightning_indexer_manage("

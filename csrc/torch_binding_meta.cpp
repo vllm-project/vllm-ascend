@@ -573,20 +573,6 @@ std::tuple<at::Tensor, at::Tensor, at::Tensor> qsa_union_inputs_meta(
     return {union_idx, union_count, exact_mask};
 }
 
-at::Tensor npu_sign_bits_pack_meta(const at::Tensor& input,
-                                   const int64_t size) {
-    auto ySize = ceil_div(input.sym_size(0), 8);
-    c10::SymInt outDim(0);
-    if (size != 0) {
-        outDim = ySize / c10::SymInt(size);
-    }
-
-    at::Tensor out = at::empty_symint(
-        c10::SymDimVector{c10::SymInt(size), outDim},
-        torch::TensorOptions().dtype(torch::kUInt8).device(input.device()));
-    return out;
-}
-
 std::tuple<at::Tensor, at::Tensor> npu_gemma_rms_norm_meta(
     const at::Tensor& x,
     const at::Tensor& gamma,
@@ -625,36 +611,6 @@ void transpose_kv_cache_by_block_meta(
     int64_t layer_num)
 {
     return;
-}
-
-std::tuple<at::Tensor, at::Tensor, at::Tensor, at::Tensor, at::Tensor, at::Tensor>
-npu_copy_and_expand_eagle_inputs_meta(
-    const at::Tensor &target_token_ids,
-    const at::Tensor &target_positions,
-    const at::Tensor &next_token_ids,
-    const at::Tensor &query_start_loc,
-    const at::Tensor &query_end_loc,
-    int64_t padding_token_id,
-    int64_t parallel_drafting_token_id,
-    int64_t num_padding_slots_per_request,
-    bool shift_input_ids,
-    int64_t total_draft_tokens)
-{
-    auto total_input_tokens = target_token_ids.sym_size(0);
-    auto num_reqs = query_start_loc.sym_size(0) - c10::SymInt(1);
-
-    c10::SymDimVector draft_shape = {c10::SymInt(total_draft_tokens)};
-    at::Tensor out_input_ids = at::empty_symint(draft_shape, target_token_ids.options());
-    at::Tensor out_positions = at::empty_symint(draft_shape, target_token_ids.options());
-    at::Tensor out_is_rejected_token_mask = at::empty_symint(draft_shape, target_token_ids.options().dtype(at::kChar));
-    at::Tensor out_is_masked_token_mask = at::empty_symint(draft_shape, target_token_ids.options().dtype(at::kChar));
-    at::Tensor out_new_token_indices = at::empty_symint(
-        c10::SymDimVector{num_reqs * c10::SymInt(num_padding_slots_per_request)}, target_token_ids.options());
-    at::Tensor out_hidden_state_mapping = at::empty_symint(
-        c10::SymDimVector{total_input_tokens}, target_token_ids.options());
-
-    return {out_input_ids, out_positions, out_is_rejected_token_mask, out_is_masked_token_mask,
-            out_new_token_indices, out_hidden_state_mapping};
 }
 
 at::Tensor npu_causal_conv1d_310_meta(
@@ -1557,42 +1513,6 @@ at::Tensor chunk_fwd_o_vllm_meta(
     return o;
 }
 
-at::Tensor kda_gate_cumsum_vllm_meta(
-    const at::Tensor &g,
-    int64_t chunk_size,
-    const c10::optional<at::Tensor> &A_log,
-    const c10::optional<at::Tensor> &dt_bias,
-    c10::optional<at::IntArrayRef> cu_seqlens,
-    c10::optional<bool> use_gate_in_kernel,
-    c10::optional<bool> safe_gate,
-    c10::optional<double> lower_bound,
-    c10::string_view layout)
-{
-    (void)chunk_size;
-    (void)A_log;
-    (void)dt_bias;
-    (void)cu_seqlens;
-    (void)use_gate_in_kernel;
-    (void)safe_gate;
-    (void)lower_bound;
-    (void)layout;
-    return at::empty_symint(g.sym_sizes(), g.options().dtype(at::kFloat));
-}
-
-at::Tensor kda_layout_swap12_meta(
-    const at::Tensor &x,
-    const c10::optional<at::Tensor> &dependency)
-{
-    c10::SymDimVector y_sizes(x.sym_sizes().begin(), x.sym_sizes().end());
-    if (x.dim() == 3) {
-        std::swap(y_sizes[0], y_sizes[1]);
-    } else {
-        std::swap(y_sizes[1], y_sizes[2]);
-    }
-    (void)dependency;
-    return at::empty_symint(y_sizes, x.options());
-}
-
 std::tuple<at::Tensor, at::Tensor> dequant_situ_quant_meta(
     const at::Tensor& x,
     const c10::optional<at::Tensor>& weight_scale,
@@ -1817,10 +1737,6 @@ TORCH_LIBRARY_IMPL_EXPAND(CONCAT(_C, _ascend), Meta, ops) {
     ops.impl("chunk_gated_delta_rule_fwd_h_vllm", &vllm_ascend::meta::chunk_gated_delta_rule_fwd_h_vllm_meta);
     // chunk_fwd_o_vllm
     ops.impl("chunk_fwd_o_vllm", &vllm_ascend::meta::chunk_fwd_o_vllm_meta);
-    // kda_gate_cumsum_vllm
-    ops.impl("kda_gate_cumsum_vllm", &vllm_ascend::meta::kda_gate_cumsum_vllm_meta);
-    // kda_layout_swap12
-    ops.impl("kda_layout_swap12", &vllm_ascend::meta::kda_layout_swap12_meta);
 }
 }
 #else
@@ -1890,10 +1806,6 @@ TORCH_LIBRARY_IMPL_EXPAND(CONCAT(_C, _ascend), Meta, ops) {
     ops.impl("qsa_union_inputs", &vllm_ascend::meta::qsa_union_inputs_meta);
     // transpose_kv_cache_by_block
     ops.impl("transpose_kv_cache_by_block", &vllm_ascend::meta::transpose_kv_cache_by_block_meta);
-    // npu_sign_bits_pack
-    ops.impl("npu_sign_bits_pack", &vllm_ascend::meta::npu_sign_bits_pack_meta);
-    // CopyAndExpandEagleInputs
-    ops.impl("npu_copy_and_expand_eagle_inputs", &vllm_ascend::meta::npu_copy_and_expand_eagle_inputs_meta);
     ops.impl("moe_gating_top_k_hash", &vllm_ascend::meta::moe_gating_top_k_hash_meta);
     ops.impl("compressor", &vllm_ascend::meta::compressor_meta);
     ops.impl("compressor_metadata", &vllm_ascend::meta::compressor_metadata_meta);
@@ -1920,10 +1832,6 @@ TORCH_LIBRARY_IMPL_EXPAND(CONCAT(_C, _ascend), Meta, ops) {
     ops.impl("chunk_gated_delta_rule_fwd_h_vllm", &vllm_ascend::meta::chunk_gated_delta_rule_fwd_h_vllm_meta);
     // chunk_fwd_o_vllm
     ops.impl("chunk_fwd_o_vllm", &vllm_ascend::meta::chunk_fwd_o_vllm_meta);
-    // kda_gate_cumsum_vllm
-    ops.impl("kda_gate_cumsum_vllm", &vllm_ascend::meta::kda_gate_cumsum_vllm_meta);
-    // kda_layout_swap12
-    ops.impl("kda_layout_swap12", &vllm_ascend::meta::kda_layout_swap12_meta);
     // hisparse_resolve_residency mutates caller-owned buffers and returns no
     // values, so the meta registration is a no-op.
     ops.impl("hisparse_resolve_residency", &vllm_ascend::meta::hisparse_resolve_residency_meta);
