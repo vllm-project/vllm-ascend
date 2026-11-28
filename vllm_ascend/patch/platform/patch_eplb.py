@@ -38,10 +38,9 @@ from vllm_ascend.distributed.eplb.eplb_state import (
     refresh_model_routing_tables,
 )
 from vllm_ascend.distributed.eplb.explicit_transfer import stage_explicit_layer_transfer
-from vllm_ascend.distributed.eplb.placement_runtime import (
+from vllm_ascend.distributed.eplb.placement import (
     ACTIVE_STATIC_CONTROLLER,
-    ACTIVE_STATIC_ROLE_PLACEMENT,
-    local_expert_ids_for_role,
+    ACTIVE_STATIC_LOAD,
 )
 from vllm_ascend.distributed.eplb.policy import PreparedLoadStats
 
@@ -435,7 +434,7 @@ def _patch_initial_expert_layout() -> None:
 
         @wraps(original_build)
         def _build_expert_params_mapping(*args, **kwargs):
-            if ACTIVE_STATIC_ROLE_PLACEMENT.get() is not None:
+            if ACTIVE_STATIC_LOAD.get() is not None:
                 bound = build_signature.bind(*args, **kwargs)
                 bound.arguments["num_redundant_experts"] = 0
                 return original_build(*bound.args, **bound.kwargs)
@@ -944,7 +943,7 @@ def _patch_static_weight_loading() -> None:
             try:
                 return original_load_model(self, vllm_config, model_config, prefix=prefix)
             finally:
-                ACTIVE_STATIC_ROLE_PLACEMENT.set(None)
+                ACTIVE_STATIC_LOAD.set(None)
 
         setattr(_load_model, _PATCH_MARKER, True)
         loader_cls.load_model = _load_model  # type: ignore[method-assign]
@@ -954,9 +953,9 @@ def _patch_static_weight_loading() -> None:
 
         @wraps(original_compute)
         def _compute_eplb_local_expert_ids(num_experts, num_redundant_experts, ep_size, ep_rank):
-            role_placement = ACTIVE_STATIC_ROLE_PLACEMENT.get()
-            if role_placement is not None:
-                return local_expert_ids_for_role(role_placement, ep_size, ep_rank)
+            static_load = ACTIVE_STATIC_LOAD.get()
+            if static_load is not None:
+                return static_load[1]
             return original_compute(num_experts, num_redundant_experts, ep_size, ep_rank)
 
         setattr(_compute_eplb_local_expert_ids, _PATCH_MARKER, True)

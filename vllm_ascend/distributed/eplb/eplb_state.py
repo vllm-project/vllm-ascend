@@ -93,7 +93,6 @@ class AscendEplbLayerState(_eplb_state.EplbLayerState):
         self.allgather_source_is_padding: torch.Tensor | None = None
         self.local_expert_start = 0
         self.local_expert_count = 0
-        # Static mode keeps this disabled except during a scheduled observation.
         self.load_recording_enabled = True
 
     @classmethod
@@ -189,7 +188,6 @@ class AscendEplbLayerState(_eplb_state.EplbLayerState):
         if expert_tokens is None:
             raise RuntimeError("MRV2 EPLB requires operator-provided expert counts")
         expert_load_view = self.expert_load_view
-
         record_enabled = self.should_record_tensor
         if local_load is not None:
             expert_tokens = local_load
@@ -313,7 +311,6 @@ class AscendEplbState(_eplb_state.EplbState):
         # pointing at the attribute upstream actually reads.
         if self.device_index is None:
             self.device_index = torch.accelerator.current_device_index()
-        self.static_mode = False
 
     @property
     def uses_custom_load_stats(self) -> bool:
@@ -324,91 +321,8 @@ class AscendEplbState(_eplb_state.EplbState):
     def _tracks_load_sample_axis(self) -> bool:
         return self.uses_custom_load_stats or getattr(self, "_exporter", None) is not None
 
-    def _add_static_model(self, model, model_config, model_name: str | None = None) -> None:
-        self.validate_ep_configuration(model)
-        self.is_async = False
-        role_placement = getattr(model, "_static_role_placement", None)
-        if role_placement is not None:
-            physical_to_logical_map = torch.tensor(
-                role_placement.physical_to_logical_map,
-                dtype=torch.long,
-                device=self.device,
-            )
-        else:
-            token = EXPERT_MAPPING_EP_SIZE.set(get_ep_group().world_size)
-            try:
-                initial = _eplb_state.EplbState.build_initial_global_physical_to_logical_map(
-                    model.num_routed_experts,
-                    model.num_redundant_experts,
-                )
-            finally:
-                EXPERT_MAPPING_EP_SIZE.reset(token)
-            physical_to_logical_map = (
-                torch.tensor(initial, dtype=torch.long, device=self.device)
-                .unsqueeze(0)
-                .expand(model.num_moe_layers, -1)
-                .contiguous()
-            )
-        logical_cpu, replicas_cpu = _eplb_state.compute_logical_maps(
-            physical_to_logical_map.cpu(),
-            model.num_logical_experts,
-        )
-        padding = (model.num_redundant_experts + 1) - logical_cpu.shape[-1]
-        if padding < 0:
-            raise ValueError("Static EPLB placement exceeds the allocated replica capacity")
-        if padding:
-            logical_cpu = torch.nn.functional.pad(logical_cpu, (0, padding), value=-1)
-        logical_to_physical_map = logical_cpu.to(device=self.device, dtype=torch.long)
-        logical_replica_count = replicas_cpu.to(device=self.device, dtype=torch.long)
-        expert_load_pass = torch.zeros(
-            (model.num_moe_layers, model.num_physical_experts),
-            dtype=torch.int32,
-            device=self.device,
-        )
-        model.expert_weights = []
-        for layer_idx, layer in enumerate(model.moe_layers):
-            layer.set_eplb_state(
-                moe_layer_idx=layer_idx,
-                expert_load_view=expert_load_pass,
-                logical_to_physical_map=logical_to_physical_map,
-                logical_replica_count=logical_replica_count,
-            )
-            if isinstance(layer.eplb_state, _eplb_state.EplbLayerState) and not isinstance(
-                layer.eplb_state, AscendEplbLayerState
-            ):
-                layer.eplb_state = AscendEplbLayerState.from_upstream(layer.eplb_state)
-                layer.eplb_state.refresh_expert_replica_routing_table()
-            if layer.eplb_state is not None:
-                layer.eplb_state.load_recording_enabled = False
-        empty_communicator: Any = None
-        self.model_states[hash_config_cached(model_config)] = _eplb_state.EplbModelState(
-            physical_to_logical_map=physical_to_logical_map,
-            physical_to_logical_map_buffer=physical_to_logical_map,
-            logical_to_physical_map=logical_to_physical_map,
-            logical_replica_count=logical_replica_count,
-            expert_load_pass=expert_load_pass,
-            expert_load_pass_buffer=expert_load_pass,
-            expert_load_window=torch.empty(
-                (0, model.num_moe_layers, model.num_physical_experts),
-                dtype=torch.int32,
-                device=self.device,
-            ),
-            last_expert_load=torch.empty((0, model.num_logical_experts), dtype=torch.int64, device=self.device),
-            model_name=model_name or model_config.model,
-            model=model,
-            expert_buffer=[],
-            rebalanced=False,
-            eplb_stats=None,
-            device_index=self.device_index,
-            communicator=empty_communicator,
-            num_unpadded_tokens_tensors=None,
-        )
-
     def add_model(self, model, model_config, model_name: str | None = None) -> None:
         """Build the EP-aware layout and initialize custom load statistics."""
-        if getattr(self, "static_mode", False):
-            self._add_static_model(model, model_config, model_name=model_name)
-            return
         if self._hixl_session is not None:
             raise RuntimeError("Cannot add EPLB models after HIXL initialization")
         token = EXPERT_MAPPING_EP_SIZE.set(get_ep_group().world_size)
@@ -630,7 +544,7 @@ class AscendEplbState(_eplb_state.EplbState):
             ) from self._close_error
 
     def start_async_loop(self, *args, **kwargs) -> None:
-        if not self._suspended and not getattr(self, "static_mode", False):
+        if not self._suspended:
             communicators = {
                 key: model_state.communicator
                 for key, model_state in self.model_states.items()
@@ -642,16 +556,6 @@ class AscendEplbState(_eplb_state.EplbState):
             if self._hixl_session is not None:
                 self._hixl_session.check_usable()
             super().start_async_loop(*args, **kwargs)
-
-    def prepare_forward(
-        self,
-        model_config,
-        num_unpadded_tokens: int,
-        ubatch_slices: list | None = None,
-    ) -> None:
-        if getattr(self, "static_mode", False):
-            return
-        super().prepare_forward(model_config, num_unpadded_tokens, ubatch_slices)
 
     def _initialize_load_stats_state(self, model_state: Any) -> None:
         model_state._last_committed_mean_ratios = np.full(
@@ -750,8 +654,6 @@ class AscendEplbState(_eplb_state.EplbState):
         log_stats: bool = False,
     ) -> None:
         """Advance the custom time axis alongside the upstream load window."""
-        if getattr(self, "static_mode", False):
-            return
         self.raise_if_close_failed()
         if self._hixl_session is not None:
             _raise_if_async_worker_stopped(self)
@@ -917,7 +819,7 @@ class AscendEplbState(_eplb_state.EplbState):
         is_profile: bool = False,
         rank_mapping: dict[int, int] | None = None,
     ) -> torch.Tensor | None:
-        if self._suspended or getattr(self, "static_mode", False):
+        if self._suspended:
             return None
         use_custom_async_stats = (
             self.is_async and not is_profile and rank_mapping is None and self.uses_custom_load_stats

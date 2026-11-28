@@ -298,7 +298,6 @@ class TestAscendEPLBController(unittest.TestCase):
             )
 
         self.assertTrue(added)
-        self.assertTrue(controller._draft_registered)
         controller.state.model_states.get.assert_not_called()
 
 

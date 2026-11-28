@@ -983,19 +983,13 @@ def test_static_weight_loading_patches_filter_mapping_and_loader():
     from vllm.model_executor.layers.fused_moe.routed_experts import RoutedExperts
     from vllm.model_executor.model_loader import base_loader, default_loader, ep_weight_filter
 
-    from vllm_ascend.distributed.eplb.placement_runtime import (
+    from vllm_ascend.distributed.eplb.placement import (
         ACTIVE_STATIC_CONTROLLER,
-        ACTIVE_STATIC_ROLE_PLACEMENT,
-        RolePlacement,
+        ACTIVE_STATIC_LOAD,
     )
 
     patch_eplb._patch_initial_expert_layout()
     patch_eplb._patch_static_weight_loading()
-    placement = RolePlacement(
-        num_logical_experts=4,
-        num_redundant_experts=2,
-        physical_to_logical_map=((3, 0, 1, 0, 2, 1),),
-    )
 
     routed = RoutedExperts.__new__(RoutedExperts)
     torch.nn.Module.__init__(routed)
@@ -1009,10 +1003,10 @@ def test_static_weight_loading_patches_filter_mapping_and_loader():
     wrapper = torch.nn.Module()
     wrapper.experts = routed
 
-    token = ACTIVE_STATIC_ROLE_PLACEMENT.set(placement)
+    token = ACTIVE_STATIC_LOAD.set((True, {0, 1, 3}))
     try:
         assert default_loader.compute_eplb_local_expert_ids(4, 2, 2, 0) == {0, 1, 3}
-        assert ep_weight_filter.compute_eplb_local_expert_ids(4, 2, 2, 1) == {0, 1, 2}
+        assert ep_weight_filter.compute_eplb_local_expert_ids(4, 2, 2, 1) == {0, 1, 3}
         gate_entries = [eid for _, _, eid, shard in routed.get_expert_mapping() if shard == "w1"]
         assert gate_entries == [0, 1, 2, 3]
         make_entries = [
@@ -1024,17 +1018,17 @@ def test_static_weight_loading_patches_filter_mapping_and_loader():
         ]
         assert make_entries == [0, 1, 2, 3]
     finally:
-        ACTIVE_STATIC_ROLE_PLACEMENT.reset(token)
+        ACTIVE_STATIC_LOAD.reset(token)
 
     class _DummyLoader(base_loader.BaseModelLoader):
         def download_model(self, model_config):
             return None
 
         def load_weights(self, model, model_config):
-            assert ACTIVE_STATIC_ROLE_PLACEMENT.get() is placement
+            assert ACTIVE_STATIC_LOAD.get() == (True, {0, 1})
 
     controller = MagicMock()
-    controller.bind_model_for_static_load.side_effect = lambda *_: ACTIVE_STATIC_ROLE_PLACEMENT.set(placement)
+    controller.bind_model_for_static_load.side_effect = lambda *_: ACTIVE_STATIC_LOAD.set((True, {0, 1}))
     ctrl_token = ACTIVE_STATIC_CONTROLLER.set(controller)
     try:
         with (
@@ -1052,6 +1046,6 @@ def test_static_weight_loading_patches_filter_mapping_and_loader():
             model_cfg = SimpleNamespace(dtype=torch.float32, quantization=None)
             loader.load_model(vllm_cfg, model_cfg)
         controller.bind_model_for_static_load.assert_called_once()
-        assert ACTIVE_STATIC_ROLE_PLACEMENT.get() is None
+        assert ACTIVE_STATIC_LOAD.get() is None
     finally:
         ACTIVE_STATIC_CONTROLLER.reset(ctrl_token)

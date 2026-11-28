@@ -11,7 +11,15 @@ import torch.nn as nn
 
 from vllm_ascend.ascend_config import EplbConfig
 from vllm_ascend.distributed.eplb.eplb_state import AscendEplbLayerState
-from vllm_ascend.distributed.eplb.placement_runtime import ACTIVE_STATIC_CONTROLLER, ACTIVE_STATIC_ROLE_PLACEMENT
+from vllm_ascend.distributed.eplb.placement import (
+    ACTIVE_STATIC_CONTROLLER,
+    ACTIVE_STATIC_LOAD,
+    apply_static_rows_to_model,
+    read_static_placement_snapshot,
+    slice_static_role_rows,
+)
+from vllm_ascend.ops.fused_moe.routed_experts import AscendRoutedExperts
+from vllm_ascend.ops.fused_moe.router.grouped_topk_router import AscendGroupedTopKRouter
 from vllm_ascend.worker.v2.eplb import AscendEPLBController
 
 
@@ -31,46 +39,30 @@ class _FakeMoELayer(nn.Module):
     def __init__(self) -> None:
         super().__init__()
         self.eplb_state = AscendEplbLayerState()
-        self.moe_config = SimpleNamespace(ep_size=2, ep_rank=0, num_logical_experts=4, num_experts=6)
+        self.router = AscendGroupedTopKRouter(
+            top_k=2,
+            global_num_experts=6,
+            num_expert_group=None,
+            topk_group=None,
+            eplb_state=self.eplb_state,
+        )
 
     def set_eplb_state(self, moe_layer_idx, expert_load_view, logical_to_physical_map, logical_replica_count) -> None:
-        self.eplb_state.set_layer_state(
-            moe_layer_idx,
-            expert_load_view,
-            logical_to_physical_map,
-            logical_replica_count,
-        )
+        self.eplb_state.set_layer_state(moe_layer_idx, expert_load_view, logical_to_physical_map, logical_replica_count)
 
 
 class _FakeMoEModel(nn.Module):
     def __init__(self, num_layers: int) -> None:
         super().__init__()
         self.moe_layers = nn.ModuleList([_FakeMoELayer() for _ in range(num_layers)])
-        self.num_moe_layers = num_layers
         self.num_routed_experts = 4
         self.num_logical_experts = 4
         self.num_redundant_experts = 2
         self.num_physical_experts = 6
-        self.num_expert_groups = 1
-
-    def set_eplb_state(self, load_buffer, l2p, replicas) -> None:
-        for idx, layer in enumerate(self.moe_layers):
-            layer.set_eplb_state(idx, load_buffer[idx], l2p[idx], replicas[idx])
 
 
-def _make_controller(path: str) -> AscendEPLBController:
-    parallel_config = SimpleNamespace(
-        enable_eplb=True,
-        enable_elastic_ep=False,
-        eplb_config=SimpleNamespace(policy="stair", log_balancedness=False, step_interval=10),
-    )
-    ascend_cfg = EplbConfig(mode="static", expert_placement_path=path)
-    return AscendEPLBController(parallel_config, torch.device("cpu"), ascend_cfg)
-
-
-def test_static_controller_loads_target_and_draft_without_communicator(tmp_path):
-    path = tmp_path / "placement.json"
-    payload = {
+def _payload(*, with_draft: bool = False) -> dict:
+    data: dict = {
         "version": 1,
         "ep_size": 2,
         "target": {
@@ -78,19 +70,68 @@ def test_static_controller_loads_target_and_draft_without_communicator(tmp_path)
             "num_redundant_experts": 2,
             "physical_to_logical_map": [[3, 0, 1, 0, 2, 1], [1, 2, 0, 3, 1, 0]],
         },
-        "draft": {
+    }
+    if with_draft:
+        data["draft"] = {
             "num_logical_experts": 4,
             "num_redundant_experts": 2,
             "physical_to_logical_map": [[2, 1, 0, 0, 3, 1]],
-        },
-    }
-    path.write_text(json.dumps(payload), encoding="utf-8")
+        }
+    return data
 
+
+def _make_controller(path: str) -> AscendEPLBController:
+    parallel_cfg = SimpleNamespace(
+        enable_eplb=True,
+        enable_elastic_ep=False,
+        eplb_config=SimpleNamespace(policy="stair", log_balancedness=False, step_interval=10),
+    )
+    return AscendEPLBController(
+        parallel_cfg, torch.device("cpu"), EplbConfig(mode="static", expert_placement_path=path)
+    )
+
+
+def test_static_snapshot_read_slice_and_layer_binding(tmp_path):
+    path = tmp_path / "placement.json"
+    path.write_text(json.dumps(_payload(with_draft=True)), encoding="utf-8")
+    ep_group = SimpleNamespace(world_size=2, rank_in_group=1, cpu_group=_FakeCpuGroup(0, 2))
+
+    with (
+        patch("vllm_ascend.distributed.eplb.eplb_state.get_ep_group", return_value=ep_group),
+        patch("torch.distributed.get_global_rank", return_value=0),
+        patch("torch.distributed.broadcast_object_list"),
+    ):
+        snap = read_static_placement_snapshot(str(path), ep_group.cpu_group)
+        model = _FakeMoEModel(2)
+        rows = slice_static_role_rows(snap, "target", model, ep_group.cpu_group)
+        local_ids = apply_static_rows_to_model(model, rows, ep_size=2, ep_rank=1, device=torch.device("cpu"))
+        assert local_ids == {0, 1, 2, 3}
+        for layer in model.moe_layers:
+            layer.router._validate_eplb_state()
+            assert layer.eplb_state.expert_replica_routing_table is not None
+            assert layer.eplb_state.load_recording_enabled is False
+            layer.eplb_state.record_load(None, 0, topk_ids=torch.zeros((1, 2), dtype=torch.int64), num_source_tokens=1)
+
+        with pytest.raises(FileNotFoundError):
+            read_static_placement_snapshot(str(tmp_path / "missing.json"), ep_group.cpu_group)
+        with pytest.raises(ValueError, match="layer count mismatch"):
+            slice_static_role_rows(snap, "target", _FakeMoEModel(1), ep_group.cpu_group)
+
+    routed = AscendRoutedExperts.__new__(AscendRoutedExperts)
+    nn.Module.__init__(routed)
+    routed.moe_config = SimpleNamespace(num_logical_experts=4, num_experts=6, ep_rank=1, ep_size=2)
+    emap = torch.tensor([-1, -1, -1, 0, 1, 2, 3], dtype=torch.int32)
+    routed.expert_map_manager = SimpleNamespace(map_global_to_local=lambda gid: int(emap[gid].item()))
+    routed._static_logical_to_local_slot = {0: 0, 2: 1, 1: 2}
+    assert [routed._map_global_expert_id_to_local_expert_id(i) for i in range(5)] == [0, 2, 1, -1, 3]
+
+
+def test_static_controller_target_draft_pp_and_dummy(tmp_path):
+    path = tmp_path / "placement.json"
+    path.write_text(json.dumps(_payload(with_draft=True)), encoding="utf-8")
     ep_group = SimpleNamespace(world_size=2, rank_in_group=0, cpu_group=_FakeCpuGroup(0, 2))
-    target_model = _FakeMoEModel(2)
-    draft_model = _FakeMoEModel(1)
-    target_cfg = SimpleNamespace(model="target-m", compile_factors=lambda: ("target-m",))
-    draft_cfg = SimpleNamespace(model="draft-m", compile_factors=lambda: ("draft-m",))
+    pp_group = SimpleNamespace(rank_in_group=0, world_size=2, cpu_group=_FakeCpuGroup(0, 2))
+    target_cfg, draft_cfg = SimpleNamespace(model="t"), SimpleNamespace(model="d")
     spec_cfg = SimpleNamespace(draft_model_config=draft_cfg, method="mtp", prefill_context_kv_only=False)
     vllm_cfg = SimpleNamespace(
         load_config=SimpleNamespace(load_format="safetensors"),
@@ -101,118 +142,49 @@ def test_static_controller_loads_target_and_draft_without_communicator(tmp_path)
     with (
         patch("vllm_ascend.worker.v2.eplb.get_ep_group", return_value=ep_group),
         patch("vllm_ascend.distributed.eplb.eplb_state.get_ep_group", return_value=ep_group),
-        patch("vllm.distributed.eplb.eplb_state.CpuGpuEvent", MagicMock),
-        patch("vllm_ascend.distributed.eplb.eplb_state.torch.accelerator.current_device_index", return_value=0),
         patch("vllm_ascend.worker.v2.eplb.get_mixture_of_experts_model", side_effect=lambda m: m),
-        patch("vllm.v1.worker.gpu.eplb_utils.get_mixture_of_experts_model", side_effect=lambda m: m),
         patch("torch.distributed.get_global_rank", return_value=0),
         patch("torch.distributed.broadcast_object_list"),
-        patch(
-            "torch.distributed.all_gather_object",
-            side_effect=lambda out, obj, group: out.__setitem__(slice(None), [obj] * group.size()),
-        ),
     ):
-        controller = _make_controller(str(path))
-        controller.prepare_load()
-        assert ACTIVE_STATIC_CONTROLLER.get() is controller
+        ctrl = _make_controller(str(path))
+        ctrl.prepare_load()
+        assert ctrl.state is None and ACTIVE_STATIC_CONTROLLER.get() is ctrl
+        target_m, draft_m = _FakeMoEModel(2), _FakeMoEModel(1)
+        ctrl.bind_model_for_static_load(target_m, vllm_cfg, target_cfg)
+        assert target_m.moe_layers[0]._static_logical_to_local_slot == {3: 0, 0: 1, 1: 2}
+        ctrl.bind_model_for_static_load(draft_m, vllm_cfg, draft_cfg)
+        assert draft_m.moe_layers[0]._static_logical_to_local_slot == {2: 0, 1: 1, 0: 2}
+        assert ctrl.maybe_register_speculator(MagicMock(), spec_cfg, False) is False
+        assert ctrl.maybe_register_model(target_m, target_cfg) is False
+        ctrl.maybe_start_async_loop(False, load_dummy_weights=False)
+        assert ACTIVE_STATIC_CONTROLLER.get() is None and ACTIVE_STATIC_LOAD.get() is None
+        ctrl.prepare_forward(target_cfg, 8)
+        ctrl.step()
 
-        controller.bind_model_for_static_load(target_model, vllm_cfg, target_cfg)
-        assert ACTIVE_STATIC_ROLE_PLACEMENT.get() == controller._snapshot.target  # type: ignore[union-attr]
-        assert target_model.moe_layers[0]._static_logical_to_local_slot == {3: 0, 0: 1, 1: 2}
+        def _fake_all_gather(out: list, obj: object, group: object = None) -> None:
+            if isinstance(obj, bool):
+                out[:] = [False, False]
+            else:
+                out[:] = [0, 2]
 
-        controller.bind_model_for_static_load(draft_model, vllm_cfg, draft_cfg)
-        assert draft_model.moe_layers[0]._static_logical_to_local_slot == {2: 0, 1: 1, 0: 2}
+        # PP=2 dense stage 0 + missing registered draft error + dummy load
+        with (
+            patch("vllm_ascend.distributed.eplb.eplb_state.get_pp_group", return_value=pp_group),
+            patch("torch.distributed.all_gather_object", side_effect=_fake_all_gather),
+        ):
+            ctrl.prepare_load()
+            ctrl.bind_model_for_static_load(_FakeMoEModel(0), vllm_cfg, target_cfg)
+            with pytest.raises(ValueError, match="no EPLB draft model is registered"):
+                ctrl.maybe_start_async_loop(False, load_dummy_weights=False)
 
-        speculator = SimpleNamespace(
-            vllm_config=SimpleNamespace(parallel_config=SimpleNamespace(enable_eplb=True)),
-            model=draft_model,
-            set_eplb_state=MagicMock(),
-        )
-        assert controller.maybe_register_speculator(speculator, spec_cfg, False)
-        assert controller.maybe_register_model(target_model, target_cfg)
-        controller.maybe_start_async_loop(True, load_dummy_weights=False)
-
-        assert ACTIVE_STATIC_CONTROLLER.get() is None
-        assert ACTIVE_STATIC_ROLE_PLACEMENT.get() is None
-        state = controller.state
-        assert state is not None and len(state.model_states) == 2
-        for ms in state.model_states.values():
-            assert ms.communicator is None
-            assert ms.expert_buffer == []
-            for layer in ms.model.moe_layers:
-                assert layer.eplb_state.load_recording_enabled is False
-                assert layer.eplb_state.expert_replica_routing_table is not None
-
-        controller.prepare_forward(target_cfg, 16)
-        controller.step()
-        state.prepare_forward(target_cfg, 16)
-        state.step()
-        assert state.rearrange() is None
-
-
-def test_static_controller_pp_zero_moe_stage_dummy_and_unexpected_draft(tmp_path):
-    path = tmp_path / "placement.json"
-    payload = {
-        "version": 1,
-        "ep_size": 2,
-        "target": {
-            "num_logical_experts": 4,
-            "num_redundant_experts": 2,
-            "physical_to_logical_map": [[3, 0, 1, 0, 2, 1]],
-        },
-        "draft": {
-            "num_logical_experts": 4,
-            "num_redundant_experts": 2,
-            "physical_to_logical_map": [[2, 1, 0, 0, 3, 1]],
-        },
-    }
-    path.write_text(json.dumps(payload), encoding="utf-8")
-
-    ep_group = SimpleNamespace(world_size=2, rank_in_group=0, cpu_group=_FakeCpuGroup(0, 2))
-    pp_group = SimpleNamespace(rank_in_group=0, world_size=2, cpu_group=_FakeCpuGroup(0, 2))
-    dense_stage_model = _FakeMoEModel(0)
-    full_stage_model = _FakeMoEModel(1)
-    target_cfg = SimpleNamespace(model="target-m", compile_factors=lambda: ("target-m",))
-    vllm_cfg = SimpleNamespace(
-        load_config=SimpleNamespace(load_format="safetensors"),
-        parallel_config=SimpleNamespace(enable_eplb=True),
-        speculative_config=None,
-    )
-
-    def _pp_gather(out, obj, group):
-        if group is pp_group.cpu_group and not isinstance(obj, bool):
-            out[:] = [None, SimpleNamespace(num_logical_experts=4, num_redundant_experts=2, num_layers=1)]
-        else:
-            out[:] = [obj] * group.size()
-
-    with (
-        patch("vllm_ascend.worker.v2.eplb.get_ep_group", return_value=ep_group),
-        patch("vllm_ascend.worker.v2.eplb.get_pp_group", return_value=pp_group),
-        patch("vllm_ascend.distributed.eplb.eplb_state.get_ep_group", return_value=ep_group),
-        patch("vllm.distributed.eplb.eplb_state.CpuGpuEvent", MagicMock),
-        patch("vllm_ascend.distributed.eplb.eplb_state.torch.accelerator.current_device_index", return_value=0),
-        patch("vllm_ascend.worker.v2.eplb.get_mixture_of_experts_model", side_effect=lambda m: m),
-        patch("vllm.v1.worker.gpu.eplb_utils.get_mixture_of_experts_model", side_effect=lambda m: m),
-        patch("torch.distributed.get_global_rank", return_value=0),
-        patch("torch.distributed.broadcast_object_list"),
-        patch("torch.distributed.all_gather_object", side_effect=_pp_gather),
-    ):
-        controller = _make_controller(str(path))
-        controller.prepare_load()
-        controller.bind_model_for_static_load(dense_stage_model, vllm_cfg, target_cfg)
-        assert ACTIVE_STATIC_ROLE_PLACEMENT.get() is None
-        assert controller.maybe_register_model(dense_stage_model, target_cfg) is False
-        with pytest.raises(ValueError, match="no EPLB draft model is registered"):
-            controller.maybe_start_async_loop(False, load_dummy_weights=False)
-
-        # Dummy weight load builds default initial static state without reading snapshot
-        controller.prepare_load()
         dummy_cfg = SimpleNamespace(
             load_config=SimpleNamespace(load_format="dummy"),
             parallel_config=SimpleNamespace(enable_eplb=True),
             speculative_config=None,
         )
-        controller.bind_model_for_static_load(full_stage_model, dummy_cfg, target_cfg)
-        assert controller.maybe_register_model(full_stage_model, target_cfg) is True
-        controller.maybe_start_async_loop(True, load_dummy_weights=True)
-        assert controller.state is not None and len(controller.state.model_states) == 1
+        ctrl.prepare_load()
+        dummy_m = _FakeMoEModel(1)
+        ctrl.bind_model_for_static_load(dummy_m, dummy_cfg, target_cfg)
+        dummy_m.moe_layers[0].router._validate_eplb_state()
+        ctrl.maybe_start_async_loop(False, load_dummy_weights=True)
+        assert ACTIVE_STATIC_CONTROLLER.get() is None and ACTIVE_STATIC_LOAD.get() is None

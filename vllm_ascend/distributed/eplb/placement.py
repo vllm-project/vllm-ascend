@@ -12,11 +12,15 @@ import socket
 import struct
 import threading
 from contextlib import suppress
+from contextvars import ContextVar
 from dataclasses import dataclass, field
 from pathlib import Path
 from tempfile import NamedTemporaryFile
 from typing import Any
 
+import torch
+import torch.distributed as dist
+from vllm.distributed.eplb import eplb_state as _upstream_eplb_state
 from vllm.logger import logger
 
 PLACEMENT_SNAPSHOT_VERSION = 1
@@ -410,3 +414,116 @@ class PlacementExporter:
         if ok:
             self._committed_roles -= {r for r, c in (("target", t_comm), ("draft", d_comm)) if c}
         return ok
+
+
+ACTIVE_STATIC_CONTROLLER: ContextVar[Any | None] = ContextVar("vllm_ascend_static_eplb_controller", default=None)
+ACTIVE_STATIC_LOAD: ContextVar[tuple[bool, set[int] | None] | None] = ContextVar(
+    "vllm_ascend_static_eplb_load", default=None
+)
+
+
+def _bcast_rank0(value: Any, group: Any) -> Any:
+    box = [value if group.rank() == 0 else None]
+    if group.size() > 1:
+        dist.broadcast_object_list(box, src=dist.get_global_rank(group, 0), group=group)
+    return box[0]
+
+
+def read_static_placement_snapshot(
+    path: str,
+    ep_group: Any,
+    pp_group: Any | None = None,
+    pp_rank: int = 0,
+) -> dict[str, Any]:
+    """Read and validate the v1 snapshot on global rank 0 and broadcast it."""
+    packet: Any = None
+    if ep_group.rank() == 0:
+        if pp_rank == 0:
+            try:
+                with open(path, encoding="utf-8") as source:
+                    data = json.load(source)
+                validate_placement_snapshot(data)
+                packet = ("ok", data)
+            except OSError as exc:
+                packet = ("io", f"EPLB placement {path!r} could not be read: {exc}")
+            except Exception as exc:
+                packet = ("val", f"Invalid EPLB placement {path!r}: {exc}")
+        if pp_group is not None and pp_group.size() > 1:
+            packet = _bcast_rank0(packet, pp_group)
+    kind, payload = _bcast_rank0(packet, ep_group)
+    if kind == "io":
+        raise FileNotFoundError(payload)
+    if kind != "ok":
+        raise ValueError(payload)
+    return payload
+
+
+def slice_static_role_rows(
+    snapshot: dict[str, Any],
+    role: str,
+    moe_model: Any | None,
+    ep_group: Any,
+    pp_group: Any | None = None,
+    pp_rank: int = 0,
+) -> list[list[int]]:
+    if snapshot["ep_size"] != ep_group.size():
+        raise ValueError(f"EPLB placement ep_size mismatch: file={snapshot['ep_size']}, runtime={ep_group.size()}")
+    if role not in snapshot:
+        raise ValueError(f"EPLB placement snapshot is missing the expected {role} placement")
+    entry = snapshot[role]
+    rows: list[list[int]] = entry["physical_to_logical_map"]
+    local_layers = len(getattr(moe_model, "moe_layers", ())) if moe_model is not None else 0
+    if role == "target" and pp_group is not None and pp_group.size() > 1:
+        stage_counts: list[int] | None = None
+        if ep_group.rank() == 0:
+            stage_counts = [0] * pp_group.size()
+            dist.all_gather_object(stage_counts, local_layers, group=pp_group)
+        stage_counts = _bcast_rank0(stage_counts, ep_group)
+        assert stage_counts is not None
+        if sum(stage_counts) != len(rows):
+            raise ValueError(f"EPLB target layer count mismatch: file={len(rows)}, runtime={sum(stage_counts)}")
+        offset = sum(stage_counts[:pp_rank])
+        rows = rows[offset : offset + local_layers]
+    elif local_layers != len(rows):
+        raise ValueError(f"EPLB {role} layer count mismatch: file={len(rows)}, runtime={local_layers}")
+    if local_layers == 0:
+        return []
+    assert moe_model is not None
+    if (int(moe_model.num_logical_experts), int(moe_model.num_redundant_experts)) != (
+        entry["num_logical_experts"],
+        entry["num_redundant_experts"],
+    ):
+        raise ValueError(f"EPLB {role} expert count mismatch between snapshot and runtime")
+    return rows
+
+
+def apply_static_rows_to_model(
+    moe_model: Any,
+    rows: list[list[int]],
+    ep_size: int,
+    ep_rank: int,
+    device: torch.device,
+) -> set[int] | None:
+    p2l_cpu = torch.tensor(rows, dtype=torch.long)
+    l2p_cpu, rep_cpu = _upstream_eplb_state.compute_logical_maps(p2l_cpu, moe_model.num_logical_experts)
+    pad = (moe_model.num_redundant_experts + 1) - l2p_cpu.shape[-1]
+    if pad < 0:
+        raise ValueError("Static EPLB placement exceeds the allocated replica capacity")
+    if pad > 0:
+        l2p_cpu = torch.nn.functional.pad(l2p_cpu, (0, pad), value=-1)
+    l2p = l2p_cpu.to(device=device, dtype=torch.long)
+    rep = rep_cpu.to(device=device, dtype=torch.long)
+    load_buf = torch.zeros((len(rows), p2l_cpu.shape[1]), dtype=torch.int32, device=device)
+    record_off = torch.zeros((), dtype=torch.bool, device=device)
+    unpadded = [torch.zeros((), dtype=torch.int32, device=device)]
+    slots_per_rank = p2l_cpu.shape[1] // ep_size
+    start = ep_rank * slots_per_rank
+    for idx, (layer, row) in enumerate(zip(moe_model.moe_layers, rows)):
+        slot_slice = row[start : start + slots_per_rank]
+        layer._static_logical_to_local_slot = {eid: slot for slot, eid in enumerate(slot_slice)}
+        layer.set_eplb_state(idx, load_buf, l2p, rep)
+        if layer.eplb_state is not None:
+            layer.eplb_state.should_record_tensor = record_off
+            layer.eplb_state.num_unpadded_tokens_tensors = unpadded
+            layer.eplb_state.load_recording_enabled = False
+    return {eid for row in rows for eid in row[start : start + slots_per_rank]} if ep_size > 1 else None
