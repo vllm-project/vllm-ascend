@@ -13,12 +13,15 @@
  * \brief
  */
 
+#include <cmath>
 #include <sstream>
 #include "hc_pre_tiling.h"
 #include "hc_pre_tiling_arch35.h"
 
 using namespace ge;
 namespace optiling {
+REGISTER_TILING_DATA_CLASS(HcPre, HcPreTilingData)
+
 namespace {
 constexpr uint64_t WORKSPACE_SIZE = 32;
 int64_t CeilDiv(int64_t x, int64_t y)
@@ -52,6 +55,7 @@ constexpr int64_t HC_MULT_ATTR_IDX = 0;
 constexpr int64_t ITER_TIMES_ATTR_IDX = 1;
 constexpr int64_t HC_EPS_ATTR_IDX = 2;
 constexpr int64_t NORM_EPS_ATTR_IDX = 3;
+constexpr int64_t INPUT_NORM_EPS_ATTR_IDX = 4;
 constexpr int64_t DEFAULT_ITER_TIMES = 20;
 constexpr int64_t SUPPORTED_HC_MULT = 4;
 constexpr int64_t SQUARE_SUM_SIZE = 16;
@@ -101,6 +105,15 @@ ge::graphStatus HcPreTiling::GetAttr()
 
     auto normEpsAttr = attrs->GetAttrPointer<float>(NORM_EPS_ATTR_IDX);
     normEps_ = normEpsAttr == nullptr ? 1e-6 : *normEpsAttr;
+    if (postPreNorm_) {
+        const auto* epsAttr = attrs->GetAttrPointer<float>(INPUT_NORM_EPS_ATTR_IDX);
+        const float inputNormEps = epsAttr == nullptr ? 1e-6f : *epsAttr;
+        const auto validEps = [](double eps) { return std::isfinite(eps) && eps >= 0; };
+        OPS_ERR_IF(iterTimes_ < 1 || !validEps(hcEps_) || !validEps(normEps_) || !validEps(inputNormEps),
+            OPS_LOG_E(context_->GetNodeName(), "Invalid HcPostPreNorm iteration count or epsilon"),
+            return ge::GRAPH_FAILED);
+        tilingData_.set_inputNormEps(inputNormEps);
+    }
     return ge::GRAPH_SUCCESS;
 }
 
@@ -158,13 +171,15 @@ ge::graphStatus HcPreTiling::GetShapeAttrsInfoInner()
                     return ge::GRAPH_FAILED);
 
     // 可选输入 pre_mix: [bs, hc_mult] fp32; gen_placeholder模式下GetInputShape恒非空, 必须用GetOptionalInputTensor判空
-    tilingData_.set_hasPreMix(context_->GetOptionalInputTensor(4) != nullptr ? 1 : 0);
+    tilingData_.set_hasPreMix(!postPreNorm_ && context_->GetOptionalInputTensor(4) != nullptr ? 1 : 0);
     // 可选输出 pre: 无GetOptionalOutputTensor对应API, 用shape内容判别(占位shape无有效首维)
     auto preOutShape = context_->GetOutputShape(3);
     bool hasPreOut = preOutShape != nullptr && preOutShape->GetStorageShape().GetDimNum() > 0 &&
                      preOutShape->GetStorageShape().GetDim(0) > 0;
-    tilingData_.set_hasPreOut(hasPreOut ? 1 : 0);
-
+    tilingData_.set_hasPreOut(postPreNorm_ || hasPreOut ? 1 : 0);
+    if (postPreNorm_) {
+        tilingData_.set_inputNormInvHidden(1.0f / static_cast<float>(d_));
+    }
     return ge::GRAPH_SUCCESS;
 }
 
@@ -205,7 +220,8 @@ void HcPreTiling::CalcVectorCoreNum()
 
 ge::graphStatus HcPreTiling::CalcMKSplitCoreMembasePart2Tiling()
 {
-    bool useOriginal = bs_ <= SMALL_BS_THRESHOLD;
+    // The fused caller already computed the premixed activation and only needs coefficients.
+    bool useOriginal = postPreNorm_ || bs_ <= SMALL_BS_THRESHOLD;
     if (useOriginal) {
         tilingKey_ = ORIGINAL_TILING_KEY;
         rowOfFormerBlock_ = CeilDiv(bs_, static_cast<int64_t>(aivCoreNum_));
@@ -546,7 +562,12 @@ ge::graphStatus HcPreTiling::GetWorkspaceSize()
     uint64_t squareSumSize = RoundUp(tilingData_.get_cubeBlockDimK() *
     RoundUp(tilingData_.get_bs(), 16) * 16 * sizeof(float), 512);
 
-    uint64_t requiredSize = workspaceSize1 + workspaceSize2 + squareSumSize + 16 * 1024 * 1024; // 16MB 预留缓冲
+    uint64_t userSize = workspaceSize1 + workspaceSize2 + squareSumSize;
+    if (postPreNorm_) {
+        tilingData_.set_mixedInputOffset(userSize);
+        userSize += static_cast<uint64_t>(bs_) * d_ * sizeof(uint16_t);
+    }
+    uint64_t requiredSize = userSize + 16 * 1024 * 1024; // 16MB 预留缓冲
 
     constexpr uint64_t minimumWorkspaceSize = 208ULL * 1024 * 1024;
     workspaceSize_ = requiredSize > minimumWorkspaceSize ? requiredSize : minimumWorkspaceSize;

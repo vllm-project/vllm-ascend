@@ -10,21 +10,28 @@
 using namespace AscendC;
 using namespace RmsNormCast;
 
-template <typename T>
+template <typename T, bool WriteFp32 = true>
 class KernelRmsNormCast {
 public:
     __aicore__ inline explicit KernelRmsNormCast(TPipe* pipe) : pipe_(pipe) {}
 
-    __aicore__ inline void Init(GM_ADDR x, GM_ADDR gamma, GM_ADDR y,
-                                GM_ADDR y_fp32,
-                                const RmsNormCastTilingData* tiling)
+    template <typename TilingData>
+    __aicore__ inline void Init(GM_ADDR x, GM_ADDR gamma, GM_ADDR y, GM_ADDR y_fp32, const TilingData* tiling)
     {
-        num_row_ = tiling->num_row;
-        num_col_ = tiling->num_col;
-        num_col_aligned_ = tiling->num_col_aligned;
-        rows_per_core_ = tiling->rows_per_core;
-        inv_num_col_ = tiling->inv_num_col;
-        epsilon_ = tiling->epsilon;
+        Init(x, gamma, y, y_fp32, tiling->num_row, tiling->num_col, tiling->num_col_aligned,
+             tiling->rows_per_core, tiling->inv_num_col, tiling->epsilon);
+    }
+
+    __aicore__ inline void Init(GM_ADDR x, GM_ADDR gamma, GM_ADDR y, GM_ADDR y_fp32, uint32_t numRows,
+                               uint32_t numCols, uint32_t alignedCols, uint32_t rowsPerCore,
+                               float invNumCols, float epsilon)
+    {
+        num_row_ = numRows;
+        num_col_ = numCols;
+        num_col_aligned_ = alignedCols;
+        rows_per_core_ = rowsPerCore;
+        inv_num_col_ = invNumCols;
+        epsilon_ = epsilon;
         block_idx_ = GetBlockIdx();
         const uint32_t row_begin = block_idx_ * rows_per_core_;
         row_end_ = Min(num_row_, row_begin + rows_per_core_);
@@ -33,8 +40,9 @@ public:
         x_gm_.SetGlobalBuffer((__gm__ T*)x, num_row_ * num_col_);
         gamma_gm_.SetGlobalBuffer((__gm__ T*)gamma, num_col_);
         y_gm_.SetGlobalBuffer((__gm__ T*)y, num_row_ * num_col_);
-        y_fp32_gm_.SetGlobalBuffer((__gm__ float*)y_fp32,
-                                   num_row_ * num_col_);
+        if constexpr (WriteFp32) {
+            y_fp32_gm_.SetGlobalBuffer((__gm__ float*)y_fp32, num_row_ * num_col_);
+        }
 
         pipe_->InitBuffer(x_buf_, num_col_aligned_ * sizeof(T));
         pipe_->InitBuffer(gamma_buf_, num_col_aligned_ * sizeof(T));
@@ -116,17 +124,19 @@ private:
         }
         PipeBarrier<PIPE_V>();
 
-        // The FP32 result deliberately widens the rounded low-precision
-        // result. HashTopK therefore sees exactly the same values as the
-        // original RMSNorm followed by Tensor.float().
-        Cast(x_fp32, x_local, RoundMode::CAST_NONE, num_col_);
-        PipeBarrier<PIPE_V>();
+        if constexpr (WriteFp32) {
+            // Match RMSNorm followed by Tensor.float() for MoE routing.
+            Cast(x_fp32, x_local, RoundMode::CAST_NONE, num_col_);
+            PipeBarrier<PIPE_V>();
+        }
         event_t output_ready = static_cast<event_t>(
             GetTPipePtr()->FetchEventID(HardEvent::V_MTE3));
         SetFlag<HardEvent::V_MTE3>(output_ready);
         WaitFlag<HardEvent::V_MTE3>(output_ready);
         DataCopyCustom<T>(y_gm_[offset], x_local, num_col_);
-        DataCopyCustom<float>(y_fp32_gm_[offset], x_fp32, num_col_);
+        if constexpr (WriteFp32) {
+            DataCopyCustom<float>(y_fp32_gm_[offset], x_fp32, num_col_);
+        }
         event_t output_done = static_cast<event_t>(
             GetTPipePtr()->FetchEventID(HardEvent::MTE3_MTE2));
         SetFlag<HardEvent::MTE3_MTE2>(output_done);

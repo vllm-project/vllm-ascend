@@ -245,8 +245,9 @@ private:
     uint64_t squareSumFp32BufSize_;
 };
 
-template <typename T, bool useOriginal>
+template <typename T, bool useOriginal, bool applyPreMix = true>
 class HcPreMembaseKSplitCorePart2 {
+    static_assert(useOriginal || applyPreMix, "Coefficient-only mode uses original tiling");
 public:
     __aicore__ inline HcPreMembaseKSplitCorePart2()
     {
@@ -286,7 +287,7 @@ public:
 
     __aicore__ inline void InitPreMixBuffer(int64_t rowFactor)
     {
-        if (tilingData->hasPreMix != 0) {
+        if (applyPreMix && tilingData->hasPreMix != 0) {
             pipe->InitBuffer(preMixBuf, rowFactor * tilingData->hcMultAlign * sizeof(float));
             preMixLocal = preMixBuf.Get<float>();
         }
@@ -303,7 +304,7 @@ public:
                     preGm[(globalRowOffset + rowIdx) * tilingData->hcMult], 1, tilingData->hcMult);
             }
         }
-        if (tilingData->hasPreMix != 0) {
+        if (applyPreMix && tilingData->hasPreMix != 0) {
             // Keep every UB row 32-byte aligned while GM rows contain four FP32 values.
             for (int64_t rowIdx = 0; rowIdx < curRowFactor; rowIdx++) {
                 CopyIn(preMixGm[(globalRowOffset + rowIdx) * tilingData->hcMult],
@@ -932,27 +933,29 @@ public:
                 rsqrtLocal, rowBrcbLocal0, hcBrcbLocal1, hcScale0,
                 tilingData->hcEps, curRowFactor, tilingData->hcMult);
             CopyOutPreAndLoadPreMix(globalRowOffset, curRowFactor);
-            for (int64_t dLoopIdx = 0; dLoopIdx < tilingData->dLoop; dLoopIdx++) {
-                int64_t curDFactor = dLoopIdx == tilingData->dLoop - 1 ?
-                    tilingData->tailDFactor : tilingData->dFactor;
-                xLocal = xQue.template AllocTensor<T>();
-                CopyIn(xGm[globalRowOffset * tilingData->hcMult * tilingData->d +
-                    dLoopIdx * tilingData->dFactor], xLocal,
-                    curRowFactor * tilingData->hcMult, curDFactor,
-                    tilingData->d - curDFactor);
-                xQue.template EnQue(xLocal);
-                xLocal = xQue.template DeQue<T>();
-                yLocal = yQue.template AllocTensor<T>();
-                ProcessY(yLocal, xLocal,
-                    tilingData->hasPreMix != 0 ? preMixLocal : mixes01ReduceLocal, hcBrcbLocal1,
-                    xCastLocal, yCastLocal, curRowFactor, tilingData->hcMult, curDFactor);
-                xQue.template FreeTensor(xLocal);
-                yQue.template EnQue(yLocal);
-                yLocal = yQue.template DeQue<T>();
-                CopyOut(yLocal,
-                    yGm[globalRowOffset * tilingData->d + dLoopIdx * tilingData->dFactor],
-                    curRowFactor, curDFactor, tilingData->d - curDFactor);
-                yQue.template FreeTensor(yLocal);
+            if constexpr (applyPreMix) {
+                for (int64_t dLoopIdx = 0; dLoopIdx < tilingData->dLoop; dLoopIdx++) {
+                    int64_t curDFactor = dLoopIdx == tilingData->dLoop - 1 ?
+                        tilingData->tailDFactor : tilingData->dFactor;
+                    xLocal = xQue.template AllocTensor<T>();
+                    CopyIn(xGm[globalRowOffset * tilingData->hcMult * tilingData->d +
+                        dLoopIdx * tilingData->dFactor], xLocal,
+                        curRowFactor * tilingData->hcMult, curDFactor,
+                        tilingData->d - curDFactor);
+                    xQue.template EnQue(xLocal);
+                    xLocal = xQue.template DeQue<T>();
+                    yLocal = yQue.template AllocTensor<T>();
+                    ProcessY(yLocal, xLocal,
+                        tilingData->hasPreMix != 0 ? preMixLocal : mixes01ReduceLocal, hcBrcbLocal1,
+                        xCastLocal, yCastLocal, curRowFactor, tilingData->hcMult, curDFactor);
+                    xQue.template FreeTensor(xLocal);
+                    yQue.template EnQue(yLocal);
+                    yLocal = yQue.template DeQue<T>();
+                    CopyOut(yLocal,
+                        yGm[globalRowOffset * tilingData->d + dLoopIdx * tilingData->dFactor],
+                        curRowFactor, curDFactor, tilingData->d - curDFactor);
+                    yQue.template FreeTensor(yLocal);
+                }
             }
 
             postLocal = postQue.AllocTensor<float>();

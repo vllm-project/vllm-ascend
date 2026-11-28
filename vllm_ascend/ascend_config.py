@@ -133,6 +133,7 @@ class AscendCompilationConfig:
     fuse_norm_quant: bool = True
     fuse_qknorm_rope: bool = True
     fuse_muls_add: bool = True
+    fuse_mhc: bool = False
 
     @model_validator(mode="before")
     @classmethod

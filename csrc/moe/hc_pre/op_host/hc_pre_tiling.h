@@ -119,10 +119,11 @@ TILING_DATA_FIELD_DEF(int64_t, sinkhornRowLoopOfTailBlock);
 TILING_DATA_FIELD_DEF(int64_t, sinkhornRowFactor);
 TILING_DATA_FIELD_DEF(int64_t, sinkhornTailRowFactorOfFormerBlock);
 TILING_DATA_FIELD_DEF(int64_t, sinkhornTailRowFactorOfTailBlock);
+TILING_DATA_FIELD_DEF(int64_t, mixedInputOffset);
+TILING_DATA_FIELD_DEF(float, inputNormEps);
+TILING_DATA_FIELD_DEF(float, inputNormInvHidden);
 
 END_TILING_DATA_DEF;
-
-REGISTER_TILING_DATA_CLASS(HcPre, HcPreTilingData)
 
 // ----------算子CompileInfo定义----------
 struct HcPreCompileInfo {
@@ -133,9 +134,10 @@ struct HcPreCompileInfo {
 // ----------算子Tiling入参信息解析及check类----------
 class HcPreTiling {
 public:
-    explicit HcPreTiling(gert::TilingContext* tilingContext) : context_(tilingContext)
-        {
-        }
+    explicit HcPreTiling(gert::TilingContext* tilingContext, bool postPreNorm = false)
+        : context_(tilingContext), postPreNorm_(postPreNorm)
+    {
+    }
     ~HcPreTiling() = default;
 
     ge::graphStatus GetPlatformInfo();
@@ -151,6 +153,7 @@ public:
 
 private:
     gert::TilingContext *context_ = nullptr;
+    bool postPreNorm_;
     uint64_t tilingKey_ = 0;
     HcPreTilingData tilingData_;
     uint64_t aivCoreNum_ = 0;

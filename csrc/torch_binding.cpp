@@ -32,6 +32,7 @@
 #include "utils.h"
 #include "aclnn_torch_adapter/op_api_common.h"
 #include "moe/add_rms_norm_bias/add_rms_norm_bias_torch_adpt.h"
+#include "moe/hc_post_pre_norm/op_kernel/hc_post_pre_norm_config.h"
 #include "moe/rms_norm_cast/rms_norm_cast_torch_adpt.h"
 #include "attention/qsa_union_inputs/qsa_union_inputs_torch_adpt.h"
 #ifdef VLLM_ENABLE_ATB_AND_DIRECT_KERNELS
@@ -1825,6 +1826,43 @@ std::tuple<at::Tensor, at::Tensor, at::Tensor, at::Tensor> npu_hc_pre_v3_npu(
     return run_hc_pre_fusion(x, hc_fn, hc_scale, hc_base, pre_mix, hc_mult, hc_sinkhorn_iters, norm_eps, hc_eps);
 }
 
+std::tuple<at::Tensor, c10::optional<at::Tensor>, at::Tensor, at::Tensor, at::Tensor, at::Tensor> npu_hc_post_pre_norm_npu(
+    const at::Tensor& attn_out, const at::Tensor& residual, const at::Tensor& attn_post,
+    const at::Tensor& attn_comb, const at::Tensor& attn_pre, const at::Tensor& ffn_hc_fn,
+    const at::Tensor& ffn_hc_scale, const at::Tensor& ffn_hc_base, const at::Tensor& ffn_norm_weight,
+    int64_t hc_sinkhorn_iters, double hc_eps, double hc_norm_eps, double ffn_norm_eps, bool return_fp32)
+{
+    constexpr auto hidden = HcPostPreNorm::kHiddenSize;
+    constexpr auto hc_mult = HcPostPreNorm::kHcMult;
+    TORCH_CHECK(residual.dim() == 3 && residual.size(2) == hidden,
+                "npu_hc_post_pre_norm requires residual [T, ", hc_mult, ", ", hidden, "]");
+    check_hc_pre_shape_and_dtype(residual, ffn_hc_fn, ffn_hc_scale, ffn_hc_base, attn_pre, hc_mult);
+    const auto tokens = residual.size(0);
+    TORCH_CHECK(attn_out.sizes() == at::IntArrayRef({tokens, hidden}) && attn_out.dtype() == at::kBFloat16,
+                "attn_out must be BF16 [T, ", hidden, "]");
+    TORCH_CHECK(attn_post.sizes() == at::IntArrayRef({tokens, hc_mult}) && attn_post.dtype() == at::kFloat,
+                "attn_post must be FP32 [T, ", hc_mult, "]");
+    TORCH_CHECK(attn_comb.sizes() == at::IntArrayRef({tokens, hc_mult, hc_mult}) && attn_comb.dtype() == at::kFloat,
+                "attn_comb must be FP32 [T, ", hc_mult, ", ", hc_mult, "]");
+    TORCH_CHECK(ffn_norm_weight.sizes() == at::IntArrayRef({hidden}) && ffn_norm_weight.dtype() == at::kBFloat16,
+                "ffn_norm_weight must be BF16 [", hidden, "]");
+    for (const auto* input : {&attn_out, &attn_post, &attn_comb, &attn_pre, &ffn_hc_fn,
+                              &ffn_hc_scale, &ffn_hc_base, &ffn_norm_weight}) {
+        TORCH_CHECK(input->device() == residual.device(), "npu_hc_post_pre_norm requires all inputs on the same device");
+    }
+
+    auto [y, post, comb] = construct_hc_pre_output_tensor(residual, hc_mult);
+    auto pre = construct_hc_pre_pre_output_tensor(residual, hc_mult);
+    auto new_residual = at::empty(residual.sizes(), residual.options());
+    const auto fp32_options = y.options().dtype(at::kFloat);
+    // ACLNN keeps the output slot; the BF16-only variant needs no FP32 storage.
+    auto fp32_output = return_fp32 ? at::empty(y.sizes(), fp32_options) : at::empty({0}, fp32_options);
+    EXEC_NPU_CMD(aclnnHcPostPreNorm, residual, ffn_hc_fn, ffn_hc_scale, ffn_hc_base, attn_pre,
+                 attn_out, attn_post, attn_comb, ffn_norm_weight, hc_mult, hc_sinkhorn_iters, hc_eps,
+                 hc_norm_eps, ffn_norm_eps, return_fp32, y, post, comb, pre, new_residual, fp32_output);
+    return {y, return_fp32 ? c10::optional<at::Tensor>(fp32_output) : c10::nullopt, new_residual, post, comb, pre};
+}
+
 void inplace_partial_rotary_mul_npu(at::Tensor & x, const at::Tensor &r1, const at::Tensor &r2, c10::string_view rotary_mode, at::IntArrayRef partial_slice, bool negate_sin)
 {
     constexpr int BSND_DIM_NUM = 4;
@@ -3574,6 +3612,14 @@ TORCH_LIBRARY_EXPAND(CONCAT(_C, _ascend), ops)
         ") -> (Tensor y, Tensor post, Tensor comb_frag, Tensor pre)"
         );
     ops.impl("npu_hc_pre_v3", torch::kPrivateUse1, &vllm_ascend::npu_hc_pre_v3_npu);
+
+    ops.def(
+        "npu_hc_post_pre_norm(Tensor attn_out, Tensor residual, Tensor attn_post, Tensor attn_comb, Tensor attn_pre, "
+        "Tensor ffn_hc_fn, Tensor ffn_hc_scale, Tensor ffn_hc_base, Tensor ffn_norm_weight, *, "
+        "int hc_sinkhorn_iters=20, float hc_eps=1e-6, float hc_norm_eps=1e-6, float ffn_norm_eps=1e-6, "
+        "bool return_fp32=True) "
+        "-> (Tensor y, Tensor? y_fp32, Tensor new_residual, Tensor ffn_post, Tensor ffn_comb, Tensor ffn_pre)");
+    ops.impl("npu_hc_post_pre_norm", torch::kPrivateUse1, &vllm_ascend::npu_hc_post_pre_norm_npu);
 
     ops.def(
         "inplace_partial_rotary_mul("

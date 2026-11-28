@@ -1438,6 +1438,10 @@ class TestSubconfigPydanticTypeValidation(TestBase):
         with self.assertRaises(ValueError):
             AscendCompilationConfig(unknown_key=1)
 
+    def test_mhc_fusion_is_opt_in(self):
+        self.assertFalse(AscendCompilationConfig().fuse_mhc)
+        self.assertTrue(AscendCompilationConfig(fuse_mhc=True).fuse_mhc)
+
     def test_short_request_first_config_unknown_key_forbidden(self):
         # Was hand-written unknown-key check; now extra="forbid".
         with self.assertRaises(ValueError):

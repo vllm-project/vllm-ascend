@@ -5,6 +5,7 @@
 #include <torch_npu/csrc/framework/OpCommand.h>
 #include <torch_npu/csrc/npu/Module.h>
 #include "acl/acl_base_rt.h"
+#include "moe/hc_post_pre_norm/op_kernel/hc_post_pre_norm_config.h"
 #include "utils.h"
 #include "attention/qsa_union_inputs/qsa_union_inputs_torch_adpt.h"
 
@@ -1154,6 +1155,23 @@ std::tuple<at::Tensor, at::Tensor, at::Tensor, at::Tensor> npu_hc_pre_v3_meta(
     return std::tuple<at::Tensor, at::Tensor, at::Tensor, at::Tensor>(y, post, comb_frag, pre);
 }
 
+std::tuple<at::Tensor, c10::optional<at::Tensor>, at::Tensor, at::Tensor, at::Tensor, at::Tensor> npu_hc_post_pre_norm_meta(
+    const at::Tensor& attn_out, const at::Tensor& residual, const at::Tensor& attn_post,
+    const at::Tensor& attn_comb, const at::Tensor& attn_pre, const at::Tensor& ffn_hc_fn,
+    const at::Tensor& ffn_hc_scale, const at::Tensor& ffn_hc_base, const at::Tensor& ffn_norm_weight,
+    int64_t hc_sinkhorn_iters, double hc_eps, double hc_norm_eps, double ffn_norm_eps, bool return_fp32)
+{
+    constexpr auto hc_mult = HcPostPreNorm::kHcMult;
+    auto [y, post, comb] = construct_hc_pre_output_tensor(residual, hc_mult);
+    auto pre = construct_hc_pre_pre_output_tensor(residual, hc_mult);
+    auto new_residual = at::empty_symint(residual.sym_sizes(), residual.options());
+    c10::optional<at::Tensor> y_fp32;
+    if (return_fp32) {
+        y_fp32 = at::empty_symint(y.sym_sizes(), y.options().dtype(at::kFloat));
+    }
+    return {y, y_fp32, new_residual, post, comb, pre};
+}
+
 void inplace_partial_rotary_mul_meta(
     at::Tensor &x,
     const at::Tensor &r1,
@@ -1906,6 +1924,7 @@ TORCH_LIBRARY_IMPL_EXPAND(CONCAT(_C, _ascend), Meta, ops) {
     ops.impl("npu_hc_post", &vllm_ascend::meta::npu_hc_post_meta);
     ops.impl("npu_hc_pre_v2", &vllm_ascend::meta::npu_hc_pre_meta);
     ops.impl("npu_hc_pre_v3", &vllm_ascend::meta::npu_hc_pre_v3_meta);
+    ops.impl("npu_hc_post_pre_norm", &vllm_ascend::meta::npu_hc_post_pre_norm_meta);
     ops.impl("inplace_partial_rotary_mul", &vllm_ascend::meta::inplace_partial_rotary_mul_meta);
     ops.impl("npu_rms_norm_dynamic_quant", &vllm_ascend::meta::npu_rms_norm_dynamic_quant_meta);
     ops.impl("kv_compress_epilog_v2", &vllm_ascend::meta::kv_compress_epilog_v2_meta);

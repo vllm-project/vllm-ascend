@@ -34,11 +34,13 @@ from vllm.model_executor.models.qwen3_dspark import DSparkConfidenceHead, DSpark
 from vllm.model_executor.models.utils import PPMissingLayer, maybe_prefix, process_eagle_weight
 from vllm.platforms import current_platform
 
+from vllm_ascend.ascend_config import get_ascend_config
 from vllm_ascend.attention.context_parallel.dsa_v41_cp import get_v41_cp_classes
 from vllm_ascend.attention.dsa_v1 import AscendDSAImpl, OProjBufferPool
 from vllm_ascend.attention.dsa_v41 import DeepseekV41CacheBackend, DeepseekV41CacheLayer, scatter_cache_sk
 from vllm_ascend.core.kv_cache_interface import AscendSlidingWindowMLASpec
 from vllm_ascend.device.device_op import DeviceOperator
+from vllm_ascend.device.hardware_profile import HardwareCapability, get_current_hardware_profile
 from vllm_ascend.models.common.ops.sequence_parallel import (
     sp_all_gather,
     sp_padding_mask,
@@ -53,7 +55,7 @@ from vllm_ascend.models.deepseek_v41.model import (
     DeepseekV41SWAAttention,
 )
 from vllm_ascend.ops.rope_dsv4 import get_cos_and_sin_dsa
-from vllm_ascend.utils import normalize_deepseek_v41_config
+from vllm_ascend.utils import enable_custom_op, normalize_deepseek_v41_config
 
 from .model import DeepseekV41MixtureOfExperts, DeepseekV41MoE
 
@@ -151,6 +153,7 @@ class DeepseekV41DSparkDecoderLayer(DeepseekV41DecoderLayer):
     """V4.1 delayed-mHC block with a draft-only SWA attention backend."""
 
     attention_cls = DeepseekV41DSparkAttention
+    _supports_draft_hc_post_pre_norm = True
 
 
 class DeepseekV41DSparkModel(torch.nn.Module):
@@ -164,6 +167,12 @@ class DeepseekV41DSparkModel(torch.nn.Module):
         self.config = config
         self.hc_mult = config.hc_mult
         self.hidden_size = config.hidden_size
+        self.use_cross_layer_hc_post_pre_norm = (
+            get_ascend_config().ascend_compilation_config.fuse_mhc
+            and get_current_hardware_profile().supports(HardwareCapability.HC_POST_PRE_NORM)
+            and enable_custom_op()
+            and hasattr(torch.ops._C_ascend, "npu_hc_post_pre_norm")
+        )
         self.block_size = int(config.dspark_block_size)
         self.target_layer_ids = list(config.dspark_target_layer_ids)
         self.num_dspark_layers = _get_dspark_num_mtp_layers(config)
@@ -298,15 +307,16 @@ class DeepseekV41DSparkModel(torch.nn.Module):
         pre_mix = hidden_states.new_zeros(hidden_states.shape[0], self.hc_mult, dtype=torch.float32)
         pre_mix[:, 0] = 1.0
         last_layer = None
-        for layer in self.layers.values():
+        cross_layer_fusion = getattr(self, "use_cross_layer_hc_post_pre_norm", False)
+        last_layer_index = len(self.layers) - 1
+        for layer_index, layer in enumerate(self.layers.values()):
             last_layer = layer
-            hidden_states, pre_mix = layer(
-                positions,
-                hidden_states,
-                pre_mix,
-                llama_4_scaling=None,
-                input_ids=input_ids,
-            )
+            if cross_layer_fusion and layer_index < last_layer_index:
+                hidden_states, pre_mix = layer(
+                    positions, hidden_states, pre_mix, input_ids=input_ids, defer_ffn_post=True
+                )
+            else:
+                hidden_states, pre_mix = layer(positions, hidden_states, pre_mix, input_ids=input_ids)
         assert last_layer is not None, "Hyper-connection collapse requires at least one decoder layer"
         hidden_states = last_layer.hc_collapse(hidden_states, pre_mix)
         if self.use_sequence_parallel_moe:
