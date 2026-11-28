@@ -74,7 +74,7 @@ from .attention_ops import (
     uses_decode_fusions,
 )
 from .cache_config import PACKED_CACHE_FORMAT
-from .config import uses_prefill_ops
+from .config import uses_eager_prefill_fusions, uses_prefill_ops
 
 logger = init_logger_ascend(__name__)
 
@@ -505,13 +505,7 @@ class AscendHYV4FlashAttention(DecodeAttentionMixin, EagerAttentionMixin, nn.Mod
         self.fuse_c8_write = use_a5_c8
         self.fuse_c8_qk = use_a5_c8 and not reuse_target and (self.latent_dim, self.rope_dim) == (512, 64)
         self.fuse_c8_prefill_window = self.use_cann_prefill and self.fuse_c8_qk
-        self.batch_prefill_window = (
-            self.use_cann_prefill
-            and vllm_config.model_config.enforce_eager
-            and os.getenv("HY4_PREFILL_CAUSAL_PREFIX") == "1"
-            and os.getenv("HY4_PREFILL_BATCH_WINDOW") == "1"
-            and is_950()
-        )
+        self.fuse_prefill_causal_prefix = self.use_cann_prefill and uses_eager_prefill_fusions(vllm_config)
         self.fuse_indexpool_select = use_a5_c8 and not reuse_target
         self.share_swa_c8_reads = use_a5_c8
         self.fuse_swa_q_norm = (

@@ -1,7 +1,6 @@
 # SPDX-License-Identifier: Apache-2.0
 # SPDX-FileCopyrightText: Copyright contributors to the vLLM project
 
-import os
 from copy import copy
 
 import torch
@@ -16,7 +15,6 @@ from vllm.sequence import IntermediateTensors
 from vllm_ascend.ascend_config import get_ascend_config
 from vllm_ascend.device.device_config import get_ascend_device_type, is_950
 from vllm_ascend.device.hardware import AscendDeviceType
-from vllm_ascend.logger import init_logger_ascend
 from vllm_ascend.models.common.ops.sequence_parallel import sp_all_gather, sp_shard
 
 from .attention import AscendHYV4FlashAttention, FlashAttentionBackend
@@ -25,8 +23,6 @@ from .engram import FlashEngram, FlashNgramHashState
 from .engram_ops import PrefetchedEngramRows
 from .ihc import FlashHCHeadLayer, FlashHCLayer
 from .moe import AscendFlashMoE
-
-logger = init_logger_ascend(__name__)
 
 FLASHCOMM_950_PEER_BYTES = 768 * 1024
 
@@ -244,7 +240,6 @@ class AscendHYV4FlashModel(HYV4FlashModel):
         prepared_engram=None,
         *,
         defer_hc_head=False,
-        check_hc_head_rows=None,
         first_ihc_vocab=False,
     ):
         if first_ihc_vocab and input_ids is not None:
@@ -288,20 +283,7 @@ class AscendHYV4FlashModel(HYV4FlashModel):
                 lookback_token_ids,
                 prepared_engram,
             )
-        hidden = self._forward_prefill_hidden(input_ids, positions, inputs_embeds, lookback_token_ids, prepared_engram)
-        if check_hc_head_rows is not None:
-            reference = self.finish_hidden_states(hidden)[check_hc_head_rows]
-            selected = self.finish_hidden_states(hidden[check_hc_head_rows])
-            different = torch.count_nonzero(reference != selected).item()
-            max_abs = (reference.float() - selected.float()).abs().max().item()
-            logger.info(
-                "HY4 HC_HEAD_CHECK tokens=%d rows=%d different=%d max_abs=%g",
-                hidden.shape[0],
-                selected.shape[0],
-                different,
-                max_abs,
-            )
-        return hidden
+        return self._forward_prefill_hidden(input_ids, positions, inputs_embeds, lookback_token_ids, prepared_engram)
 
     def finish_hidden_states(self, hidden):
         return self.norm(self.hc_head(hidden))
@@ -424,12 +406,7 @@ class AscendHYV4FlashForCausalLM(HYV4FlashForCausalLM):
         self._pack_prefill_engram_weights = uses_prefill_ops(vllm_config)
         transfer = vllm_config.kv_transfer_config
         self.logits_processor.use_npu_fp32_head = (
-            is_950()
-            and transfer is not None
-            and (
-                transfer.kv_role == "kv_consumer"
-                or (transfer.kv_role == "kv_producer" and os.getenv("HY4_PREFILL_FP32_HEAD") == "1")
-            )
+            is_950() and transfer is not None and transfer.kv_role == "kv_consumer"
         )
 
     def forward(
@@ -442,7 +419,6 @@ class AscendHYV4FlashForCausalLM(HYV4FlashForCausalLM):
         prepared_engram=None,
         *,
         defer_hc_head=False,
-        check_hc_head_rows=None,
         first_ihc_vocab=False,
     ):
         return self.model(
@@ -453,7 +429,6 @@ class AscendHYV4FlashForCausalLM(HYV4FlashForCausalLM):
             lookback_token_ids,
             prepared_engram,
             defer_hc_head=defer_hc_head,
-            check_hc_head_rows=check_hc_head_rows,
             first_ihc_vocab=first_ihc_vocab,
         )
 

@@ -1,5 +1,4 @@
 import math
-import os
 from contextlib import contextmanager
 from contextvars import ContextVar
 from enum import Enum
@@ -323,6 +322,8 @@ def get_mc2_tokens_capacity():
 
 
 def set_mc2_mask(vllm_config, device):
+    from vllm_ascend.models.hy_v4_flash.config import uses_eager_prefill_fusions
+
     global _reserved_mc2_mask, _mrv2_prefill_mc2_mask
     if _reserved_mc2_mask is not None:
         return
@@ -330,8 +331,7 @@ def set_mc2_mask(vllm_config, device):
         _reserved_mc2_mask = torch.zeros(
             vllm_config.scheduler_config.max_num_batched_tokens, dtype=torch.bool, device=device
         )
-        transfer = vllm_config.kv_transfer_config
-        if os.getenv("HY4_PREFILL_FUSED_ROPE") == "1" and transfer is not None and transfer.kv_role == "kv_producer":
+        if uses_eager_prefill_fusions(vllm_config):
             capacity = _reserved_mc2_mask.numel()
             _mrv2_prefill_mc2_mask = torch.arange(2 * capacity, device=device, dtype=torch.int32) < capacity
     else:

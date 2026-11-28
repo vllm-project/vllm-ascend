@@ -11,6 +11,7 @@ import torch
 from vllm_ascend.hisparse.c8 import pack_c8_components
 from vllm_ascend.models.hy_v4_flash import attention
 from vllm_ascend.models.hy_v4_flash import c8_attention as c8_attention
+from vllm_ascend.models.hy_v4_flash import config as hy4_config
 
 
 @pytest.mark.parametrize("other_layer_first", [False, True])
@@ -79,6 +80,7 @@ def test_prefill_history_reuse_preserves_candidates_and_outputs(
     model.use_pd_decode = False
     model.bulk_c8_decode_reads = False
     model.fuse_c8_prefill_window = False
+    model.fuse_prefill_causal_prefix = False
     model.latent_dim = latent
     model.kv_width = latent + rope
     model.kv_storage_width = 656
@@ -167,6 +169,31 @@ def test_hy4_operator_role(role, prefill):
     transfer = None if role is None else SimpleNamespace(kv_role=role)
     config = SimpleNamespace(kv_transfer_config=transfer)
     assert attention.uses_prefill_ops(config) is prefill
+
+
+@pytest.mark.parametrize(
+    ("role", "model_type", "eager", "speculative", "has_triton", "is_950", "expected"),
+    [
+        ("kv_producer", "hy_v4_flash", True, False, True, True, True),
+        ("kv_consumer", "hy_v4_flash", True, False, True, True, False),
+        ("kv_producer", "hy_v4", True, False, True, True, False),
+        ("kv_producer", "hy_v4_flash", False, False, True, True, False),
+        ("kv_producer", "hy_v4_flash", True, True, True, True, False),
+        ("kv_producer", "hy_v4_flash", True, False, False, True, False),
+        ("kv_producer", "hy_v4_flash", True, False, True, False, False),
+    ],
+)
+def test_hy4_eager_prefill_fusions_follow_runtime_conditions(
+    monkeypatch, role, model_type, eager, speculative, has_triton, is_950, expected
+):
+    monkeypatch.setattr(hy4_config, "HAS_TRITON", has_triton)
+    monkeypatch.setattr(hy4_config, "is_950", lambda: is_950)
+    config = SimpleNamespace(
+        kv_transfer_config=SimpleNamespace(kv_role=role),
+        model_config=SimpleNamespace(hf_text_config=SimpleNamespace(model_type=model_type), enforce_eager=eager),
+        speculative_config=object() if speculative else None,
+    )
+    assert hy4_config.uses_eager_prefill_fusions(config) is expected
 
 
 @pytest.mark.parametrize("heads", [16, 32])

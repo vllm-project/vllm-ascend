@@ -58,7 +58,6 @@ def _hy4_prefill_argmax_finish(
     num_rejected,
     PARTS: tl.constexpr,
     BLOCK: tl.constexpr,
-    FUSE_COUNTS: tl.constexpr,
 ):
     row = tl.program_id(0)
     col = tl.arange(0, BLOCK)
@@ -66,23 +65,22 @@ def _hy4_prefill_argmax_finish(
     part = tl.argmax(value, axis=0)
     token = tl.load(partial_indices + row * PARTS + part)
     tl.store(sampled + row, token.to(tl.int64))
-    if FUSE_COUNTS:
-        req = tl.load(mapping + row)
-        seq_len = tl.load(seq_lens + row)
-        prefill_len = tl.load(prefill_lens + req)
-        tl.store(num_sampled + row, (seq_len >= prefill_len).to(tl.int32))
-        tl.store(num_rejected + row, 0)
+    req = tl.load(mapping + row)
+    seq_len = tl.load(seq_lens + row)
+    prefill_len = tl.load(prefill_lens + req)
+    tl.store(num_sampled + row, (seq_len >= prefill_len).to(tl.int32))
+    tl.store(num_rejected + row, 0)
 
 
-def sample_prefill(logits, batch, bias, prefill_lens, mask_stop, fuse_counts):
+def sample_prefill(logits, batch, bias, prefill_lens, mask_stop):
     rows, vocab = logits.shape
     block = 8192
     parts = triton.cdiv(vocab, block)
     values = torch.empty((rows, parts), dtype=torch.float32, device=logits.device)
     indices = torch.empty((rows, parts), dtype=torch.int32, device=logits.device)
     sampled = torch.empty(rows, dtype=torch.int64, device=logits.device)
-    num_sampled = torch.empty_like(batch.seq_lens[:rows]) if fuse_counts else None
-    num_rejected = torch.empty_like(num_sampled) if fuse_counts else None
+    num_sampled = torch.empty_like(batch.seq_lens[:rows])
+    num_rejected = torch.empty_like(num_sampled)
     _hy4_prefill_argmax_parts[(rows, parts)](
         logits,
         batch.idx_mapping,
@@ -111,7 +109,6 @@ def sample_prefill(logits, batch, bias, prefill_lens, mask_stop, fuse_counts):
         num_rejected,
         parts,
         triton.next_power_of_2(parts),
-        fuse_counts,
     )
     return sampled, num_sampled, num_rejected
 
@@ -119,9 +116,8 @@ def sample_prefill(logits, batch, bias, prefill_lens, mask_stop, fuse_counts):
 class PrefillSampler:
     """Keep upstream sampler state and fuse eligible greedy Prefill batches."""
 
-    def __init__(self, sampler, *, fuse_counts):
+    def __init__(self, sampler):
         self._sampler = sampler
-        self._fuse_counts = fuse_counts
 
     def __getattr__(self, name):
         return getattr(self._sampler, name)
@@ -139,7 +135,6 @@ class PrefillSampler:
             bias,
             self.req_states.prefill_len.gpu,
             bool(np.any(bias.num_stop_token_ids.np[reqs])),
-            self._fuse_counts,
         )
         logprobs = None
         if dims is not None:

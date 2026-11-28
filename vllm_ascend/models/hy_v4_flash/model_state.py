@@ -2,8 +2,6 @@
 # SPDX-FileCopyrightText: Copyright contributors to the vLLM project
 """HY4 Flash model state."""
 
-import os
-
 import torch
 from vllm.config import CUDAGraphMode
 from vllm.logger import logger as graph_logger
@@ -19,7 +17,7 @@ from vllm_ascend.worker.v2.aclgraph_utils import ModelAclGraphManager
 from vllm_ascend.worker.v2.model_states.default import AscendModelState
 
 from .attention_ops import uses_decode_fusions
-from .config import uses_prefill_ops
+from .config import uses_eager_prefill_fusions, uses_prefill_ops
 
 
 @triton.jit
@@ -207,11 +205,13 @@ class FlashModelState(AscendModelState):
             and vllm_config.model_config.enforce_eager
             and vllm_config.parallel_config.prefill_context_parallel_size == 1
         )
+        self._use_prefill_fusions = (
+            self._reuse_eager_embeddings and device.type == "npu" and uses_eager_prefill_fusions(vllm_config)
+        )
         language_model = getattr(model, "language_model", model)
         self._flash_model = language_model.model
-        self._logits_processor = language_model.logits_processor
         self._prefill_vocab_embedding = None
-        if self._reuse_eager_embeddings and os.getenv("HY4_PREFILL_FUSED_VOCAB") == "1":
+        if self._use_prefill_fusions and self._flash_model.start_layer == 0:
             embedding = self._flash_model.embed_tokens
             if (
                 self.prompt_embeds_state is None
@@ -222,21 +222,14 @@ class FlashModelState(AscendModelState):
                 self._prefill_vocab_embedding = embedding
             first_layer = self._flash_model.layers[0]
             first_engram = 1 in (self._flash_model.config.engram_layer_ids or ())
-            if (
-                self._prefill_vocab_embedding is not None
-                and os.getenv("HY4_PREFILL_FIRST_IHC_BROADCAST") == "1"
-                and not first_layer.sequence_parallel
-                and not first_engram
-            ):
+            if self._prefill_vocab_embedding is not None and not first_layer.sequence_parallel and not first_engram:
                 first_layer.hc_attn_layer.configure_prefill_broadcast(
                     embedding,
                     vllm_config.scheduler_config.max_num_batched_tokens,
                 )
         self._defer_hc_head = (
-            os.getenv("HY4_PREFILL_SAMPLE_ONLY_HEAD") == "1"
-            and self._reuse_eager_embeddings
+            self._use_prefill_fusions
             and vllm_config.compilation_config.cudagraph_mode == CUDAGraphMode.NONE
-            and vllm_config.speculative_config is None
             and vllm_config.lora_config is None
             and vllm_config.parallel_config.pipeline_parallel_size == 1
             and vllm_config.parallel_config.data_parallel_size == 1
@@ -245,9 +238,6 @@ class FlashModelState(AscendModelState):
             and not lmhead_tp_enable()
             and self._flash_model.engram_hash is not None
         )
-        checks = int(os.getenv("HY4_PREFILL_HEAD_CHECK_STEPS", "0")) if self._defer_hc_head else 0
-        self._hc_head_checks = checks
-        self._lm_head_checks = checks
         self._graph_hashes = None
         if model.token_lookback_depth and vllm_config.compilation_config.cudagraph_mode.has_full_cudagraphs():
             engram = self._flash_model.engram_hash
@@ -299,50 +289,21 @@ class FlashModelState(AscendModelState):
             and not any(req_id in worker.token_id_scores for req_id in input_batch.req_ids)
         ):
             inputs["defer_hc_head"] = True
-            if self._hc_head_checks:
-                inputs["check_hc_head_rows"] = input_batch.logits_indices
-                self._hc_head_checks -= 1
         return inputs
 
     def compute_sample_logits(self, hidden_states):
         if self._defer_hc_head and hidden_states.ndim == 3:
             hidden_states = self._flash_model.finish_hidden_states(hidden_states)
-        logits = super().compute_sample_logits(hidden_states)
-        processor = self._logits_processor
-        if self._lm_head_checks and logits is not None and logits.numel() > 0 and processor.use_npu_fp32_head:
-            self._lm_head_checks -= 1
-            processor.use_npu_fp32_head = False
-            try:
-                reference = super().compute_sample_logits(hidden_states)
-            finally:
-                processor.use_npu_fp32_head = True
-            different = torch.count_nonzero(logits != reference).item()
-            delta = (logits.float() - reference.float()).abs()
-            max_abs = delta.max().item()
-            close = torch.isclose(logits, reference, rtol=1e-5, atol=1e-5).all().item()
-            same_top1 = torch.equal(logits.argmax(dim=-1), reference.argmax(dim=-1))
-            logger.info(
-                "HY4 LM_HEAD_CHECK rows=%d different=%d max_abs=%g close=%s same_top1=%s",
-                hidden_states.shape[0],
-                different,
-                max_abs,
-                close,
-                same_top1,
-            )
-        return logits
+        return super().compute_sample_logits(hidden_states)
 
     def custom_sampler(self, sampler):
-        if (
-            self._reuse_eager_embeddings
-            and self.vllm_config.speculative_config is None
-            and os.getenv("HY4_PREFILL_FAST_GREEDY") == "1"
-        ):
+        if self._use_prefill_fusions:
             from vllm.v1.worker.gpu.sample.sampler import Sampler
 
             if type(sampler) is Sampler:
                 from vllm_ascend.worker.v2.hy4_prefill_greedy import PrefillSampler
 
-                return PrefillSampler(sampler, fuse_counts=os.getenv("HY4_PREFILL_FUSED_COUNTS") == "1"), None
+                return PrefillSampler(sampler), None
         return super().custom_sampler(sampler)
 
     def prepare_attn(self, input_batch, cudagraph_mode, *args, **kwargs):

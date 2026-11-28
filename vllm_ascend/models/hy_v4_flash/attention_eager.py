@@ -2,7 +2,7 @@
 # SPDX-FileCopyrightText: Copyright contributors to the vLLM project
 """Eager Prefill and Decode request execution."""
 
-import os
+from functools import partial
 
 import torch
 from vllm.models.hy_v4_flash.reference import (
@@ -12,7 +12,7 @@ from vllm.models.hy_v4_flash.reference import (
 )
 from vllm.triton_utils import HAS_TRITON
 
-from vllm_ascend.device.device_config import get_ascend_device_type, is_950
+from vllm_ascend.device.device_config import get_ascend_device_type
 from vllm_ascend.device.hardware import AscendDeviceType
 from vllm_ascend.hisparse.c8 import C8_ROW_BYTES
 from vllm_ascend.logger import init_logger_ascend
@@ -165,7 +165,7 @@ class EagerAttentionMixin:
                 and query.dtype == torch.bfloat16
                 and query.is_contiguous()
                 and cache.dtype == torch.uint8
-                and self.batch_prefill_window
+                and self.fuse_prefill_causal_prefix
             )
             fuse_sparse_prefill = (
                 is_prefill
@@ -282,11 +282,7 @@ class EagerAttentionMixin:
                 processed_until = loop_stop
             chunk = 1 if verify else QUERY_CHUNK
             early_fusion = (
-                os.getenv("HY4_PREFILL_CAUSAL_PREFIX") == "1"
-                and is_prefill
-                and snapshot is None
-                and query.device.type == "npu"
-                and is_950()
+                self.fuse_prefill_causal_prefix and is_prefill and snapshot is None and query.device.type == "npu"
             )
             if early_fusion and use_cann_sparse:
                 from .prefill_ops.indexer import build_full_recall_rows
@@ -304,11 +300,8 @@ class EagerAttentionMixin:
                     selected = reuse_prefill_metadata(
                         query.device,
                         ("full_recall", first, full_recall_rows, history_budget, ratio, dtype),
-                        lambda first=first,
-                        full_recall_rows=full_recall_rows,
-                        history_budget=history_budget,
-                        ratio=ratio,
-                        dtype=dtype: build_full_recall_rows(
+                        partial(
+                            build_full_recall_rows,
                             first,
                             full_recall_rows,
                             history_budget,

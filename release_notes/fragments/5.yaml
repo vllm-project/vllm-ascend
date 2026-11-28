@@ -1,0 +1,6 @@
+pr: 5
+entries:
+  - category: config
+    text: >-
+      Eligible HY4 Flash Prefill services on Ascend 950 now enable the existing fusions automatically.
+      Standard startup scripts work without the experimental `HY4_PREFILL_*` environment variables.

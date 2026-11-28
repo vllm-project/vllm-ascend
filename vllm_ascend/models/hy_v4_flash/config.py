@@ -5,13 +5,28 @@
 from copy import copy, deepcopy
 
 from vllm.models.hy_v4_flash.configs import SPARSE_ATTENTION
+from vllm.triton_utils import HAS_TRITON
 from vllm.v1.worker.gpu.spec_decode.speculator_config import DraftModelSpeculatorConfig
+
+from vllm_ascend.device.device_config import is_950
 
 
 def uses_prefill_ops(vllm_config) -> bool:
     """Select the optimized operator family for dedicated Prefill instances."""
     transfer = vllm_config.kv_transfer_config
     return transfer is not None and transfer.kv_role == "kv_producer"
+
+
+def uses_eager_prefill_fusions(vllm_config) -> bool:
+    """Check the deployment conditions shared by HY4's Prefill fusions."""
+    return (
+        uses_prefill_ops(vllm_config)
+        and vllm_config.model_config.hf_text_config.model_type == "hy_v4_flash"
+        and vllm_config.model_config.enforce_eager
+        and vllm_config.speculative_config is None
+        and HAS_TRITON
+        and is_950()
+    )
 
 
 METHOD = "dfly"

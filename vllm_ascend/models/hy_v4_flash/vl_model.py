@@ -108,7 +108,6 @@ class HYV4FlashVLForConditionalGeneration(HYV4VLForConditionalGeneration):
         lookback_token_ids=None,
         prepared_engram=None,
         defer_hc_head=False,
-        check_hc_head_rows=None,
         first_ihc_vocab=False,
         **kwargs,
     ):
@@ -120,6 +119,5 @@ class HYV4FlashVLForConditionalGeneration(HYV4VLForConditionalGeneration):
             lookback_token_ids=lookback_token_ids,
             prepared_engram=prepared_engram,
             defer_hc_head=defer_hc_head,
-            check_hc_head_rows=check_hc_head_rows,
             first_ihc_vocab=first_ihc_vocab,
         )

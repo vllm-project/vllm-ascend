@@ -19,7 +19,6 @@
 
 import inspect
 import logging
-import os
 from collections.abc import Mapping
 from contextlib import AbstractContextManager, contextmanager, nullcontext
 from copy import deepcopy
@@ -277,29 +276,17 @@ class NPUModelRunner(GPUModelRunner):
             device=self.device,
         )
 
-        from vllm_ascend.models.hy_v4_flash.config import uses_prefill_ops
+        from vllm_ascend.models.hy_v4_flash.config import uses_eager_prefill_fusions
 
+        self._use_hy4_prefill_fusions = uses_eager_prefill_fusions(vllm_config)
         self._hy4_prefill_writes = None
-        if (
-            uses_prefill_ops(vllm_config)
-            and vllm_config.speculative_config is None
-            and self.model_config.enforce_eager
-            and self.model_config.hf_text_config.model_type == "hy_v4_flash"
-            and os.getenv("HY4_PREFILL_BATCH_WRITES") == "1"
-        ):
-            from .hy4_prefill_writes import PrefillWrites
-
-            self._hy4_prefill_writes = PrefillWrites(self.device)
-
         self._hy4_prefill_logit_offsets: torch.Tensor | None = None
         self._hy4_prefill_local_positions: torch.Tensor | None = None
         self._hy4_prefill_no_padding: torch.Tensor | None = None
-        if (
-            uses_prefill_ops(vllm_config)
-            and os.getenv("HY4_PREFILL_FUSED_ENTRY") == "1"
-            and self.model_config.enforce_eager
-            and self.model_config.hf_text_config.model_type == "hy_v4_flash"
-        ):
+        if self._use_hy4_prefill_fusions:
+            from .hy4_prefill_writes import PrefillWrites
+
+            self._hy4_prefill_writes = PrefillWrites(self.device)
             # These views are read-only. Keep the no-padding mask separate
             # from the input buffer that padded batches overwrite.
             self._hy4_prefill_logit_offsets = torch.arange(self.max_num_reqs + 1, device=self.device, dtype=torch.int32)
@@ -1074,11 +1061,8 @@ class NPUModelRunner(GPUModelRunner):
 
         prefill_progress = batch_req_state.num_computed_prefill_tokens_np
         prefill_lens = batch_req_state.prefill_len_np
-        from vllm_ascend.models.hy_v4_flash.config import uses_prefill_ops
-
         hy4_pure_prefill = (
-            os.getenv("HY4_PREFILL_SMALL_OPS") == "1"
-            and uses_prefill_ops(self.vllm_config)
+            self._use_hy4_prefill_fusions
             and type(self.model_state).__name__ == "FlashModelState"
             and self.compilation_config.cudagraph_mode == CUDAGraphMode.NONE
             and batch_desc.cg_mode == CUDAGraphMode.NONE
@@ -1086,7 +1070,6 @@ class NPUModelRunner(GPUModelRunner):
             and num_tokens == num_tokens_after_padding
             and not self.model_state.kvpp_is_dummy_run
             and not draft_tokens
-            and self.vllm_config.speculative_config is None
             and self.model_state.num_new_sampled_tokens_per_step == 1
             and np.all(prefill_progress < prefill_lens)
             and np.all(prefill_progress + num_scheduled_tokens_np <= prefill_lens)
@@ -1096,23 +1079,18 @@ class NPUModelRunner(GPUModelRunner):
         hy4_rope_positions = None
         hy4_vocab_indices = None
         padding_mask_prepared = False
-        if hy4_pure_prefill and os.getenv("HY4_PREFILL_FUSED_INPUTS") == "1":
+        if hy4_pure_prefill:
             from vllm_ascend.worker.v2.hy4_prefill_inputs import prepare_hy4_prefill_inputs
 
             lookback_depth = getattr(self.model_state.model, "token_lookback_depth", 0)
             fuse_cache_mapping = (
-                os.getenv("HY4_PREFILL_FUSED_ENTRY") == "1"
-                and self.pcp_manager is None
+                self.pcp_manager is None
                 and self.dcp_size == 1
                 and self.block_tables.num_kv_cache_groups > 0
                 and self.block_tables.cp_size == 1
                 and hasattr(self.block_tables, "kernel_block_sizes_tensor")
             )
-            rope = (
-                self.model_state.rope_state
-                if fuse_cache_mapping and os.getenv("HY4_PREFILL_FUSED_ROPE") == "1"
-                else None
-            )
+            rope = self.model_state.rope_state if fuse_cache_mapping else None
             vocab = self.model_state.prefill_vocab_parameters() if fuse_cache_mapping else None
             logits_indices, hy4_lookback, hy4_attention_inputs, hy4_vocab_indices = prepare_hy4_prefill_inputs(
                 self.input_buffers,
@@ -1173,7 +1151,7 @@ class NPUModelRunner(GPUModelRunner):
         # Main computes DCP lengths in the inherited execute_model after PCP
         # partitioning (vLLM #55212).
 
-        if not (hy4_pure_prefill and os.getenv("HY4_PREFILL_FUSED_INPUTS") == "1"):
+        if not hy4_pure_prefill:
             # Some input token ids are directly read from the last sampled tokens
             # and draft tokens. Also, get the logits indices to sample tokens from.
             logits_indices = combine_sampled_and_draft_tokens(
