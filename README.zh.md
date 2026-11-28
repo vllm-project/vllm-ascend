@@ -16,7 +16,7 @@ vLLM Ascend Plugin
 </div>
 
 <p align="center">
-| <a href="https://www.hiascend.com/"><b>关于昇腾</b></a> | <a href="https://docs.vllm.ai/projects/ascend/zh-cn/latest/"><b>官方文档</b></a> | <a href="https://docs.vllm.ai/projects/ascend/zh-cn/latest/user_guide/support_matrix/"><b>支持矩阵</b></a> | <a href="https://slack.vllm.ai"><b>#sig-ascend</b></a> | <a href="https://discuss.vllm.ai/c/hardware-support/vllm-ascend-support"><b>用户论坛</b></a> | <a href="https://tinyurl.com/vllm-ascend-meeting"><b>社区例会</b></a> |
+| <a href="https://www.hiascend.com/"><b>关于昇腾</b></a> | <a href="https://docs.vllm.ai/projects/ascend/zh-cn/latest/"><b>官方文档</b></a> | <a href="https://docs.vllm.ai/projects/ascend/zh-cn/latest/user_guide/support_matrix/"><b>不支持矩阵</b></a> | <a href="https://slack.vllm.ai"><b>#sig-ascend</b></a> | <a href="https://discuss.vllm.ai/c/hardware-support/vllm-ascend-support"><b>用户论坛</b></a> | <a href="https://tinyurl.com/vllm-ascend-meeting"><b>社区例会</b></a> |
 </p>
 
 <p align="center">
@@ -68,7 +68,7 @@ vLLM 昇腾插件 (`vllm-ascend`) 是一个由社区维护的让vLLM在 Huawei A
 
 ## 准备
 
-- 硬件：Atlas 800I A2 系列、Atlas 800I A3 系列、Atlas 300I Duo、Ascend 950PR&950DT 系列产品
+- Hardware: 阿特拉斯 800I A2 series, Atlas 800I A3 series, Atlas 300I Duo, 950PR&950DT Products
 - 操作系统：Linux
 - 软件：
     - Python == 3.12
