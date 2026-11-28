@@ -4,7 +4,7 @@ from types import SimpleNamespace
 
 import pytest
 import torch
-from vllm.config import KVTransferConfig
+from vllm.config import CUDAGraphMode, KVTransferConfig
 from vllm.model_executor.models import ModelRegistry
 from vllm.v1.core import kv_cache_planning as planning
 from vllm.v1.kv_cache_interface import (
@@ -860,17 +860,7 @@ def test_layout_allows_pp_stage_without_ple_owner() -> None:
     assert all(owner.role != PLE for owner in layout.owners)
 
 
-@pytest.mark.parametrize("manager_block_size", [256, 384, 768])
-def test_compressed_qsa_builder_and_cache_use_matching_pages(monkeypatch, manager_block_size):
-    import vllm.models.qwen4_exp.common.qsa_indexer as qsa_module  # type: ignore[import-not-found]
-    from vllm.v1.attention.backend import CommonAttentionMetadata
-    from vllm.v1.worker.utils import AttentionGroup
-
-    from vllm_ascend.models.qwen4_exp import qsa
-
-    QSARawKeyCache = qsa_module.QSARawKeyCache
-    QSAIndexerBackend = qsa_module.QSAIndexerBackend
-
+def _qsa_page_test_config(manager_block_size):
     groups = [
         KVCacheGroupSpec(
             group.layer_names,
@@ -880,41 +870,98 @@ def test_compressed_qsa_builder_and_cache_use_matching_pages(monkeypatch, manage
         )
         for group in _groups()
     ]
-    config = get_qwen4_exp_kv_cache_config(
-        SimpleNamespace(cache_config=SimpleNamespace(num_gpu_blocks_override=3, prefix_cache_retention_interval=None)),
-        groups,
-        10**9,
-    )
-    assert config is not None
     runtime_config = SimpleNamespace(
         additional_config={},
         kv_transfer_config=None,
-        cache_config=SimpleNamespace(cache_dtype="auto", block_size=manager_block_size),
+        cache_config=SimpleNamespace(
+            cache_dtype="auto",
+            block_size=manager_block_size,
+            num_gpu_blocks_override=3,
+            prefix_cache_retention_interval=None,
+        ),
         model_config=SimpleNamespace(
             hf_config=SimpleNamespace(),
             hf_text_config=SimpleNamespace(),
             max_model_len=4096,
+            get_num_attention_heads=lambda _: 1,
+            is_mm_prefix_lm=False,
+            rswa_window=None,
         ),
-        compilation_config=SimpleNamespace(static_forward_context={}),
+        attention_config=SimpleNamespace(),
+        kernel_config=SimpleNamespace(enable_jit_warmup=False),
+        compilation_config=SimpleNamespace(
+            static_forward_context={},
+            cudagraph_mode=CUDAGraphMode.NONE,
+            max_cudagraph_capture_size=None,
+        ),
         scheduler_config=SimpleNamespace(max_num_batched_tokens=16, max_num_seqs=2),
-        parallel_config=SimpleNamespace(decode_context_parallel_size=1),
+        parallel_config=SimpleNamespace(decode_context_parallel_size=1, cp_kv_cache_interleave_size=1),
         speculative_config=None,
         num_speculative_tokens=0,
     )
+    return groups, runtime_config
+
+
+def _qsa_page_boundary_metadata(manager_block_size, block_table):
+    from vllm.v1.attention.backend import CommonAttentionMetadata
+
+    locs = torch.tensor([0, 8], dtype=torch.int32)
+    common = CommonAttentionMetadata(
+        query_start_loc=locs,
+        query_start_loc_cpu=locs,
+        seq_lens=torch.tensor([manager_block_size + 4], dtype=torch.int32),
+        num_reqs=1,
+        num_actual_tokens=8,
+        max_query_len=8,
+        max_seq_len=manager_block_size + 4,
+        block_table_tensor=block_table,
+        slot_mapping=torch.zeros(8, dtype=torch.int64),
+        is_prefilling=torch.zeros(1, dtype=torch.bool),
+    )
+    # Avoid the device-only token-to-request mapping kernel.
+    common._token_to_req_indices_cache = torch.zeros(8, dtype=torch.int32)
+    return common
+
+
+def _assert_qsa_compressed_page_boundary(cache, metadata, manager_table, manager_block_size):
+    keys_per_page = cache.shape[1]
+    for token_row, manager_id in zip((3, 7), manager_table[0].tolist(), strict=True):
+        position = manager_block_size - 4 + token_row
+        page_column, row = divmod(position // 4, keys_per_page)
+        block = int(metadata.block_table[0, page_column])
+        expected_slot = manager_id * (manager_block_size // 4) + (position % manager_block_size) // 4
+        slot = int(metadata.slot_mapping[token_row])
+        assert slot == expected_slot
+        written = cache.flatten(0, 1)[slot]
+        written.fill_(token_row + 1)
+        selected = cache[block, row]
+        assert selected.data_ptr() == written.data_ptr()
+        torch.testing.assert_close(selected, torch.full_like(selected, token_row + 1))
+
+
+@pytest.mark.parametrize(
+    ("manager_block_size", "kernel_block_size"),
+    [(256, 128), (384, 128), (768, 128), (512, 512)],
+)
+def test_compressed_qsa_builder_and_cache_use_matching_pages(monkeypatch, manager_block_size, kernel_block_size):
+    from vllm.v1.worker.utils import AttentionGroup
+
+    from vllm_ascend.models.qwen4_exp import qsa
+    from vllm_ascend.worker.utils import prepare_ascend_kernel_block_sizes
+
+    groups, runtime_config = _qsa_page_test_config(manager_block_size)
+    config = get_qwen4_exp_kv_cache_config(runtime_config, groups, 10**9)
+    assert config is not None
     compressed_group = groups[2]
     spec = compressed_group.kv_cache_spec
-    backend = QSAIndexerBackend
     monkeypatch.setattr(attn_utils_v2, "get_current_vllm_config", lambda: runtime_config)
     monkeypatch.setattr(attn_utils_v2, "enable_sfa", lambda _: False)
     raw = attn_utils_v2._allocate_kv_cache(config, {}, torch.device("cpu"))
-    attn_groups = [AttentionGroup(backend, g.layer_names, g.kv_cache_spec, i) for i, g in enumerate(groups)]
-    caches = attn_utils_v2._reshape_kv_cache_v2(attn_groups, raw, "auto", [128] * len(groups), {}, config)
-    # Exercise the actual MRV2 factory, which rewrites the builder spec.
-    group = attn_groups[2]
-    group.create_metadata_builders(runtime_config, torch.device("cpu"), kernel_block_size=128)
-    builder = group.get_metadata_builder(0)
+    attn_groups = [
+        AttentionGroup(qsa.QSAIndexerBackend, g.layer_names, g.kv_cache_spec, i) for i, g in enumerate(groups)
+    ]
     name = compressed_group.layer_names[0]
-    layer = qsa.qsa_indexer.QSACompressedKeyCache(
+    layer = qsa.AscendQSACompressedKeyCache(
         head_size=spec.head_size,
         dtype=spec.dtype,
         prefix=name,
@@ -922,12 +969,36 @@ def test_compressed_qsa_builder_and_cache_use_matching_pages(monkeypatch, manage
         compress_ratio=4,
         vllm_config=runtime_config,
     )
+    group = attn_groups[2]
+    group.backend = layer.get_attn_backend()
+    pcp_layer = qsa.AscendPCPQSACompressedKeyCache(
+        head_size=spec.head_size,
+        dtype=spec.dtype,
+        prefix=f"{name}.pcp",
+        cache_config=runtime_config.cache_config,
+        compress_ratio=4,
+        vllm_config=runtime_config,
+    )
+    block_sizes = [128] * len(groups)
+    if kernel_block_size == 512:
+        assert group.backend is qsa.AscendQSACompressedKeyBackend
+        assert pcp_layer.get_attn_backend() is qsa.AscendPCPQSACompressedKeyBackend
+        attn_groups[0].backend = qsa.AscendQSABackend
+        block_sizes = prepare_ascend_kernel_block_sizes(config, [[g] for g in attn_groups])
+        assert block_sizes[2] == manager_block_size
+    else:
+        assert group.backend is qsa.QSAIndexerBackend
+        assert pcp_layer.get_attn_backend() is qsa.AscendPCPQSAIndexerBackend
+    # The MRV2 metadata factory refines the manager size using this backend.
+    group.create_metadata_builders(runtime_config, torch.device("cpu"), kernel_block_size=block_sizes[2])
+    builder = group.get_metadata_builder(0)
+    caches = attn_utils_v2._reshape_kv_cache_v2(attn_groups, raw, "auto", block_sizes, {}, config)
     from vllm_ascend.patch.worker.patch_bind_kv_cache import bind_kv_cache_to_layers
 
     bind_kv_cache_to_layers({name: caches[name]}, {name: layer})
     assert layer.kv_cache is caches[name]
     raw_name = groups[1].layer_names[0]
-    raw_layer = QSARawKeyCache(
+    raw_layer = qsa.QSARawKeyCache(
         head_size=20,
         dtype=spec.dtype,
         prefix=raw_name,
@@ -943,44 +1014,104 @@ def test_compressed_qsa_builder_and_cache_use_matching_pages(monkeypatch, manage
     positions = torch.tensor([2**40, 2**40 + 1, 2**40 + 2], dtype=torch.int64)
     raw_layer.rope_position_cache[2, 7, 0] = positions
     torch.testing.assert_close(raw_layer.rope_position_cache[2, 7, 0], positions)
-    keys_per_page = 128 // 4
-    factor = manager_block_size // 128
+    keys_per_page = kernel_block_size // 4
+    factor = manager_block_size // kernel_block_size
     assert layer.kv_cache.shape == (3 * factor, keys_per_page, 1, spec.head_size)
     assert builder.storage_block_size == keys_per_page
     assert layer.kv_cache.untyped_storage().data_ptr() == raw[name].untyped_storage().data_ptr()
     manager = torch.tensor([[2, 0]], dtype=torch.int32)
     virtual = (manager.unsqueeze(-1) * factor + torch.arange(factor)).flatten(1).to(torch.int32)
-    locs = torch.tensor([0, 8], dtype=torch.int32)
-    common = CommonAttentionMetadata(
-        query_start_loc=locs,
-        query_start_loc_cpu=locs,
-        seq_lens=torch.tensor([manager_block_size + 4], dtype=torch.int32),
-        num_reqs=1,
-        num_actual_tokens=8,
-        max_query_len=8,
-        max_seq_len=manager_block_size + 4,
-        block_table_tensor=virtual,
-        slot_mapping=torch.zeros(8, dtype=torch.int64),
-    )
-    # One real request owns all eight tokens; avoid the device-only mapping kernel.
-    common._token_to_req_indices_cache = torch.zeros(8, dtype=torch.int32)
+    torch.testing.assert_close(group.map_to_kernel_block_table(manager), virtual)
+    common = _qsa_page_boundary_metadata(manager_block_size, manager)
     monkeypatch.setattr(qsa.qsa_indexer, "build_qsa_metadata", qsa.qsa_indexer._build_qsa_metadata_torch)
-    metadata = builder.build(0, common)
+    metadata = group.build_metadata(common)
     torch.testing.assert_close(metadata.block_table, virtual)
-    # Cross the manager-block boundary: flattened storage addresses must agree
-    # for metadata writes and PA_BSND indexer reads in both runners.
-    for token_row in (3, 7):
-        position = manager_block_size - 4 + token_row
-        logical_group = position // 4
-        page_column, row = divmod(logical_group, keys_per_page)
-        block = int(metadata.block_table[0, page_column])
-        expected_slot = 2 * (manager_block_size // 4) + logical_group if token_row == 3 else 0
-        assert int(metadata.slot_mapping[token_row]) == expected_slot
-        selected = layer.kv_cache[block, row]
-        expected = layer.kv_cache.view(-1, 1, spec.head_size)[expected_slot]
-        assert selected.data_ptr() == expected.data_ptr()
-        selected.fill_(token_row + 1)
-        torch.testing.assert_close(expected, torch.full_like(expected, token_row + 1))
+    _assert_qsa_compressed_page_boundary(layer.kv_cache, metadata, manager, manager_block_size)
+
+
+@pytest.mark.parametrize(
+    ("manager_block_size", "expected_group_block_size", "expected_main_factor", "expected_compressed_factor"),
+    [
+        (1024, 1024, 8, 2),
+        (768, 128, 6, 6),
+    ],
+)
+def test_qsa_composite_retains_manager_block_for_distinct_kernel_sizes(
+    monkeypatch,
+    manager_block_size,
+    expected_group_block_size,
+    expected_main_factor,
+    expected_compressed_factor,
+):
+    from vllm.v1.worker.utils import AttentionGroup
+
+    from vllm_ascend.models.qwen4_exp import qsa
+    from vllm_ascend.worker.utils import prepare_ascend_kernel_block_sizes
+
+    groups, runtime_config = _qsa_page_test_config(manager_block_size)
+    specs = {name: group.kv_cache_spec for group in groups for name in group.layer_names}
+    owners = _prepare_qsa_composite_groups(specs)
+    assert owners is not None
+    main_names, compressed_names, _ = owners
+    merged_groups = _merge_qsa_composite_groups(groups, specs, *owners)
+    config = get_qwen4_exp_kv_cache_config(runtime_config, merged_groups, 10**9)
+    assert config is not None
+    assert set(config.kv_cache_groups[0].layer_names) == main_names | compressed_names
+
+    layers = {}
+    for name, spec in specs.items():
+        if name in compressed_names:
+            layers[name] = qsa.AscendQSACompressedKeyCache(
+                head_size=spec.head_size,
+                dtype=spec.dtype,
+                prefix=name,
+                cache_config=runtime_config.cache_config,
+                compress_ratio=4,
+                vllm_config=runtime_config,
+            )
+        else:
+            backend = qsa.AscendQSABackend if name in main_names else qsa.QSAIndexerBackend
+            layers[name] = SimpleNamespace(get_attn_backend=lambda backend=backend: backend)
+    monkeypatch.setattr(attn_utils_v2, "get_current_vllm_config", lambda: runtime_config)
+    monkeypatch.setattr(attn_utils_v2, "get_layers_from_vllm_config", lambda *_: layers)
+    monkeypatch.setattr(attn_utils_v2, "enable_sfa", lambda _: False)
+    monkeypatch.setattr(qsa.qsa_indexer, "build_qsa_metadata", qsa.qsa_indexer._build_qsa_metadata_torch)
+    device = torch.device("cpu")
+
+    attn_groups = attn_utils_v2._get_cache_attention_groups(config, layers, {})
+    grouped: list[list[AttentionGroup]] = [[] for _ in config.kv_cache_groups]
+    for group in attn_groups:
+        grouped[group.kv_cache_group_id].append(group)
+    main_group, compressed_group = grouped[0]
+    expected_compressed_backend = (
+        qsa.AscendQSACompressedKeyBackend if manager_block_size % 512 == 0 else qsa.QSAIndexerBackend
+    )
+    assert compressed_group.backend is expected_compressed_backend
+    block_sizes = prepare_ascend_kernel_block_sizes(config, grouped)
+    assert block_sizes[0] == expected_group_block_size
+    caches = attn_utils_v2.allocate_kv_cache_main(config, device, None, block_sizes)
+
+    for group in (main_group, compressed_group):
+        group.create_metadata_builders(runtime_config, device, kernel_block_size=block_sizes[0])
+    manager_table = torch.tensor([[1, 2]], dtype=torch.int32)
+    common = _qsa_page_boundary_metadata(manager_block_size, manager_table)
+    main_metadata = main_group.build_metadata(common)
+    compressed_metadata = compressed_group.build_metadata(common)
+    torch.testing.assert_close(
+        main_metadata.block_table,
+        torch.arange(expected_main_factor, 3 * expected_main_factor, dtype=torch.int32).unsqueeze(0),
+    )
+    torch.testing.assert_close(
+        compressed_metadata.block_table,
+        torch.arange(expected_compressed_factor, 3 * expected_compressed_factor, dtype=torch.int32).unsqueeze(0),
+    )
+
+    key, value = caches[main_group.layer_names[0]]
+    assert key.shape == value.shape == (config.num_blocks * expected_main_factor, 128, 1, 64)
+    compressed_cache = caches[compressed_group.layer_names[0]]
+    expected_keys_per_page = (manager_block_size // expected_compressed_factor) // 4
+    assert compressed_cache.shape == (config.num_blocks * expected_compressed_factor, expected_keys_per_page, 1, 32)
+    _assert_qsa_compressed_page_boundary(compressed_cache, compressed_metadata, manager_table, manager_block_size)
 
 
 def test_whole_page_sharing_uses_one_tp4_page_for_qsa_or_complete_gdn():

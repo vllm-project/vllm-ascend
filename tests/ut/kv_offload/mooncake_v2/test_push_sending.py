@@ -1298,3 +1298,103 @@ def test_layer_transfer_vector_addresses(mode):
                 lengths.append(size)
     write.assert_called_once_with("127.0.0.1:2", src, dst, lengths)
     assert all(type(value) is int for values in write.call_args.args[1:] for value in values)
+
+
+def test_qsa_compressed_push_request_accepts_prefill_only_pcp():
+    from vllm_ascend.models.qwen4_exp import qsa
+
+    manager_block_size = 1024
+    cache_config = SimpleNamespace(cache_dtype="auto", block_size=manager_block_size)
+    vllm_config = SimpleNamespace(
+        cache_config=cache_config,
+        compilation_config=SimpleNamespace(static_forward_context={}),
+    )
+    layer_name = "model.layers.0.self_attn.indexer.compressed_key_cache"
+    prefill_cache = qsa.AscendPCPQSACompressedKeyCache(
+        head_size=32,
+        dtype=torch.bfloat16,
+        prefix=f"{layer_name}.pcp",
+        cache_config=cache_config,
+        compress_ratio=4,
+        vllm_config=vllm_config,
+    )
+    decode_cache = qsa.AscendQSACompressedKeyCache(
+        head_size=32,
+        dtype=torch.bfloat16,
+        prefix=layer_name,
+        cache_config=cache_config,
+        compress_ratio=4,
+        vllm_config=vllm_config,
+    )
+    prefill_kernel_block = prefill_cache.get_attn_backend().get_supported_kernel_block_sizes()[0]
+    decode_kernel_block = decode_cache.get_attn_backend().get_supported_kernel_block_sizes()[0]
+    assert prefill_kernel_block == decode_kernel_block == qsa.QSA_INDEXER_KERNEL_BLOCK_SIZE
+
+    prefill_scale = manager_block_size // prefill_kernel_block
+    decode_scale = manager_block_size // decode_kernel_block
+
+    worker = push_worker.MooncakePushConnectorWorker.__new__(push_worker.MooncakePushConnectorWorker)
+    worker.pcp_size = 2
+    worker.dcp_size = 1
+    worker.dcp_rank = 0
+    worker._layer_indices = {layer_name: 0}
+    worker.layer_name_to_spec_index = {layer_name: 0}
+    worker.kv_cache_specs = [
+        Mock(spec=push_worker.FullAttentionSpec, sliding_window=None, is_circular=False, dcp_sharded=False)
+    ]
+    worker.transfer_metadata = replace(
+        descriptor(layer_name),
+        block_size=manager_block_size,
+        layer_block_sizes=[manager_block_size],
+        block_size_scales=[[prefill_scale]],
+        dcp_sharded=[False],
+    )
+    remote = remote_metadata(pcp_size=1, tp_size=1, heads=1, layer_name=layer_name)
+    pp = remote.metadata_by_pp_rank[0]
+    pp = replace(
+        pp,
+        block_size=manager_block_size,
+        layer_block_sizes=[manager_block_size],
+        block_size_scales=[[decode_scale]],
+        dcp_sharded=[False],
+    )
+    remote = replace(remote, metadata_by_pp_rank={0: pp})
+
+    event = Event()
+    meta = push_worker.PushSendReqMeta(
+        request_id="d-request",
+        local_block_ids=((1, 2),),
+        num_prompt_tokens=2048,
+        num_computed_tokens=0,
+        num_scheduled_tokens=2048,
+        remote_engine_id="d",
+        remote_host="127.0.0.1",
+        remote_port=9000,
+        remote_block_ids=((5, 6),),
+        remote_num_computed_tokens=512,
+        remote_num_external_tokens=1536,
+        remote_worker_addresses=((0, 0, 0, "tcp://127.0.0.1:9001"),),
+    )
+    state = push_worker.SendReqInfo(
+        local_request_id="p-request",
+        metadata=meta,
+        available_layers={layer_name: (2048, event)},
+    )
+    destination = push_worker.RemoteReqInfo(
+        transfer_params={
+            "consumer_rank": (0, 0, 0),
+            "block_ids": [[5, 6]],
+            "num_computed_tokens": 512,
+            "num_external_tokens": 1536,
+        },
+        metadata_future=SimpleNamespace(result=lambda: remote),
+    )
+
+    built = worker._build_layer_transfer_request("d-request", state, destination, layer_name)
+    assert built is not None
+    req, returned_event = built
+    assert returned_event is event
+    assert req.local_block_ids == (3, 4, 5)
+    assert req.remote_block_ids == (11, 12, 13)
+    assert req.start_token == 512
+    assert req.end_token == 2048

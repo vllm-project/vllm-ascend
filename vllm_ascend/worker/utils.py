@@ -1,5 +1,6 @@
 from collections.abc import Iterable, Iterator, Sequence
 from contextlib import contextmanager
+from dataclasses import replace
 
 import torch
 from vllm.utils.torch_utils import get_dtype_size
@@ -149,19 +150,38 @@ def prepare_ascend_kernel_block_sizes(
     Returns:
         List of kernel block sizes for each cache group.
     """
-    kernel_block_sizes = prepare_kernel_block_sizes(kv_cache_config, attn_groups)
-
-    # Upstream drops only encoder-only groups, so this index tracks its output.
-    index = 0
+    # A QSA cache group can contain backends with different exact page sizes.
+    # Pass its manager size through so each AttentionGroup can select its own.
+    per_attention_groups = {
+        group_id
+        for group_id, groups in enumerate(attn_groups)
+        if any(getattr(group.backend, "selects_kernel_blocks_per_attention_group", False) for group in groups)
+    }
+    shared_block_sizes = iter(
+        prepare_kernel_block_sizes(
+            replace(
+                kv_cache_config,
+                kv_cache_groups=[
+                    group
+                    for group_id, group in enumerate(kv_cache_config.kv_cache_groups)
+                    if group_id not in per_attention_groups
+                ],
+            ),
+            [groups for group_id, groups in enumerate(attn_groups) if group_id not in per_attention_groups],
+        )
+    )
+    kernel_block_sizes = []
     for group_id, group in enumerate(kv_cache_config.kv_cache_groups):
         spec = group.kv_cache_spec
         if isinstance(spec, UniformTypeKVCacheSpecs):
             spec = next(iter(spec.kv_cache_specs.values()))
         if isinstance(spec, EncoderOnlyAttentionSpec):
             continue
-        if index >= len(kernel_block_sizes):
-            break
         manager_block_size = group.kv_cache_spec.block_size
+        if group_id in per_attention_groups:
+            kernel_block_sizes.append(manager_block_size)
+            continue
+        kernel_block_size = next(shared_block_sizes)
         strides = _group_tensor_strides(kv_cache_config, group.layer_names)
         block_outermost_packed = any(0 < layer_stride < block_stride for layer_stride, block_stride in strides)
         aliases_layers = any(layer_stride == 0 and block_stride > 0 for layer_stride, block_stride in strides)
@@ -170,16 +190,16 @@ def prepare_ascend_kernel_block_sizes(
             and isinstance(spec, AttentionSpec)
             and aliases_layers
             and not block_outermost_packed
-            and kernel_block_sizes[index] == manager_block_size
+            and kernel_block_size == manager_block_size
             and group_id < len(attn_groups)
             and attn_groups[group_id]
         ):
-            kernel_block_sizes[index] = select_common_block_size(
+            kernel_block_size = select_common_block_size(
                 manager_block_size,
                 [attn_group.backend for attn_group in attn_groups[group_id]],
                 [attn_group.kv_cache_spec for attn_group in attn_groups[group_id]],
             )
-        index += 1
+        kernel_block_sizes.append(kernel_block_size)
     return kernel_block_sizes
 
 

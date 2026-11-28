@@ -1,0 +1,7 @@
+pr: 23022
+entries:
+  - category: performance
+    text: >-
+      Qwen3.8-Flash-Next uses larger indexer cache pages for long-context
+      decoding when the KV cache block size is a multiple of 512 tokens.
+    model: Qwen3.8-Flash-Next

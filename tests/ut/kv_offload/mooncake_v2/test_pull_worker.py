@@ -611,6 +611,76 @@ def test_transfer_bucket_accepts_sfa_indexer_virtual_block_sizes() -> None:
     assert request_ids == {(0, 0): {"request"}}
 
 
+def test_qsa_compressed_pull_mapping_accepts_prefill_only_pcp() -> None:
+    from vllm_ascend.models.qwen4_exp import qsa
+
+    manager_block_size = 1024
+    cache_config = SimpleNamespace(cache_dtype="auto", block_size=manager_block_size)
+    vllm_config = SimpleNamespace(
+        cache_config=cache_config,
+        compilation_config=SimpleNamespace(static_forward_context={}),
+    )
+    decode_cache = qsa.AscendQSACompressedKeyCache(
+        head_size=32,
+        dtype=torch.bfloat16,
+        prefix="model.layers.0.self_attn.indexer.compressed_key_cache",
+        cache_config=cache_config,
+        compress_ratio=4,
+        vllm_config=vllm_config,
+    )
+    prefill_cache = qsa.AscendPCPQSACompressedKeyCache(
+        head_size=32,
+        dtype=torch.bfloat16,
+        prefix="model.layers.0.self_attn.indexer.compressed_key_cache.pcp",
+        cache_config=cache_config,
+        compress_ratio=4,
+        vllm_config=vllm_config,
+    )
+    decode_kernel_block = decode_cache.get_attn_backend().get_supported_kernel_block_sizes()[0]
+    prefill_kernel_block = prefill_cache.get_attn_backend().get_supported_kernel_block_sizes()[0]
+    assert decode_kernel_block == prefill_kernel_block == qsa.QSA_INDEXER_KERNEL_BLOCK_SIZE
+
+    decode_scale = manager_block_size // decode_kernel_block
+    prefill_scale = manager_block_size // prefill_kernel_block
+    spec = make_full_spec(block_size=manager_block_size, num_kv_heads=1)
+    thread = make_thread(
+        pcp_size=1,
+        kv_cache_specs=[spec],
+        layer_block_sizes=[manager_block_size],
+        block_size_scales=[[decode_scale]],
+    )
+    remote = make_pp_metadata(
+        layer_block_sizes=[manager_block_size],
+        block_size_scales=[[prefill_scale]],
+    )
+    req = ReqMeta(
+        local_block_ids=([1, 2],),
+        local_num_prompt_tokens=2048,
+        num_external_tokens=2048,
+        num_computed_tokens=0,
+        remote_block_ids=([5, 6],),
+        remote_host="10.0.0.1",
+        remote_port=6000,
+        remote_engine_id="engine-p",
+        remote_request_id="request-p",
+        remote_num_prompt_tokens=2048,
+        local_full_block_ids=([1, 2],),
+    )
+
+    buckets, request_ids = thread._build_transfer_block_buckets(
+        remote_metadata=remote,
+        layer_pairs=[(0, 0)],
+        tp_rank_groups_by_layer={(0, 0): [[0, 1]]},
+        remote_pcp_size=2,
+        remote_dcp_size=1,
+        requests={"request": req},
+        transfer_block_ids_by_spec={},
+    )
+
+    assert buckets[(0, 0)][0][(0, 0)] == [("request", [2, 3, 4, 5], [10, 11, 12, 13])]
+    assert request_ids == {(0, 0): {"request"}}
+
+
 def test_unsharded_fa_uses_tp_transfer_with_global_dcp() -> None:
     spec = replace(make_full_spec(num_kv_heads=4), dcp_sharded=False)
     thread = make_thread(
