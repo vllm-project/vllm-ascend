@@ -49,7 +49,7 @@ defaults:
 
 concurrency:
   # This workflow only sees pull_request events, so one group per PR is
-  # enough: a new run (opened / synchronize / labeled) cancels the stale one.
+  # enough: a new run cancels the stale one.
   # The review-event retrigger lives in pr_refresh_ci_gate.yaml, which keeps
   # its own concurrency group so it never cancels the in-flight CI run here
   # (the review retrigger waits for that run to finish before re-running its
@@ -58,7 +58,47 @@ concurrency:
   cancel-in-progress: true
 
 jobs:
+  check-revert-waiver:
+    if: >-
+      github.event.pull_request.state == 'open' &&
+      contains(github.event.pull_request.title, '[Revert]') &&
+      contains(github.event.pull_request.labels.*.name, 'skip_ci')
+    runs-on: linux-amd64-cpu-1-hk
+    timeout-minutes: 5
+    permissions:
+      contents: read
+      pull-requests: read
+    outputs:
+      verified_base_sha: ${{ steps.files.outputs.verified_base_sha }}
+      verified_label_event: ${{ steps.files.outputs.verified_label_event }}
+    steps:
+      - name: Checkout the waiver checker from the base commit
+        uses: actions/checkout@v7
+        with:
+          ref: ${{ github.event.pull_request.base.sha }}
+          persist-credentials: false
+          sparse-checkout: .github/workflows/scripts
+          fetch-depth: 1
+
+      - name: Check authorization and changed paths
+        id: files
+        env:
+          GH_TOKEN: ${{ secrets.GITHUB_TOKEN }}
+        run: |
+          checker=.github/workflows/scripts/revert_waiver.py
+          if [ -f "$checker" ]; then
+            python3 "$checker"
+          else
+            echo '::notice::The base commit has no waiver checker. Running regular CI.'
+          fi
+
   pre-commit:
+    needs: check-revert-waiver
+    # An ineligible, skipped or failed waiver check must fall back to regular CI.
+    if: >-
+      ${{ !cancelled() && github.event.pull_request.state == 'open' &&
+          (needs.check-revert-waiver.result != 'success' ||
+           needs.check-revert-waiver.outputs.verified_label_event == '') }}
     runs-on: linux-amd64-cpu-8-hk
     container:
       image: quay.io/ascend-ci/vllm-ascend:lint
@@ -96,10 +136,10 @@ jobs:
 
           echo "Checking PR title: $PR_TITLE"
 
-          VALID_PREFIXES='\[(BugFix|Performance|Test|CI|Feature|Doc|Misc|Community|Refactor)\]'
+          VALID_PREFIXES='\[(BugFix|Performance|Test|CI|Feature|Doc|Misc|Community|Refactor|Revert)\]'
 
           if ! echo "$PR_TITLE" | grep -iqE "$VALID_PREFIXES"; then
-            echo "::error::PR title must contain one of the following prefixes: [BugFix], [Performance], [Test], [CI], [Feature], [Doc], [Misc], [Community], [Refactor]"
+            echo "::error::PR title must contain one of the following prefixes: [BugFix], [Performance], [Test], [CI], [Feature], [Doc], [Misc], [Community], [Refactor], [Revert]"
             echo "::error::Example: '[Feature] Add new optimization pass' or 'Add new feature [Feature]'"
             exit 1
           fi
@@ -351,8 +391,11 @@ jobs:
     # cpu-ut success, so cpu-ut must run whenever NPU tests would run.
     name: cpu-ut (vllm@${{ matrix.vllm }})
     needs: pre-commit
+    # The waiver check is skipped for ordinary PRs. Require pre-commit
+    # success without propagating that upstream skip.
     if: >-
       ${{
+        !cancelled() &&
         needs.pre-commit.result == 'success' &&
         (
           needs.pre-commit.outputs.src == 'true' ||
@@ -384,6 +427,7 @@ jobs:
     # each NPU entry point separately requires CPU UT to succeed.
     if: >-
       ${{
+        !cancelled() &&
         needs.pre-commit.result == 'success' &&
         contains(github.event.pull_request.labels.*.name, 'ready-precise')
       }}
@@ -866,7 +910,7 @@ jobs:
   # Summary gate job — use this single, stable name as the required status check
   # in GitHub branch protection rules instead of tracking individual matrix job names.
   ci-gate:
-    needs: [pre-commit, cpu-ut, select-tests, run-selected-tests, run-selected-tests-a5]
+    needs: [check-revert-waiver, pre-commit, cpu-ut, select-tests, run-selected-tests, run-selected-tests-a5]
     # The only producer of the required `ci-gate` check. Review events
     # re-evaluate the gate by re-running this job inside the original
     # pull_request run (see pr_refresh_ci_gate.yaml), so the required check
@@ -898,22 +942,18 @@ jobs:
       HEAD_SHA: ${{ github.event.pull_request.head.sha }}
     steps:
       - name: Checkout the base branch
-        # Only needed for the CODEOWNERS gate steps below. The base branch,
-        # never the merge ref: this checkout enforces the owner gate, so both
-        # the gate script and CODEOWNERS must come from a tree the PR cannot
-        # alter - otherwise a PR could weaken the gate script or list itself
-        # as an owner and approve its own changes. CODEOWNERS edits made by
-        # a PR take effect once it merges.
-        # Skipped on lint-failed runs on purpose: a lint failure forces a new
-        # push that re-runs everything anyway, and the gate reports
-        # pre-commit before the owner gate, so running the owner check there
-        # would only burn API calls it cannot influence.
-        if: ${{ needs.pre-commit.result == 'success' }}
+        id: base-checkout
+        # Ordinary CI reads the current CODEOWNERS rules from the base branch.
+        # The waiver uses the same base commit as the first authorization check.
+        if: >-
+          needs.pre-commit.result == 'success' ||
+          (needs.check-revert-waiver.result == 'success' &&
+           needs.check-revert-waiver.outputs.verified_label_event != '')
         uses: actions/checkout@v7
         with:
-          ref: ${{ github.event.pull_request.base.ref }}
+          ref: ${{ needs.pre-commit.result == 'success' && github.event.pull_request.base.ref || github.event.pull_request.base.sha }}
           persist-credentials: false
-          # The gate only needs the gate script and CODEOWNERS, both under
+          # The gate only needs the scripts and CODEOWNERS, both under
           # .github/: skip the rest of the tree to keep this job off the CPU
           # pool as briefly as possible.
           sparse-checkout: .github
@@ -943,6 +983,12 @@ jobs:
           python3 .github/workflows/scripts/codeowner_gate.py check-approvals \
             --pr "${{ github.event.pull_request.number }}"
 
+      - name: Revert CI waiver for PR ${{ github.event.pull_request.number }}
+        if: >-
+          needs.check-revert-waiver.result == 'success' &&
+          needs.check-revert-waiver.outputs.verified_label_event != ''
+        run: echo 'This run is evaluating a revert CI waiver.'
+
       - name: Check all required jobs
         # always()-style execution is essential now that the CODEOWNERS gate
         # steps live in this job: a failing approval check must not short-
@@ -960,6 +1006,12 @@ jobs:
           # runs or when an earlier step aborted the job.
           CODEOWNERS_COVERAGE_OUTCOME: ${{ steps.codeowners-coverage.outcome }}
           CODEOWNERS_APPROVALS_OUTCOME: ${{ steps.codeowners-approvals.outcome }}
+          REVERT_VERIFIED_BASE_SHA: ${{ needs.check-revert-waiver.outputs.verified_base_sha }}
+          REVERT_VERIFIED_LABEL_EVENT: >-
+            ${{ needs.check-revert-waiver.result == 'success' &&
+                needs.check-revert-waiver.outputs.verified_label_event || '' }}
+          BASE_CHECKOUT_OUTCOME: ${{ steps.base-checkout.outcome }}
+          GH_TOKEN: ${{ secrets.GITHUB_TOKEN }}
         run: |
           set -euo pipefail
 
@@ -979,6 +1031,19 @@ jobs:
             REASONS+=("$1")
             echo "::error::${1}"
           }
+
+          if [ -n "$REVERT_VERIFIED_LABEL_EVENT" ]; then
+            # A manual re-run uses the original event. Confirm that the
+            # waiver still applies before marking this commit as passing.
+            if [ "$BASE_CHECKOUT_OUTCOME" = success ] &&
+               python3 .github/workflows/scripts/revert_waiver.py --confirm; then
+              echo "::notice::Skipping repository CI for a [Revert] PR with skip_ci."
+              exit 0
+            fi
+            add "Could not verify skip_ci on this [Revert] commit. Start a fresh CI run."
+            printf '%s\n' "${REASONS[@]}" > "$FAILURE_FILE"
+            exit 1
+          fi
 
           PRE_COMMIT_RESULT="${{ needs.pre-commit.result }}"
           CPU_UT_RESULT="${{ needs.cpu-ut.result }}"

@@ -1,0 +1,80 @@
+#
+# Copyright (c) 2026 vLLM Ascend contributors.
+#
+# Licensed under the Apache License, Version 2.0 (the "License");
+# you may not use this file except in compliance with the License.
+# You may obtain a copy of the License at
+#
+#     http://www.apache.org/licenses/LICENSE-2.0
+#
+# Unless required by applicable law or agreed to in writing, software
+# distributed under the License is distributed on an "AS IS" BASIS,
+# WITHOUT WARRANTIES OR CONDITIONS OF ANY KIND, either express or implied.
+# See the License for the specific language governing permissions and
+# limitations under the License.
+
+name: Handle Revert CI Waiver
+
+on:
+  workflow_run:
+    workflows: [Revert CI Waiver Label Changed]
+    types: [completed]
+
+jobs:
+  reject-invalid-waiver:
+    if: >-
+      github.event.workflow_run.event == 'pull_request' &&
+      github.event.workflow_run.conclusion == 'success' &&
+      startsWith(github.event.workflow_run.display_title, 'Check skip_ci for PR ')
+    runs-on: linux-amd64-cpu-1-hk
+    timeout-minutes: 5
+    permissions:
+      contents: read
+      pull-requests: write
+    concurrency:
+      group: reject-invalid-waiver-${{ github.event.workflow_run.head_sha }}
+      cancel-in-progress: false
+    steps:
+      # The label handler has write access. Run only base-repository code.
+      - name: Checkout this repository's default branch
+        uses: actions/checkout@v7
+        with:
+          persist-credentials: false
+          sparse-checkout: .github/workflows/scripts
+          fetch-depth: 1
+
+      - name: Remove skip_ci if the label is unauthorized or the PR changes .github
+        env:
+          GH_TOKEN: ${{ secrets.GITHUB_TOKEN }}
+        run: python3 .github/workflows/scripts/revoke_revert_waiver.py --reject-invalid-label
+
+  revoke-revert-waiver:
+    if: >-
+      github.event.workflow_run.event == 'pull_request' &&
+      github.event.workflow_run.conclusion == 'success' &&
+      startsWith(github.event.workflow_run.display_title, 'Revoke skip_ci for PR ')
+    runs-on: linux-amd64-cpu-2-hk
+    timeout-minutes: 10
+    permissions:
+      actions: write
+      contents: read
+      issues: read
+      pull-requests: read
+    concurrency:
+      group: revert-ci-waiver-${{ github.event.workflow_run.head_sha }}
+      cancel-in-progress: false
+    steps:
+      # The relay's title is untrusted. Only the default branch script runs
+      # with write access, and it verifies the change against GitHub's API.
+      - name: Checkout this repository's default branch
+        uses: actions/checkout@v7
+        with:
+          persist-credentials: false
+          sparse-checkout: .github/workflows/scripts
+          fetch-depth: 1
+
+      - name: Revoke the waiver and start regular CI
+        env:
+          GH_TOKEN: ${{ secrets.GITHUB_TOKEN }}
+          PAT_TOKEN: ${{ secrets.PAT_TOKEN }}
+        run: python3 .github/workflows/scripts/revoke_revert_waiver.py
