@@ -9,14 +9,14 @@ model module; do not import model classes here.
 
 import json
 import logging
+from collections.abc import Callable
 from pathlib import Path
 
 import torch
 from safetensors import safe_open
 from torch import nn
-from vllm.distributed import get_pp_group
+from vllm.distributed import GroupCoordinator, get_pp_group
 from vllm.model_executor.layers.vocab_parallel_embedding import ParallelLMHead, VocabParallelEmbedding
-from vllm.model_executor.models.utils import PPMissingLayer
 
 from vllm_ascend.utils import (
     get_rotation_matrix,
@@ -133,7 +133,9 @@ def process_weight(linear_weight: torch.Tensor, rotation_weight: torch.Tensor):
 
 
 @torch.no_grad()
-def align_draft_weights(model, projection, vllm_config, *, target_embed_owner=None, target_pp_group=None):
+def align_draft_weights(
+    model, projection, vllm_config, *, on_embedding_replaced: Callable[[GroupCoordinator], None] | None = None
+):
     """Align draft inputs with the rotated target without modifying shared weights."""
     rotation_path = get_rotation_path(vllm_config)
     if rotation_path is not None:
@@ -175,10 +177,5 @@ def align_draft_weights(model, projection, vllm_config, *, target_embed_owner=No
         layer.quant_method.process_weights_after_loading(layer)
         setattr(owner, name, layer)
         setattr(model, own_flag, True)
-        if name == "embed_tokens" and rotation is not None and target_embed_owner is not None:
-            pp = get_pp_group()
-            # On vLLM main, alignment runs inside the draft's single-stage context.
-            if pp.world_size == 1 and target_pp_group is not None:
-                pp = target_pp_group
-            if pp.world_size > 1 and pp.is_last_rank:
-                target_embed_owner.embed_tokens = PPMissingLayer()
+        if name == "embed_tokens" and rotation is not None and on_embedding_replaced is not None:
+            on_embedding_replaced(get_pp_group())

@@ -5,7 +5,7 @@
 from typing import Any, cast
 
 import torch
-from vllm.distributed import parallel_state
+from vllm.distributed import GroupCoordinator, parallel_state
 from vllm.lora.layers.base import BaseLayerWithLoRA
 from vllm.model_executor.models.utils import PPMissingLayer
 
@@ -65,17 +65,26 @@ def _target_needs_embed_on_last_stage(
     return any(_references_embed(lm_head, target_embed, target_base) for lm_head in lm_heads)
 
 
-def _get_unused_target_embed_owner(
-    target_model: torch.nn.Module,
-    vllm_config: Any,
-    *embedding_references: torch.nn.Module | None,
-) -> torch.nn.Module | None:
+def _release_unused_target_embed(
+    target_model: torch.nn.Module | None,
+    draft_model: torch.nn.Module | None,
+    *,
+    pp_group: Any,
+    vllm_config: Any = None,
+    speculator_target_embed: Any = None,
+) -> None:
+    """Release a last-stage target embedding when neither target nor draft uses it."""
+    if pp_group is None or pp_group.world_size <= 1 or not pp_group.is_last_rank:
+        return
+    if target_model is None or draft_model is None:
+        return
+
     get_language_model = getattr(target_model, "get_language_model", None)
     language_model: Any = get_language_model() if callable(get_language_model) else target_model
     target_inner = getattr(language_model, "model", language_model)
     target_embed = getattr(target_inner, "embed_tokens", None)
     if target_embed is None or isinstance(target_embed, PPMissingLayer):
-        return None
+        return
 
     target_base = _unwrap_embed_base(target_embed)
     if _target_needs_embed_on_last_stage(
@@ -86,28 +95,16 @@ def _get_unused_target_embed_owner(
         target_base,
         vllm_config,
     ):
-        return None
-    if any(_references_embed(embed, target_embed, target_base) for embed in embedding_references):
-        return None
-    return target_inner
-
-
-def _release_unused_target_embed(
-    target_model: torch.nn.Module | None,
-    draft_model: torch.nn.Module | None,
-    *,
-    pp_group: Any,
-    vllm_config: Any = None,
-    speculator_target_embed: Any = None,
-) -> None:
-    if pp_group is None or pp_group.world_size <= 1 or not pp_group.is_last_rank:
         return
-    if target_model is None or draft_model is None:
+    if _references_embed(speculator_target_embed, target_embed, target_base):
         return
-    draft_embed = getattr(getattr(draft_model, "model", None), "embed_tokens", None)
-    target_inner = _get_unused_target_embed_owner(target_model, vllm_config, speculator_target_embed, draft_embed)
-    if target_inner is not None:
-        target_inner.embed_tokens = PPMissingLayer()
+
+    draft_inner = getattr(draft_model, "model", None)
+    draft_embed = getattr(draft_inner, "embed_tokens", None)
+    if _references_embed(draft_embed, target_embed, target_base):
+        return
+
+    target_inner.embed_tokens = PPMissingLayer()
 
 
 class TargetEmbedCleanupMixin:
@@ -121,9 +118,6 @@ class TargetEmbedCleanupMixin:
         # vLLM main invokes free_unused_weights() inside single_pp_stage().
         self._target_pp_group = _capture_target_pp_group()
 
-    def _target_embed_owner_for_alignment(self, target_model: torch.nn.Module) -> torch.nn.Module | None:
-        return _get_unused_target_embed_owner(target_model, self.vllm_config, getattr(self, "target_embeddings", None))
-
     def load_model(self, target_model: torch.nn.Module) -> None:
         super().load_model(target_model)  # type: ignore[misc]
         # vLLM v0.34.0's runner stops after load_model(), while pinned main
@@ -136,12 +130,18 @@ class TargetEmbedCleanupMixin:
         # the extra target embedding so target parameters stay intact for it.
         if not vllm_version_is("0.34.0"):
             super().free_unused_weights(target_model)  # type: ignore[misc]
-        pp_group = getattr(self, "_target_pp_group", None)
-        if pp_group is None:
-            pp_group = _capture_target_pp_group()
+        self._release_target_embed(target_model, getattr(self, "model", None))
+
+    def _release_target_embed(
+        self,
+        target_model: torch.nn.Module,
+        draft_model: torch.nn.Module | None,
+        pp_group: GroupCoordinator | None = None,
+    ) -> None:
+        pp_group = getattr(self, "_target_pp_group", None) or pp_group or _capture_target_pp_group()
         _release_unused_target_embed(
             target_model,
-            getattr(self, "model", None),
+            draft_model,
             pp_group=pp_group,
             vllm_config=getattr(self, "vllm_config", None),
             speculator_target_embed=getattr(self, "target_embeddings", None),

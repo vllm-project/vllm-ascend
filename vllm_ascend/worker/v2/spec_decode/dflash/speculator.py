@@ -5,6 +5,7 @@
 from collections.abc import Iterator, Mapping
 from contextlib import ExitStack, contextmanager
 from dataclasses import replace
+from functools import partial
 from typing import Any, cast
 
 import numpy as np
@@ -174,9 +175,7 @@ class AscendDFlashSpeculator(TargetEmbedCleanupMixin, LmheadTPDraftSamplingMixin
         # target layers, using the target Ascend configuration.
         if hasattr(model, "post_process"):
             model.post_process(
-                self.vllm_config,
-                target_embed_owner=self._target_embed_owner_for_alignment(target_model),
-                target_pp_group=self._target_pp_group,
+                self.vllm_config, on_embedding_replaced=partial(self._release_target_embed, target_model, model)
             )
         return model
 
