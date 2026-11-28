@@ -1,11 +1,11 @@
 from collections.abc import Callable
-from dataclasses import dataclass
+from dataclasses import dataclass, replace
 from typing import Any, ClassVar, TypeVar
 
 import torch
 import torch_npu
 from torch import nn
-from vllm.config import VllmConfig, get_current_vllm_config
+from vllm.config import VllmConfig, get_current_vllm_config, get_current_vllm_config_or_none
 from vllm.config.compilation import CUDAGraphMode
 from vllm.distributed import get_pcp_group, get_tensor_model_parallel_world_size, get_tp_group
 from vllm.forward_context import get_forward_context
@@ -21,7 +21,7 @@ from vllm.v1.attention.backend import (
     MLAAttentionImpl,
     max_decode_query_len,
 )
-from vllm.v1.kv_cache_interface import AttentionSpec, KVCacheSpec
+from vllm.v1.kv_cache_interface import AttentionSpec, KVCacheSpec, MLAAttentionSpec, SparseCacheRole
 
 from vllm_ascend.ascend_config import get_ascend_config
 from vllm_ascend.ascend_forward_context import _EXTRA_CTX
@@ -443,6 +443,33 @@ class AscendSFABackend(AttentionBackend):
         cache_dtype_str: str = "auto",
     ) -> tuple[int, ...]:
         return (num_blocks, block_size, num_kv_heads, head_size)
+
+    @classmethod
+    def customize_spec(cls, spec: KVCacheSpec) -> KVCacheSpec:
+        """Apply SFA's packed C8 / TurboQuant page width to generic MLA probes."""
+        if type(spec) is not MLAAttentionSpec or spec.cache_role is SparseCacheRole.INDEXER:
+            return super().customize_spec(spec)
+        vllm_config = get_current_vllm_config_or_none()
+        if vllm_config is None:
+            return super().customize_spec(spec)
+        attention_config = getattr(vllm_config, "attention_config", None)
+        if getattr(attention_config, "hisparse_config", None) is not None:
+            return super().customize_spec(spec)
+        cache_dtype = vllm_config.cache_config.cache_dtype
+        if cache_dtype not in ("int8", "fp8", TURBOQUANT_CACHE_DTYPE):
+            return super().customize_spec(spec)
+        text_config = getattr(vllm_config.model_config, "hf_text_config", None)
+        kv_lora_rank = getattr(text_config, "kv_lora_rank", None)
+        qk_rope_head_dim = getattr(text_config, "qk_rope_head_dim", None)
+        if kv_lora_rank is None or qk_rope_head_dim is None:
+            return super().customize_spec(spec)
+        if cache_dtype == TURBOQUANT_CACHE_DTYPE:
+            packed_dim = get_tq_fused_slot_bytes(kv_lora_rank, qk_rope_head_dim)
+            packed_dtype = torch.int8
+        else:
+            packed_dim = get_sfa_qsfa_packed_head_dim(kv_lora_rank, qk_rope_head_dim, SFA_QSFA_TILE_SIZE)
+            packed_dtype = kv_cache_dtype_str_to_dtype(cache_dtype, vllm_config.model_config)
+        return replace(spec, head_size=packed_dim, dtype=packed_dtype)
 
     @staticmethod
     def prepare_layerwise_cache_view(
