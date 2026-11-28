@@ -1,0 +1,8 @@
+pr: 23085
+entries:
+  - category: bugfix
+    text: >
+      GDN/KDA models (Kimi K3, Qwen3-Next, OLMo-GDN) no longer compute wrong
+      decode-path conv1d state updates: the causal_conv1d_update_npu kernel
+      referenced by patch_triton now exists, with layout dispatch covering both
+      the mamba and the dim-last GDN/KDA state layouts.
