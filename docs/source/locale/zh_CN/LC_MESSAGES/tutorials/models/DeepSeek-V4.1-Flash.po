@@ -2306,6 +2306,8 @@ msgid ""
 "parallelism for `lm_head`. Merge the following entry into the existing\n"
 "`--additional-config` JSON object:"
 msgstr ""
+"在 A3 Decode 节点上进行峰值性能基准测试时，请对 `lm_head` 使用四路张量并行。将以下条目合并到现有的\n"
+"`--additional-config` JSON 对象中："
 
 msgid "Use these Decode scheduling limits with the configuration above:"
 msgstr "请结合上述配置使用以下 Decode 调度限制："
