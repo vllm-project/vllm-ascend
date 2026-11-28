@@ -279,6 +279,7 @@ def test_base_scheduler_on_new_request_truncates_only_stateful_producer(need_tru
         _all_token_ids=[1, 2, 3],
         kv_transfer_params=None if params is None else dict(params),
         max_tokens=8,
+        sampling_params=SimpleNamespace(ignore_eos=False, _eos_token_id=42, stop_token_ids=[99]),
     )
 
     scheduler.on_new_request(request)
@@ -291,8 +292,14 @@ def test_base_scheduler_on_new_request_truncates_only_stateful_producer(need_tru
     assert request.max_tokens == (1 if truncated else 8)
     if truncated:
         request.truncate_block_hashes.assert_called_once_with(2, 1)
+        assert request.sampling_params.ignore_eos is True
+        assert request.sampling_params._eos_token_id is None
+        assert request.sampling_params.stop_token_ids == []
     else:
         request.truncate_block_hashes.assert_not_called()
+        assert request.sampling_params.ignore_eos is False
+        assert request.sampling_params._eos_token_id == 42
+        assert request.sampling_params.stop_token_ids == [99]
 
 
 @pytest.mark.parametrize(

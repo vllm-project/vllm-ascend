@@ -1856,8 +1856,9 @@ class MockRequest:
         self.max_tokens: int = 8
         self.prompt_embeds: torch.Tensor | None = None
         self.block_hashes: list = []
-
+        self.sampling_params = types.SimpleNamespace(ignore_eos=False, _eos_token_id=42, stop_token_ids=[99])
         self.truncate_block_hashes = MagicMock()
+        self.sampling_params = types.SimpleNamespace(ignore_eos=False, _eos_token_id=42)
 
 
 class MockKVCacheGroup:
@@ -2590,6 +2591,10 @@ class TestMooncakeConnectorSchedulerMatchedTokens(unittest.TestCase):
                         self.assertEqual(request.prompt_token_ids, list(range(num_tokens - 1)))
                     self.assertEqual(request.max_tokens, 1)
                     self.assertTrue(request.kv_transfer_params["_p_side_truncated"])
+                    # The placeholder sample must not stop on EOS.
+                    self.assertTrue(request.sampling_params.ignore_eos)
+                    self.assertIsNone(request.sampling_params._eos_token_id)
+                    self.assertEqual(request.sampling_params.stop_token_ids, [])
 
                     # Model a full-block cache hit before the final prompt token.
                     local_hit = ((request.num_prompt_tokens - 1) // 128) * 128
@@ -5342,6 +5347,7 @@ def test_prefill_truncation_preserves_payload_and_is_idempotent(payload, guard):
         num_prompt_tokens=count,
         max_tokens=16,
         truncate_block_hashes=MagicMock(),
+        sampling_params=types.SimpleNamespace(ignore_eos=False, _eos_token_id=42, stop_token_ids=[99]),
     )
 
     should_truncate = guard == "normal" and payload != "missing"
@@ -5355,6 +5361,10 @@ def test_prefill_truncation_preserves_payload_and_is_idempotent(payload, guard):
             request.truncate_block_hashes.assert_called_once_with(2, 1)
         else:
             request.truncate_block_hashes.assert_not_called()
+        # The placeholder sample must never stop on EOS before the KV handoff.
+        assert request.sampling_params.ignore_eos is should_truncate
+        assert request.sampling_params._eos_token_id == (None if should_truncate else 42)
+        assert request.sampling_params.stop_token_ids == ([] if should_truncate else [99])
         if payload == "tokens":
             assert request.prompt_token_ids == expected
         if payload == "embeds":

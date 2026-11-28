@@ -863,6 +863,7 @@ class MockRequest:
 
         self.all_token_ids = list(self.prompt_token_ids)
         self._all_token_ids = list(self.prompt_token_ids)
+        self.sampling_params = SimpleNamespace(ignore_eos=False, _eos_token_id=42, stop_token_ids=[99])
 
 
 class TestMooncakeLayerwiseConnectorMetadata(unittest.TestCase):
@@ -931,6 +932,9 @@ class TestMooncakeLayerwiseConnectorSchedulerMatchedTokens(unittest.TestCase):
         self.assertEqual(request.num_prompt_tokens, 3)
         self.assertEqual(request.max_tokens, 1)
         self.assertTrue(request.kv_transfer_params["_p_side_truncated"])
+        self.assertTrue(request.sampling_params.ignore_eos)
+        self.assertIsNone(request.sampling_params._eos_token_id)
+        self.assertEqual(request.sampling_params.stop_token_ids, [])
 
     def test_build_connector_meta(self):
         self.scheduler.vllm_config.kv_transfer_config.is_kv_consumer = True

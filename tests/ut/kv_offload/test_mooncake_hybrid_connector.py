@@ -50,6 +50,11 @@ class MockRequest:
         self.kv_transfer_params = kv_transfer_params
         self.status = status
         self.output_token_ids = [101]
+        self._all_token_ids: list[int] = list(prompt_token_ids or [])
+        self.prompt_embeds: torch.Tensor | None = None
+        self.max_tokens: int = 8
+        self.truncate_block_hashes = MagicMock()
+        self.sampling_params = types.SimpleNamespace(ignore_eos=False, _eos_token_id=42, stop_token_ids=[])
 
 
 class TestHybridKVCacheRecvingThreadDispatch(unittest.TestCase):
@@ -1167,6 +1172,32 @@ class TestMooncakeHybridConnectorScheduler(unittest.TestCase):
         transfer_block_ids = scheduler._compute_transfer_block_ids(block_ids, prompt_len=129)
 
         self.assertEqual(transfer_block_ids, ([0], [100, 101]))
+
+    def test_truncated_prefill_clears_stop_conditions(self):
+        scheduler = self._make_scheduler()
+        scheduler.need_truncate = True
+        scheduler.kv_cache_config = types.SimpleNamespace(hash_block_size=128)
+        scheduler.vllm_config = types.SimpleNamespace(num_hash_lookahead_tokens=0)
+        request = MockRequest(
+            "req-eos",
+            prompt_token_ids=[1, 2, 3],
+            kv_transfer_params={"do_remote_decode": True},
+            status="running",
+        )
+        request._all_token_ids = [1, 2, 3]
+        request.prompt_embeds = None
+        request.max_tokens = 8
+        request.truncate_block_hashes = MagicMock()
+        request.sampling_params = types.SimpleNamespace(ignore_eos=False, _eos_token_id=42, stop_token_ids=[99])
+
+        scheduler.on_new_request(request)
+
+        self.assertEqual(request.prompt_token_ids, [1, 2])
+        self.assertEqual(request.max_tokens, 1)
+        self.assertTrue(request.kv_transfer_params["_p_side_truncated"])
+        self.assertTrue(request.sampling_params.ignore_eos)
+        self.assertIsNone(request.sampling_params._eos_token_id)
+        self.assertEqual(request.sampling_params.stop_token_ids, [])
 
     def test_compute_transfer_block_ids_preserves_circular_groups(self):
         scheduler = self._make_scheduler()
