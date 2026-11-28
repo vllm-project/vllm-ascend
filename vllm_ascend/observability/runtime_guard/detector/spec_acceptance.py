@@ -18,9 +18,9 @@ from __future__ import annotations
 import time
 from collections import defaultdict, deque
 from collections.abc import Callable
-from types import SimpleNamespace
 from typing import TYPE_CHECKING, Any
 
+import numpy as np
 import torch
 from vllm.distributed.parallel_state import get_pp_group
 
@@ -126,6 +126,7 @@ class SpecAcceptanceDetector(ConfigBackedDetector):
         accepted_token_nums: Any,
         skip_req_ids: set[str] | None = None,
         req_ids: list[str] | None = None,
+        input_batch: Any | None = None,
     ) -> list[Incident]:
         """Batch entry: return alerts for the processor / ActionExecutor.
 
@@ -136,6 +137,9 @@ class SpecAcceptanceDetector(ConfigBackedDetector):
 
         ``skip_req_ids`` (optional): requests to skip (stopped after
         ``report.max_per_req``). Batch index alignment is preserved for the rest.
+
+        The caller retains the wave batch so the detector can read draft
+        metadata after MRV2 clears its execution state.
         """
         runner = self._runner
         if not self._precheck():
@@ -149,12 +153,14 @@ class SpecAcceptanceDetector(ConfigBackedDetector):
             if runner_tp_rank(runner) == 0:
                 logger.info_once("[runtime_guard: spec short] skip: speculative_config is None")
             return []
-        input_batch = getattr(runner, "input_batch", None)
+        if input_batch is None:
+            input_batch = getattr(runner, "input_batch", None)
         req_ids = resolve_batch_req_ids(runner, req_ids)
         if not req_ids:
             return []
 
-        if accepted_token_nums is None:
+        num_draft_tokens = getattr(input_batch, "num_draft_tokens", None)
+        if accepted_token_nums is None or num_draft_tokens == 0:
             return []
 
         num_reqs = len(req_ids)
@@ -165,7 +171,23 @@ class SpecAcceptanceDetector(ConfigBackedDetector):
 
         sampled_token_rows = sampled_tokens[:num_reqs]
         requests = getattr(runner, "requests", None)
-        draft_lens = getattr(input_batch, "num_draft_tokens_per_req", None) if input_batch is not None else None
+        draft_lens = getattr(input_batch, "num_draft_tokens_per_req", None)
+        admitted = getattr(input_batch, "num_admitted_draft_tokens", None)
+        adaptive = getattr(runner, "adaptive_verification", None)
+        if admitted is not None:
+            draft_lens = admitted.wait()
+        elif (
+            adaptive is not None
+            and draft_lens is not None
+            and num_draft_tokens is not None
+            and num_draft_tokens < np.sum(draft_lens)
+        ):
+            # Without a host copy, only the device logits offsets reflect the admitted split.
+            cu_num_logits = getattr(input_batch, "cu_num_logits", None)
+            if cu_num_logits is None:
+                return []
+            offsets = cu_num_logits[: num_reqs + 1].cpu().numpy()
+            draft_lens = np.diff(offsets) - adaptive.num_bonus_tokens
 
         alerts: list[Incident] = []
         for batch_idx, req_id in enumerate(req_ids):
@@ -181,22 +203,20 @@ class SpecAcceptanceDetector(ConfigBackedDetector):
                 continue
             sampled_ids = sampled_token_rows[batch_idx]
 
-            if requests is not None and req_id in requests:
-                req_state = requests[req_id]
-            else:
-                draft_len = int(draft_lens[batch_idx]) if draft_lens is not None else 0
-                req_state = SimpleNamespace(
-                    prev_num_draft_len=draft_len,
-                    prompt_token_ids=None,
-                    output_token_ids=None,
-                )
+            draft_len_hint: int | None = None
+            if draft_lens is not None:
+                try:
+                    draft_len_hint = int(draft_lens[batch_idx])
+                except (TypeError, ValueError, IndexError):
+                    draft_len_hint = None
 
             alert = self.check_one(
                 req_idx=batch_idx,
                 req_id=req_id,
-                req_state=req_state,
+                req_state=requests.get(req_id) if requests is not None else None,
                 accepted_token_num=accepted_token_num,
                 sampled_ids=sampled_ids,
+                draft_len_hint=draft_len_hint,
             )
             if alert is not None:
                 alerts.append(alert)
@@ -209,29 +229,25 @@ class SpecAcceptanceDetector(ConfigBackedDetector):
         req_state: Any,
         accepted_token_num: int,
         sampled_ids: list[int] | torch.Tensor | None = None,
+        draft_len_hint: int | None = None,
     ) -> Incident | None:
         if not req_id:
             return None
         if not get_pp_group().is_last_rank:
             return None
-        prompt_raw = getattr(req_state, "prompt_token_ids", None)
-        prompt_ids = self._normalize_token_ids(prompt_raw) if prompt_raw is not None else None
         runner = self._runner
         log_leader = runner_tp_rank(runner) == 0
-        draft_len = getattr(req_state, "prev_num_draft_len", 0) or 0
-        sampled_norm = self._normalize_token_ids(sampled_ids)
-        if draft_len <= 0:
-            # Fallback when prev_num_draft_len was not populated (common on
-            # non-hybrid MTP): treat last dim of sampled row as draft+bonus.
-            draft_len = max(0, len(sampled_norm) - 1)
-        if draft_len <= 0:
+        draft_len = draft_len_hint if draft_len_hint is not None else getattr(req_state, "prev_num_draft_len", None)
+        if draft_len is None:
             if log_leader:
-                logger.info_once(
-                    "[runtime_guard: spec short] req_id=%s skip: draft_len=0 sampled_len=%d",
-                    req_id,
-                    len(sampled_norm),
-                )
+                logger.warning_once("[runtime_guard: spec] missing draft length metadata, skipping attribution")
             return None
+        draft_len = int(draft_len)
+        if draft_len <= 0:
+            return None
+        prompt_raw = getattr(req_state, "prompt_token_ids", None)
+        prompt_ids = self._normalize_token_ids(prompt_raw) if prompt_raw is not None else None
+        sampled_norm = self._normalize_token_ids(sampled_ids)
         accepted_draft_tokens = max(0, accepted_token_num - 1)
         accepted_norm = sampled_norm[:accepted_token_num] if accepted_token_num > 0 else []
         history = self._history[req_id]

@@ -944,38 +944,82 @@ def test_v17e_spec_acceptance_low_rate_triggers_incident():
     assert alerts[0].detail["acceptance_rate"] < 0.3
 
 
-def test_v17b_spec_acceptance_v2_threads_req_ids_without_input_batch():
-    """v2: runner.input_batch is None; req_ids must come from SamplePhaseResult."""
-    from vllm_ascend.observability.runtime_guard.detector.spec_acceptance import SpecAcceptanceDetector
+@pytest.fixture
+def spec_acceptance_detector(monkeypatch):
+    from vllm_ascend.observability.runtime_guard.detector import spec_acceptance
 
-    section = {
-        "enabled": True,
-        "window": 1,
-        "low_threshold": 0.3,
-        "len_low_threshold": 1.4,
-        "high_threshold": 0.96,
-        "len_high_threshold": 2.8,
-    }
-    rc = SimpleNamespace(
-        detector_section=lambda name: section,
-        detector_get=lambda sec, key, default=None: section.get(key, default),
+    monkeypatch.setattr(spec_acceptance, "get_pp_group", lambda: SimpleNamespace(is_last_rank=True))
+    monkeypatch.setattr(spec_acceptance, "runner_tp_rank", lambda runner: 0)
+    rc = SimpleNamespace(detector_section=lambda name: {"enabled": True, "window": 1})
+    runner = SimpleNamespace(speculative_config=object(), input_batch=None, requests={})
+    return spec_acceptance.SpecAcceptanceDetector(runtime_config=rc, runner=runner)
+
+
+def test_v17f_spec_acceptance_padded_row_uses_num_draft_tokens(spec_acceptance_detector):
+    det = spec_acceptance_detector
+    sampled = torch.tensor([[10, 11, 12, -1, -1]])
+    wave = SimpleNamespace(req_ids=["r1"], num_draft_tokens_per_req=np.array([4]))
+
+    assert det.check_all(sampled, [3], req_ids=wave.req_ids, input_batch=wave) == []
+    assert det._history["r1"][0][:2] == (2, 4)
+
+
+def test_v17g_spec_acceptance_skips_without_draft_metadata(spec_acceptance_detector):
+    det = spec_acceptance_detector
+    sampled = torch.tensor([[10, 11, 12, -1, -1]])
+
+    assert det.check_all(sampled, [3], req_ids=["r1"]) == []
+    assert "r1" not in det._history
+    det._runner.requests["r1"] = SimpleNamespace(prev_num_draft_len=3)
+    assert det.check_all(sampled, [3], req_ids=["r1"]) == []
+    assert det._history["r1"][0][:2] == (2, 3)
+
+
+def test_v17b_spec_acceptance_v2_threads_req_ids_without_input_batch(spec_acceptance_detector):
+    det = spec_acceptance_detector
+    sampled = torch.tensor([[7, 8, -1], [7, 8, 9]])
+    wave = SimpleNamespace(num_draft_tokens_per_req=np.array([1, 2]))
+
+    assert det.check_all(sampled, [2, 3], input_batch=wave) == []
+    assert not det._history
+    det.check_all(sampled, [2, 3], req_ids=["r1", "r2"], input_batch=wave)
+    assert det._history["r1"][0][:2] == (1, 1)
+    assert det._history["r2"][0][:2] == (2, 2)
+
+
+@pytest.mark.parametrize("host_counts", [True, False], ids=["host-copy", "device-offsets"])
+def test_spec_acceptance_uses_admitted_drafts(spec_acceptance_detector, host_counts):
+    from vllm_ascend.observability.runtime_guard.detector import spec_acceptance
+
+    det = spec_acceptance_detector
+    det._runner.adaptive_verification = SimpleNamespace(num_bonus_tokens=1)
+    det._runner.requests["no-draft"] = SimpleNamespace(prev_num_draft_len=4)
+    wave = SimpleNamespace(
+        req_ids=["trimmed", "no-draft"],
+        num_draft_tokens_per_req=np.array([4, 4]),
+        num_draft_tokens=1,
+        num_admitted_draft_tokens=SimpleNamespace(wait=lambda: np.array([1, 0])) if host_counts else None,
     )
-    runner = SimpleNamespace(
-        tp_rank=0,
-        speculative_config=SimpleNamespace(),
-        input_batch=None,
-        requests=None,
-    )
-    det = SpecAcceptanceDetector(runtime_config=rc, runner=runner)
-    sampled = torch.tensor([[7, 8, 9, 10], [7, 8, 9, 10]])
-    with patch(
-        "vllm_ascend.observability.runtime_guard.detector.spec_acceptance.get_pp_group",
-        return_value=SimpleNamespace(is_last_rank=True),
-    ):
-        assert det.check_all(sampled, [0, 0]) == []
-        alerts = det.check_all(sampled, [0, 0], req_ids=["r1", "r2"])
-    assert "r1" in det._history and "r2" in det._history
-    assert isinstance(alerts, list)
+    if not host_counts:
+        wave.cu_num_logits = torch.tensor([0, 2, 3], dtype=torch.int32)
+    sampled = torch.tensor([[10, 11, -1, -1, -1], [20, -1, -1, -1, -1]])
+
+    with patch.object(spec_acceptance.logger, "warning_once") as warning:
+        assert det.check_all(sampled, [2, 1], req_ids=wave.req_ids, input_batch=wave) == []
+        warning.assert_not_called()
+    assert det._history["trimmed"][0][:2] == (1, 1)
+    assert "no-draft" not in det._history
+
+
+def test_spec_acceptance_skips_zero_budget(spec_acceptance_detector):
+    from vllm_ascend.observability.runtime_guard.detector import spec_acceptance
+
+    det = spec_acceptance_detector
+    wave = SimpleNamespace(req_ids=["r1"], num_draft_tokens_per_req=np.array([4]), num_draft_tokens=0)
+    with patch.object(spec_acceptance.logger, "warning_once") as warning:
+        assert det.check_all(torch.tensor([[42]]), [1], req_ids=wave.req_ids, input_batch=wave) == []
+        warning.assert_not_called()
+    assert not det._history
 
 
 def test_v17c_check_after_spec_forwards_req_ids():
@@ -985,9 +1029,10 @@ def test_v17c_check_after_spec_forwards_req_ids():
     seen: dict[str, object] = {}
 
     class _FakeSpec:
-        def check_all(self, sampled, accepted, skip_req_ids=None, req_ids=None):
+        def check_all(self, sampled, accepted, skip_req_ids=None, req_ids=None, input_batch=None):
             seen["req_ids"] = req_ids
             seen["skip"] = skip_req_ids
+            seen["input_batch"] = input_batch
             return []
 
     runner = SimpleNamespace(tp_rank=0, input_batch=None)
@@ -998,8 +1043,15 @@ def test_v17c_check_after_spec_forwards_req_ids():
     mgr = DetectorManager(runtime_config=rc, runner=runner, detection_gate=lambda: True)
     mgr._spec_det = _FakeSpec()  # type: ignore[method-assign]
     mgr._gated = lambda _phase: False  # type: ignore[method-assign]
-    mgr.check_after_spec(sampled_tokens=[[1]], accepted_token_nums=[0], req_ids=["cmpl-a"])
+    wave = SimpleNamespace(num_draft_tokens_per_req=[2])
+    mgr.check_after_spec(
+        sampled_tokens=[[1]],
+        accepted_token_nums=[0],
+        req_ids=["cmpl-a"],
+        input_batch=wave,
+    )
     assert seen["req_ids"] == ["cmpl-a"]
+    assert seen["input_batch"] is wave
 
 
 # ---------------------------------------------------------------- payload (B'6)
