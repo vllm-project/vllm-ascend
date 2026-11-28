@@ -8,12 +8,11 @@ minimum tensors required by ``KDARecoverSSMCommitContext`` and covers:
     1. ``_defer_commit_kernel``        - pending/eager split logic
     2. ``_prepare_flush_plan_kernel``  - pending -> commit_lens recovery
     3. ``KDARecoverSSMCommitContext.flush`` - pending replay folded into checkpoint
-    4. deferred vs immediate numerical equivalence (with and without the
-       acceptance gate forcing immediate commits)
+    4. deferred vs immediate numerical equivalence (with and without eager
+       rows committing immediately)
     5. fused verify (``compact_conv`` + in-kernel replay) vs ``flush`` + stock
        verify — the production ``fp32_deferred`` path
-    6. the acceptance gate's EMA engaging and releasing
-    7. boundary conditions: empty batch, record_rows with null slots
+    6. boundary conditions: empty batch, record_rows with null slots
 
 Run on an Ascend NPU machine:
 
@@ -53,7 +52,6 @@ NUM_BLOCKS = 16
 NULL_BLOCK_ID = 0   # Ascend uses 0 (not -1 like NVIDIA)
 
 from vllm.model_executor.layers.mamba.mamba_utils import is_conv_state_dim_first  # noqa: E402
-from vllm_ascend.models.glm5next.recoverssm_deferred import RecoverSSMAcceptanceGate  # noqa: E402
 from vllm_ascend.ops.triton.triton_utils import init_device_properties_triton  # noqa: E402
 init_device_properties_triton()
 
@@ -279,12 +277,12 @@ def test_flush_folds_pending_into_checkpoint():
 # Test 4: deferred vs immediate numerical equivalence
 # ---------------------------------------------------------------------------
 
-@pytest.mark.parametrize("gate", [False, True])
-def test_deferred_vs_immediate_equivalence(gate: bool):
+@pytest.mark.parametrize("eager", [False, True])
+def test_deferred_vs_immediate_equivalence(eager: bool):
     """The end-to-end invariant: deferred path (pending accumulate + flush)
     should produce the same checkpoint as immediate path (commit each step).
 
-    ``gate`` simulates the acceptance gate engaging: every deferred commit
+    ``eager`` simulates the align-mode boundary rows: every deferred commit
     carries an all-eager mask, so each step folds now (pending zeroed) —
     the immediate semantics reached through the deferred machinery.
 
@@ -324,8 +322,8 @@ def test_deferred_vs_immediate_equivalence(gate: bool):
     )
     pending = torch.zeros(blocks, dtype=torch.int32, device=DEVICE)
     # 3 deferred steps. Each step: flush previous pending, then commit (defer).
-    # With the gate engaged, every row is eager (folded now, pending zeroed).
-    eager = torch.ones(2, dtype=torch.int32, device=DEVICE) if gate else None
+    # With eager rows, every row folds now (pending zeroed).
+    eager_mask = torch.ones(2, dtype=torch.int32, device=DEVICE) if eager else None
     for step in range(3):
         # flush previous step's pending (step 0: pending is all 0, no-op)
         ctx_def.flush(state_indices, record_rows, pending)
@@ -336,7 +334,7 @@ def test_deferred_vs_immediate_equivalence(gate: bool):
             query_start_loc=query_start_loc,
             record_rows=record_rows,
             pending=pending,
-            eager=eager,  # None: fully deferred; ones: gate-engaged
+            eager=eager_mask,  # None: fully deferred; ones: all rows eager
         )
     # Final flush to fold the last step's pending.
     ctx_def.flush(state_indices, record_rows, pending)
@@ -358,45 +356,6 @@ def test_deferred_vs_immediate_equivalence(gate: bool):
         )
 
     print("[PASS] deferred vs immediate: final checkpoint numerically equivalent")
-
-
-# ---------------------------------------------------------------------------
-# Test 5: the acceptance gate's EMA engages and releases
-# ---------------------------------------------------------------------------
-
-def test_acceptance_gate_tracks_acceptance_rate():
-    """The gate's EMA of the mean acceptance rate engages on high acceptance
-    and releases when it drops, through the same device EMA and host mirror
-    the production build path reads."""
-    batch = 4
-    gate = RecoverSSMAcceptanceGate(batch, DEVICE)
-    assert not gate.engaged()  # starts deferred
-
-    def steps(counts, n):
-        for _ in range(n):
-            gate.update(counts, None, SPEC_QUERY_LEN, batch)
-        torch.npu.synchronize()  # land the host mirror
-
-    # Mean acceptance 1.25/3 (~0.42): stays deferred.
-    steps(torch.tensor([0, 1, 2, 2], dtype=torch.int32, device=DEVICE), 16)
-    assert not gate.engaged()
-    # Mean acceptance 2.75/3 (~0.92): engages within a few steps.
-    steps(torch.tensor([3, 3, 2, 3], dtype=torch.int32, device=DEVICE), 8)
-    assert gate.engaged()
-    # Falling back below the rate releases again.
-    steps(torch.tensor([0, 1, 1, 0], dtype=torch.int32, device=DEVICE), 16)
-    assert not gate.engaged()
-
-    # request_indices gathers the acceptance rows exactly like the commit plan.
-    pool = torch.tensor([3, 3, 2, 0], dtype=torch.int32, device=DEVICE)
-    request_indices = torch.tensor([0, 1], dtype=torch.int32, device=DEVICE)
-    for _ in range(8):
-        gate.update(pool, request_indices, SPEC_QUERY_LEN, 2)
-    torch.npu.synchronize()
-    assert gate.engaged()
-    assert gate.eager_mask(2).shape[0] == 2
-
-    print("[PASS] acceptance gate: engages and releases with the acceptance rate")
 
 
 # ---------------------------------------------------------------------------
