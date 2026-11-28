@@ -64,6 +64,47 @@ variants:
         docker_image: quay.io/ascend/vllm-ascend:nightly-main-a5
     supported_hardware:
       - ascend_950pr
+  ascend_w8a8_tutorial:
+    model_id: Eco-Tech/Qwen3.8-27B-w8a8
+    precision: int8
+    label: W8A8 (Ascend tutorial)
+    vram_minimum_gb: 39
+    supported_hardware:
+      - ascend_910b
+      - ascend_910c
+      - ascend_950pr
+    tp:
+      ascend_910b: 2
+      ascend_910c: 2
+      ascend_950pr: 1
+    extra_args:
+      - '--quantization'
+      - ascend
+    supported_features:
+      - tool_calling
+      - reasoning
+      - text_only
+      - encoder_parallel
+      - long_context
+    hardware_overrides:
+      ascend_910b:
+        docker_image: quay.io/ascend/vllm-ascend:qwen3.8-a2
+        docker_shm_size: '1g'
+        docker_serve_command: vllm serve
+        install:
+          pip: false
+      ascend_910c:
+        docker_image: quay.io/ascend/vllm-ascend:qwen3.8-a3
+        docker_shm_size: '1g'
+        docker_serve_command: vllm serve
+        install:
+          pip: false
+      ascend_950pr:
+        docker_image: quay.io/ascend/vllm-ascend:qwen3.8-a5
+        docker_shm_size: '1g'
+        docker_serve_command: vllm serve
+        install:
+          pip: false
 # The Ascend images ship no vllm-rs binary, so the Rust frontend aborts at
 # startup (FileNotFoundError: vllm-rs). The preset below pins the Python
 # frontend on 910B only — presets match their hardware exactly, so 950PR
@@ -79,6 +120,299 @@ presets:
       href: https://docs.vllm.ai/projects/ascend/zh-cn/main/tutorials/models/Qwen3.8-27B.html
     select:
       frontend: python
+  ascend_a2_w8a8_tutorial:
+    label: A2 tutorial, W8A8 TP2
+    hardware: ascend_910b
+    strategy: single_node_tp
+    variants:
+      - ascend_w8a8_tutorial
+    source:
+      label: vLLM Ascend Qwen3.8-27B tutorial, section 5.1
+      href: https://github.com/vllm-project/vllm-ascend/blob/a3b7e23f68f9618f618979395ca3fa3f2ae8e813/docs/source/tutorials/models/Qwen3.8-27B.md#L306-L340
+      revision: a3b7e23f68f9618f618979395ca3fa3f2ae8e813
+    env:
+      VLLM_USE_MODELSCOPE: 'True'
+      HCCL_BUFFSIZE: '512'
+      PYTORCH_NPU_ALLOC_CONF: 'expandable_segments:True'
+    tp: 2
+    select:
+      frontend: python
+      features:
+        tool_calling: false
+        reasoning: true
+        encoder_parallel: true
+        long_context: false
+    args:
+      - '--host'
+      - '0.0.0.0'
+      - '--port'
+      - '8000'
+      - '--data-parallel-size'
+      - '1'
+      - '--served-model-name'
+      - 'qwen3.8'
+      - '--max-num-seqs'
+      - '32'
+      - '--max-model-len'
+      - '133120'
+      - '--max-num-batched-tokens'
+      - '16384'
+      - '--trust-remote-code'
+      - '--allowed-local-media-path'
+      - '/'
+      - '--dtype'
+      - 'bfloat16'
+      - '--mm-processor-cache-gb'
+      - '0'
+      - '--mm-processor-cache-type'
+      - 'shm'
+      - '--enable-prefix-caching'
+      - '--gpu-memory-utilization'
+      - '0.85'
+      - '--speculative-config'
+      - '{"method": "qwen3_5_mtp", "num_speculative_tokens": 3}'
+      - '--compilation-config'
+      - '{"cudagraph_capture_sizes": [1,4,8,12,16,20,24,28,32,36,40,44,48,52,56,60,64,68,72,76,80,84,88,92,96,100,104,108,112,116,120,124,128],"cudagraph_mode":
+        "FULL_DECODE_ONLY"}'
+      - '--additional-config'
+      - '{"enable_cpu_binding":true}'
+  ascend_a3_w8a8_tutorial:
+    label: A3 tutorial, W8A8 TP2
+    hardware: ascend_910c
+    strategy: single_node_tp
+    variants:
+      - ascend_w8a8_tutorial
+    source:
+      label: vLLM Ascend Qwen3.8-27B tutorial, section 5.1
+      href: https://github.com/vllm-project/vllm-ascend/blob/a3b7e23f68f9618f618979395ca3fa3f2ae8e813/docs/source/tutorials/models/Qwen3.8-27B.md#L306-L340
+      revision: a3b7e23f68f9618f618979395ca3fa3f2ae8e813
+    env:
+      VLLM_USE_MODELSCOPE: 'True'
+      HCCL_BUFFSIZE: '512'
+      PYTORCH_NPU_ALLOC_CONF: 'expandable_segments:True'
+    tp: 2
+    select:
+      frontend: python
+      features:
+        tool_calling: false
+        reasoning: true
+        encoder_parallel: true
+        long_context: false
+    args:
+      - '--host'
+      - '0.0.0.0'
+      - '--port'
+      - '8000'
+      - '--data-parallel-size'
+      - '1'
+      - '--served-model-name'
+      - 'qwen3.8'
+      - '--max-num-seqs'
+      - '32'
+      - '--max-model-len'
+      - '133120'
+      - '--max-num-batched-tokens'
+      - '16384'
+      - '--trust-remote-code'
+      - '--allowed-local-media-path'
+      - '/'
+      - '--dtype'
+      - 'bfloat16'
+      - '--mm-processor-cache-gb'
+      - '0'
+      - '--mm-processor-cache-type'
+      - 'shm'
+      - '--enable-prefix-caching'
+      - '--gpu-memory-utilization'
+      - '0.85'
+      - '--speculative-config'
+      - '{"method": "qwen3_5_mtp", "num_speculative_tokens": 3}'
+      - '--compilation-config'
+      - '{"cudagraph_capture_sizes": [1,4,8,12,16,20,24,28,32,36,40,44,48,52,56,60,64,68,72,76,80,84,88,92,96,100,104,108,112,116,120,124,128],"cudagraph_mode":
+        "FULL_DECODE_ONLY"}'
+      - '--additional-config'
+      - '{"enable_cpu_binding":true}'
+  ascend_950pr_w8a8_tutorial:
+    label: 950PR tutorial, W8A8 TP1
+    hardware: ascend_950pr
+    strategy: single_node_tp
+    variants:
+      - ascend_w8a8_tutorial
+    source:
+      label: vLLM Ascend Qwen3.8-27B tutorial, section 5.1
+      href: https://github.com/vllm-project/vllm-ascend/blob/a3b7e23f68f9618f618979395ca3fa3f2ae8e813/docs/source/tutorials/models/Qwen3.8-27B.md#L240-L272
+      revision: a3b7e23f68f9618f618979395ca3fa3f2ae8e813
+    env:
+      VLLM_USE_MODELSCOPE: 'True'
+      HCCL_BUFFSIZE: '512'
+      PYTORCH_NPU_ALLOC_CONF: 'expandable_segments:True'
+    tp: 1
+    select:
+      frontend: python
+      features:
+        tool_calling: false
+        reasoning: false
+        encoder_parallel: true
+        long_context: false
+    args:
+      - '--host'
+      - '0.0.0.0'
+      - '--port'
+      - '8000'
+      - '--data-parallel-size'
+      - '1'
+      - '--served-model-name'
+      - 'qwen3.8'
+      - '--max-num-seqs'
+      - '32'
+      - '--max-model-len'
+      - '256000'
+      - '--max-num-batched-tokens'
+      - '16384'
+      - '--trust-remote-code'
+      - '--allowed-local-media-path'
+      - '/'
+      - '--mm-processor-cache-gb'
+      - '0'
+      - '--mm-processor-cache-type'
+      - 'shm'
+      - '--enable-prefix-caching'
+      - '--gpu-memory-utilization'
+      - '0.9'
+      - '--speculative-config'
+      - '{"method": "qwen3_5_mtp", "num_speculative_tokens": 3}'
+      - '--compilation-config'
+      - '{"cudagraph_capture_sizes": [1,4,8,12,16,20,24,28,32,36,40,44,48,52,56,60,64,68,72,76,80,84,88,92,96,100,104,108,112,116,120,124,128],"cudagraph_mode":
+        "FULL_DECODE_ONLY"}'
+      - '--additional-config'
+      - '{"enable_cpu_binding": true, "enable_flashcomm1": true}'
+  ascend_a3_w8a8_single_host_pd:
+    label: A3 tutorial, single-host 3P1D
+    hardware: ascend_910c
+    strategy: single_node_tp
+    variants:
+      - ascend_w8a8_tutorial
+    tp: 2
+    source:
+      label: vLLM Ascend Qwen3.8-27B tutorial, section 5.2
+      href: https://github.com/vllm-project/vllm-ascend/blob/a3b7e23f68f9618f618979395ca3fa3f2ae8e813/docs/source/tutorials/models/Qwen3.8-27B.md#L425-L622
+      revision: a3b7e23f68f9618f618979395ca3fa3f2ae8e813
+    select:
+      frontend: python
+      features:
+        tool_calling: false
+        reasoning: false
+        encoder_parallel: false
+        long_context: false
+    runbook: >-
+      Start all four points as separate processes inside the tutorial container on one A3 host.
+      Substitute the local checkpoint path, set SERVICE_NETWORK_INTERFACE to the active NIC, and
+      follow sections 5.2 and 5.4 for the host environment, proxy setup, and request routing.
+    args:
+      - '--host'
+      - '0.0.0.0'
+      - '--data-parallel-size'
+      - '1'
+      - '--served-model-name'
+      - 'qwen3.8'
+      - '--max-model-len'
+      - '133120'
+      - '--dtype'
+      - 'bfloat16'
+      - '--no-enable-prefix-caching'
+      - '--trust-remote-code'
+      - '--speculative-config'
+      - '{"method": "qwen3_5_mtp", "num_speculative_tokens": 3}'
+    env:
+      PYTORCH_NPU_ALLOC_CONF: 'expandable_segments:True'
+      OMP_NUM_THREADS: '1'
+      HCCL_IF_IP: '127.0.0.1'
+      HCCL_BUFFSIZE: '512'
+      ASCEND_BUFFER_POOL: '0:0'
+      NETWORK_CARD_NAME: '$SERVICE_NETWORK_INTERFACE'
+      LD_LIBRARY_PATH: '/usr/local/Ascend/ascend-toolkit/latest/python/site-packages/mooncake${LD_LIBRARY_PATH:+:${LD_LIBRARY_PATH}}'
+    points:
+      prefill_0:
+        label: Prefill P0
+        default: true
+        args:
+          - '--port'
+          - '8081'
+          - '--max-num-batched-tokens'
+          - '66000'
+          - '--max-num-seqs'
+          - '8'
+          - '--gpu-memory-utilization'
+          - '0.85'
+          - '--enforce-eager'
+          - '--additional-config'
+          - '{"enable_cpu_binding": true}'
+          - '--kv-transfer-config'
+          - '{"kv_connector":"MooncakeConnectorV1","kv_buffer_device":"npu","kv_role":"kv_producer","kv_port":"58010","engine_id":"0","kv_connector_extra_config":{"prefill":{"dp_size":1,"tp_size":2},"decode":{"dp_size":1,"tp_size":2}}}'
+        env:
+          ASCEND_RT_VISIBLE_DEVICES: '8,9'
+          TASK_QUEUE_ENABLE: '2'
+      prefill_1:
+        label: Prefill P1
+        args:
+          - '--port'
+          - '8082'
+          - '--max-num-batched-tokens'
+          - '66000'
+          - '--max-num-seqs'
+          - '8'
+          - '--gpu-memory-utilization'
+          - '0.85'
+          - '--enforce-eager'
+          - '--additional-config'
+          - '{"enable_cpu_binding": true}'
+          - '--kv-transfer-config'
+          - '{"kv_connector":"MooncakeConnectorV1","kv_buffer_device":"npu","kv_role":"kv_producer","kv_port":"58020","engine_id":"1","kv_connector_extra_config":{"prefill":{"dp_size":1,"tp_size":2},"decode":{"dp_size":1,"tp_size":2}}}'
+        env:
+          ASCEND_RT_VISIBLE_DEVICES: '10,11'
+          TASK_QUEUE_ENABLE: '2'
+      prefill_2:
+        label: Prefill P2
+        args:
+          - '--port'
+          - '8083'
+          - '--max-num-batched-tokens'
+          - '66000'
+          - '--max-num-seqs'
+          - '8'
+          - '--gpu-memory-utilization'
+          - '0.85'
+          - '--enforce-eager'
+          - '--additional-config'
+          - '{"enable_cpu_binding": true}'
+          - '--kv-transfer-config'
+          - '{"kv_connector":"MooncakeConnectorV1","kv_buffer_device":"npu","kv_role":"kv_producer","kv_port":"58030","engine_id":"2","kv_connector_extra_config":{"prefill":{"dp_size":1,"tp_size":2},"decode":{"dp_size":1,"tp_size":2}}}'
+        env:
+          ASCEND_RT_VISIBLE_DEVICES: '12,13'
+          TASK_QUEUE_ENABLE: '2'
+      decode:
+        label: Decode
+        args:
+          - '--port'
+          - '8088'
+          - '--max-num-batched-tokens'
+          - '512'
+          - '--max-num-seqs'
+          - '32'
+          - '--gpu-memory-utilization'
+          - '0.90'
+          - '--compilation-config'
+          - '{"cudagraph_capture_sizes": [4,8,12,16,20,24,28,32,36,40,44,48,52,56,60,64,68,72,76,80,84,88,92,96,100,104,108,112,116,120,124,128],
+            "cudagraph_mode": "FULL_DECODE_ONLY"}'
+          - '--additional-config'
+          - '{"enable_cpu_binding": true, "scheduler_config": {"recompute_scheduler_enable": true}}'
+          - '--kv-transfer-config'
+          - '{"kv_connector":"MooncakeConnectorV1","kv_buffer_device":"npu","kv_role":"kv_consumer","kv_port":"58080","engine_id":"7","kv_connector_extra_config":{"prefill":{"dp_size":1,"tp_size":2},"decode":{"dp_size":1,"tp_size":2}}}'
+        env:
+          ASCEND_RT_VISIBLE_DEVICES: '14,15'
+          TASK_QUEUE_ENABLE: '1'
+          HCCL_OP_EXPANSION_MODE: 'AIV'
+
 features:
   spec_decoding:
     modes:
@@ -97,6 +431,12 @@ meta:
     ascend_910b: verified
 guide_sections:
   ascend: |
+    ### Ascend tutorial deployments
+
+    Select a tutorial preset to load the single-service configuration for the chosen hardware.
+    Use the [deployment tutorial](https://docs.vllm.ai/projects/ascend/en/main/tutorials/models/Qwen3.8-27B.html) for the Atlas 300I Duo TP4 commands and setup.
+    Check the 950-series C8 PD procedure in the tutorial for the five independent service processes, their ports, and their KV engine IDs.
+
     ### Huawei Ascend 950PR-w8a8 (vLLM Ascend)
 
     Verified on a single 950PR, TP1, vLLM Ascend 0.23.0 from the
