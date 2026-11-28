@@ -8,6 +8,7 @@ import json
 import os
 from concurrent.futures import ThreadPoolExecutor
 from pathlib import Path
+from unittest.mock import patch
 
 import pytest
 import requests
@@ -71,6 +72,25 @@ class FlashPDServer(RemotePDServer):
             # A constructor failure never enters the context manager.
             self._terminate_server()
             raise
+
+    def _start_server_with_prefix(self, server_cmd, env_dict, log_prefix):
+        # Diagnostic run: bypass the shared helper's per-server runtime mask.
+        # The runner's device allocation remains in force, but P and D may
+        # bind overlapping devices; this is not evidence of isolated PD serving.
+        server_env = dict(env_dict or {})
+        assigned_devices = server_env.pop("ASCEND_RT_VISIBLE_DEVICES", None)
+        with patch.dict(os.environ):
+            inherited_devices = os.environ.pop("ASCEND_RT_VISIBLE_DEVICES", None)
+            print(
+                f"{log_prefix} Flash PD runtime device mask disabled:",
+                {
+                    "assigned_devices": assigned_devices,
+                    "inherited_devices": inherited_devices,
+                    "runner_devices": os.environ.get("ASCEND_VISIBLE_DEVICES"),
+                },
+                flush=True,
+            )
+            return super()._start_server_with_prefix(server_cmd, server_env, log_prefix)
 
 
 def serve_args(model, port, kv_port, producer, eager, prefix_caching):
