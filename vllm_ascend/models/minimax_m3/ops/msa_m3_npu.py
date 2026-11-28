@@ -468,18 +468,19 @@ def _minimax_m3_index_score_topk(
     topk: int,
     init_blocks: int = 0,
     local_blocks: int = 0,
-) -> torch.Tensor:
+    need_counts: bool = True,
+) -> tuple[torch.Tensor, torch.Tensor | None]:
     """Run the CANN MsaIndexScore TopK fusion and return its block indices.
 
     Returns ``[num_index_heads, total_q, topk]`` int32 logical block IDs, already
-    ordered by the operator.
+    ordered by the operator, plus the valid count per row when available.
     """
     from cann_ops_transformer.ops import msa_index_score
 
     index_kv_cache = _as_ascendc_index_kv_cache(index_kv_cache)
     if index_kv_cache.dtype == torch.float8_e4m3fn and idx_q.dtype != index_kv_cache.dtype:
         idx_q = _to_fp8_e4m3(idx_q)
-    return msa_index_score(
+    output = msa_index_score(
         idx_q,
         index_kv_cache,
         start_loc,
@@ -495,6 +496,23 @@ def _minimax_m3_index_score_topk(
         init_blocks=init_blocks,
         local_blocks=local_blocks,
     )
+    return _split_fused_index_score_output(output, need_counts=need_counts)
+
+
+def _split_fused_index_score_output(
+    output: Any, *, need_counts: bool = True
+) -> tuple[torch.Tensor, torch.Tensor | None]:
+    """Unpack the fused TopK output into ``(sparse_indices, sparseCount)``.
+
+    Packages that emit ``sparseCount`` return a tuple; older ones return the bare
+    tensor and the count is derived here. ``need_counts=False`` skips deriving it,
+    which costs five launches, for callers that ignore the count.
+    """
+    if isinstance(output, tuple):
+        return output[0], output[1]
+    if not need_counts:
+        return output, None
+    return output, _select_num_idx_from_topk(output)
 
 
 @lru_cache
@@ -553,7 +571,7 @@ def minimax_m3_index_prefill(
     TopK and sort helpers.
     """
     if _can_use_index_score_topk_fusion(topk):
-        return _minimax_m3_index_score_topk(
+        indices, _ = _minimax_m3_index_score_topk(
             idx_q,
             index_kv_cache,
             block_table,
@@ -564,7 +582,9 @@ def minimax_m3_index_prefill(
             topk=topk,
             init_blocks=init_blocks,
             local_blocks=local_blocks,
+            need_counts=False,
         )
+        return indices
     score = _minimax_m3_index_score(
         idx_q,
         index_kv_cache,
@@ -619,7 +639,7 @@ def minimax_m3_index_decode(
 
     """
     if sort_indices and _can_use_index_score_topk_fusion(topk):
-        indices = _minimax_m3_index_score_topk(
+        return _minimax_m3_index_score_topk(
             idx_q,
             index_kv_cache,
             block_table,
@@ -631,7 +651,6 @@ def minimax_m3_index_decode(
             init_blocks=init_blocks,
             local_blocks=local_blocks,
         )
-        return indices, _select_num_idx_from_topk(indices)
     score = _minimax_m3_index_score(
         idx_q,
         index_kv_cache,
