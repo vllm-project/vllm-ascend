@@ -9,6 +9,7 @@
 # do not trigger the full CI suite.
 
 estimated_times:
+  tests/e2e/nightly/single_node/ops/singlecard_ops/triton/test_thinking_budget.py: 60
   # Initial scheduling estimate for the checkpoint-free FULL replay regression.
   tests/e2e/pull_request/one_card/test_dsv41_adaptive_graph.py: 60
   tests/e2e/pull_request/one_card/test_sparse_kv_offload_lifecycle.py: 600

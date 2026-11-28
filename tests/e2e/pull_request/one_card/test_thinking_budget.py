@@ -10,6 +10,12 @@ from vllm.v1.worker.gpu.sample.logits_processor.interface import LogitsContext
 from vllm.v1.worker.gpu.sample.thinking_budget import ThinkingBudgetState
 from vllm.v1.worker.gpu.states import RequestState
 
+# The /e2e command only accepts pull_request paths. Re-export the canonical
+# nightly operator cases through this existing PR test entry point.
+from tests.e2e.nightly.single_node.ops.singlecard_ops.triton.test_thinking_budget import (
+    test_thinking_budget_history_and_marker_scans as test_thinking_budget_history_and_marker_scans,
+)
+
 DEVICE = torch.device("npu")
 START = 90
 END = 91
