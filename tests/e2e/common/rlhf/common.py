@@ -7,6 +7,8 @@ from __future__ import annotations
 
 import contextlib
 import os
+import signal
+import socket
 import subprocess
 import sys
 import time
@@ -163,6 +165,33 @@ _DUMMY_ARGS = [
 ]
 
 
+def _wait_for_port_free(port: int, timeout: float = 10.0) -> None:
+    deadline = time.monotonic() + timeout
+    while time.monotonic() < deadline:
+        with socket.socket(socket.AF_INET, socket.SOCK_STREAM) as sock:
+            if sock.connect_ex(("127.0.0.1", port)) != 0:
+                return
+        time.sleep(0.5)
+
+
+def _stop_server(proc, port: int, timeout: float = 10.0) -> None:
+    """Stop the server and its EngineCore children, then wait for the port."""
+    if proc.poll() is None:
+        with contextlib.suppress(ProcessLookupError):
+            os.killpg(proc.pid, signal.SIGTERM)
+    try:
+        proc.wait(timeout=timeout)
+    except subprocess.TimeoutExpired:
+        with contextlib.suppress(ProcessLookupError):
+            os.killpg(proc.pid, signal.SIGKILL)
+        with contextlib.suppress(subprocess.TimeoutExpired):
+            proc.wait(timeout=timeout)
+    # EngineCore can outlive the API server; reap the whole server session.
+    with contextlib.suppress(ProcessLookupError):
+        os.killpg(proc.pid, signal.SIGKILL)
+    _wait_for_port_free(port, timeout)
+
+
 # ---------------------------------------------------------------------------
 # Server harness
 # ---------------------------------------------------------------------------
@@ -211,7 +240,12 @@ def server(
     import torch
 
     torch.npu.mem_get_info(0)
-    proc = subprocess.Popen(cmd, env=env)
+    gpu_memory_utilization = float(base[base.index("--gpu-memory-utilization") + 1])
+    wait_for_free_device_memory(0, gpu_memory_utilization)
+    _wait_for_port_free(port)
+    # EngineCore is a child of the API server; a new session lets teardown
+    # kill the whole tree without touching the pytest process group.
+    proc = subprocess.Popen(cmd, env=env, start_new_session=True)
     url = f"http://localhost:{port}"
     try:
         deadline = time.time() + timeout
@@ -223,15 +257,10 @@ def server(
                     break
             time.sleep(1)
         else:
-            proc.terminate()
             raise RuntimeError("vllm server did not start in time")
         yield url
     finally:
-        proc.terminate()
-        with contextlib.suppress(subprocess.TimeoutExpired):
-            proc.wait(timeout=10)
-        if proc.poll() is None:
-            proc.kill()
+        _stop_server(proc, port)
 
 
 # ---------------------------------------------------------------------------
@@ -317,12 +346,14 @@ def ok(resp) -> bool:
 
 
 def sleep(url, level=1, mode="abort"):
-    return requests.post(f"{url}/sleep", params={"level": level, "mode": mode}, timeout=15).status_code
+    # Level-1 sleep backs up ~1.2 GiB of weights through pinned host memory
+    # and takes ~10 s on A3; under CI load 15 s was not enough.
+    return requests.post(f"{url}/sleep", params={"level": level, "mode": mode}, timeout=60).status_code
 
 
 def wake(url, tags=None):
     params = {"tags": tags} if tags else {}
-    return requests.post(f"{url}/wake_up", params=params, timeout=20).status_code
+    return requests.post(f"{url}/wake_up", params=params, timeout=60).status_code
 
 
 def pause(url, mode="abort", clear_cache=True):
