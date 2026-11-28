@@ -4,11 +4,13 @@ from unittest import mock
 
 import pytest
 import torch
-
+import torch_npu
 from vllm_ascend.attention.indexer import QLIMetadataBuffers, QLIMetadataConfig
-from vllm_ascend.device.device_op import A5DeviceAdaptor, Ascend310PDeviceAdaptor, BaseDeviceAdaptor
 from vllm_ascend.device.hardware import AscendDeviceType
 from vllm_ascend.device.hardware_profile import get_hardware_profile
+
+from vllm_ascend.device.device_op import A5DeviceAdaptor, Ascend310PDeviceAdaptor, BaseDeviceAdaptor
+from vllm_ascend.quantization.utils import DynamicMXQuantScaleAlg
 
 
 @pytest.mark.parametrize("device", [AscendDeviceType.A2, AscendDeviceType.A3, AscendDeviceType.A5])
@@ -62,6 +64,57 @@ def test_rms_norm_cast_only_uses_supported_fused_operator(device, custom_ops):
 def test_host_registration_flags_follow_runtime_abi():
     assert BaseDeviceAdaptor.host_register_flags() == 0x10000002
     assert A5DeviceAdaptor.host_register_flags() == 0x2
+
+
+@pytest.mark.parametrize(
+    ("dtype_kind", "policy", "expected_scale_alg"),
+    [
+        ("torch_npu_fp4", DynamicMXQuantScaleAlg.CEIL, 2),
+        ("torch_fp4", DynamicMXQuantScaleAlg.CEIL, 2),
+        ("fp8", DynamicMXQuantScaleAlg.CEIL, 1),
+        ("torch_npu_fp4", DynamicMXQuantScaleAlg.MAX_EXPONENT, 0),
+        ("fp8", DynamicMXQuantScaleAlg.MAX_EXPONENT, 0),
+    ],
+)
+def test_a5_mx_input_quantization_selects_scale_algorithm(dtype_kind, policy, expected_scale_alg):
+    dtype = {
+        "torch_npu_fp4": torch_npu.float4_e2m1fn_x2,
+        "torch_fp4": getattr(torch, "float4_e2m1fn_x2", None),
+        "fp8": torch.float8_e4m3fn,
+    }[dtype_kind]
+    if dtype is None:
+        pytest.skip("torch.float4_e2m1fn_x2 is unavailable")
+    x = torch.ones(4, 128, dtype=torch.bfloat16)
+    quantized = torch.empty(4, 128 if dtype_kind == "fp8" else 64, dtype=torch.uint8)
+    raw_scale = torch.empty(4, 4, dtype=torch.uint8)
+    with (
+        mock.patch("vllm_ascend.quantization.utils.get_dynamic_mx_quant_scale_alg", return_value=policy),
+        mock.patch(
+            "vllm_ascend.device.device_op.torch_npu.npu_dynamic_mx_quant", return_value=(quantized, raw_scale)
+        ) as quant,
+    ):
+        actual, actual_scale = A5DeviceAdaptor.npu_dynamic_quant(x, act_quant_type=dtype, use_mxfp_quant=True)
+    quant.assert_called_once_with(x, dst_type=dtype, scale_alg=expected_scale_alg)
+    assert actual is quantized
+    assert actual_scale.shape == (4, 2, 2)
+
+
+def test_a5_mx_input_quantization_reuses_existing_scale():
+    x = torch.empty(4, 64, dtype=torch.uint8)
+    scale_2d = torch.empty(4, 4, dtype=torch.uint8)
+    scale_3d = torch.empty(4, 2, 2, dtype=torch.uint8)
+    with mock.patch("vllm_ascend.device.device_op.torch_npu.npu_dynamic_mx_quant") as quant:
+        out_x_2d, out_scale_2d = A5DeviceAdaptor.npu_dynamic_quant(
+            x, scale_2d, act_quant_type=torch_npu.float4_e2m1fn_x2, use_mxfp_quant=True
+        )
+        out_x_3d, out_scale_3d = A5DeviceAdaptor.npu_dynamic_quant(
+            x, scale_3d, act_quant_type=torch_npu.float4_e2m1fn_x2, use_mxfp_quant=True
+        )
+    quant.assert_not_called()
+    assert out_x_2d is x
+    assert out_scale_2d.shape == (4, 2, 2)
+    assert out_x_3d is x
+    assert out_scale_3d is scale_3d
 
 
 def test_deepseek_v41_backend_is_device_routed():

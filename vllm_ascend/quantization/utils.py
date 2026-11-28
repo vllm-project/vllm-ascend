@@ -23,7 +23,6 @@ import torch
 import torch_npu  # noqa: F401
 from vllm import envs
 from vllm.logger import logger
-
 from vllm_ascend.device.hardware_profile import HardwareCapability, get_current_hardware_profile
 from vllm_ascend.utils import (
     ASCEND_QUANTIZATION_METHOD,
@@ -49,6 +48,9 @@ def is_fused_moe_layer(layer: torch.nn.Module) -> bool:
 class DynamicMXQuantScaleAlg(IntEnum):
     MAX_EXPONENT = 0
     CEIL = 1
+
+
+_FP4_CEIL_SCALE_ALG = 2
 
 
 def get_dynamic_mx_quant_scale_alg(vllm_config=None) -> int:
@@ -86,6 +88,27 @@ def get_dynamic_mx_quant_scale_alg(vllm_config=None) -> int:
     ):
         return DynamicMXQuantScaleAlg.CEIL
     return DynamicMXQuantScaleAlg.MAX_EXPONENT
+
+
+def resolve_dynamic_mx_quant_scale_alg(dst_type, vllm_config=None) -> int:
+    """Map the model-level MX scale policy to the operator's ``scale_alg`` value.
+
+    ``get_dynamic_mx_quant_scale_alg()`` returns ``CEIL`` (``1``) for models
+    such as MiniMax M3, which matches ``npu_dynamic_mx_quant`` for FP8.
+    MXFP4 requires ``scale_alg=2`` for the ceil algorithm instead.
+    """
+    scale_alg = get_dynamic_mx_quant_scale_alg(vllm_config)
+    fp4_dtypes = tuple(
+        dtype
+        for dtype in (
+            getattr(torch_npu, "float4_e2m1fn_x2", None),
+            getattr(torch, "float4_e2m1fn_x2", None),
+        )
+        if dtype is not None
+    )
+    if scale_alg == DynamicMXQuantScaleAlg.CEIL and dst_type in fp4_dtypes:
+        return _FP4_CEIL_SCALE_ALG
+    return int(scale_alg)
 
 
 def get_model_file(

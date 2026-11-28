@@ -3,18 +3,20 @@ from unittest.mock import MagicMock, Mock, patch
 
 import torch
 import torch.nn as nn
+from tests.ut.base import TestBase
 from vllm.model_executor.layers.fused_moe.activation import MoEActivation
 from vllm.model_executor.layers.linear import RowParallelLinear
+from vllm_ascend.quantization.quant_type import QuantType
+from vllm_ascend.utils import ACL_FORMAT_FRACTAL_NZ, COMPRESSED_TENSORS_METHOD
 
-from tests.ut.base import TestBase
 from tests.ut.quantization.conftest_quantization import create_mock_vllm_config
+from vllm_ascend.quantization.methods.base import AscendMoEScheme
 from vllm_ascend.quantization.methods.w4a4.w4a4_mxfp4 import (
     AscendW4A4MXFP4DynamicFusedMoEMethod,
     AscendW4A4MXFP4DynamicLinearMethod,
     _rename_packed_weight_parameter,
 )
 from vllm_ascend.quantization.utils import DynamicMXQuantScaleAlg
-from vllm_ascend.utils import ACL_FORMAT_FRACTAL_NZ, COMPRESSED_TENSORS_METHOD
 
 
 class TestAscendW4A4MXFP4LinearMethod(TestBase):
@@ -615,3 +617,56 @@ class TestAscendW4A4MXFP4MoEMethod(TestBase):
             1.0,
         )
         self.assertEqual(events, ["fused_op", "dispose"] if prequantized else ["dispose", "fused_op"])
+
+    def test_quant_hidden_states_resolves_mx_scale_alg_and_reuses_scale(self):
+        class _DummyFP8MoEScheme(AscendMoEScheme):
+            quant_type = QuantType.W8A8MXFP
+            act_quant_type = torch.float8_e4m3fn
+
+            def get_weight(self, *args, **kwargs):
+                return {}
+
+            def get_dynamic_quant_param(self, *args, **kwargs):
+                return {}
+
+            def apply(self, *args, **kwargs):
+                return torch.empty(0)
+
+        fp8_scheme = _DummyFP8MoEScheme()
+        x = torch.ones((4, 128), dtype=torch.bfloat16)
+        raw_scale = torch.empty((4, 4), dtype=torch.uint8)
+        cases = (
+            ("fp4_ceil", self.scheme, self.scheme.act_quant_type, DynamicMXQuantScaleAlg.CEIL, 2),
+            ("fp8_ceil", fp8_scheme, torch.float8_e4m3fn, DynamicMXQuantScaleAlg.CEIL, 1),
+            ("fp4_default", self.scheme, self.scheme.act_quant_type, DynamicMXQuantScaleAlg.MAX_EXPONENT, 0),
+            ("fp8_default", fp8_scheme, torch.float8_e4m3fn, DynamicMXQuantScaleAlg.MAX_EXPONENT, 0),
+        )
+        for name, scheme, expected_dtype, policy, expected_alg in cases:
+            with self.subTest(case=name):
+                quantized = torch.empty(
+                    (4, 128 if expected_dtype == torch.float8_e4m3fn else 64),
+                    dtype=torch.uint8,
+                )
+                with (
+                    patch("vllm_ascend.quantization.utils.get_dynamic_mx_quant_scale_alg", return_value=policy),
+                    patch(
+                        "vllm_ascend.quantization.methods.base.torch_npu.npu_dynamic_mx_quant",
+                        return_value=(quantized, raw_scale),
+                    ) as mock_quant,
+                ):
+                    out_x, out_scale = scheme._quant_hidden_states(x, dynamic_scale=None)
+                mock_quant.assert_called_once_with(x, dst_type=expected_dtype, scale_alg=expected_alg)
+                self.assertIs(out_x, quantized)
+                self.assertEqual(out_scale.shape, (4, 2, 2))
+
+        existing_x = torch.empty((4, 64), dtype=torch.uint8)
+        existing_scale_2d = torch.empty((4, 4), dtype=torch.uint8)
+        existing_scale_3d = torch.empty((4, 2, 2), dtype=torch.uint8)
+        with patch("vllm_ascend.quantization.methods.base.torch_npu.npu_dynamic_mx_quant") as mock_quant:
+            out_x_2d, out_scale_2d = self.scheme._quant_hidden_states(existing_x, dynamic_scale=existing_scale_2d)
+            out_x_3d, out_scale_3d = self.scheme._quant_hidden_states(existing_x, dynamic_scale=existing_scale_3d)
+        mock_quant.assert_not_called()
+        self.assertIs(out_x_2d, existing_x)
+        self.assertEqual(out_scale_2d.shape, (4, 2, 2))
+        self.assertIs(out_x_3d, existing_x)
+        self.assertIs(out_scale_3d, existing_scale_3d)
