@@ -21,5 +21,7 @@ def preserve_termination_handlers() -> Iterator[None]:
     finally:
         for signum, handler in handlers.items():
             # None denotes a native handler not representable by signal.signal.
-            if handler is not None and signal.getsignal(signum) is not handler:
+            # A native sigaction can replace a Python handler without updating
+            # the registry returned by getsignal().
+            if handler is not None and (callable(handler) or signal.getsignal(signum) is not handler):
                 signal.signal(signum, handler)

@@ -373,6 +373,7 @@ class NPUWorker(GPUWorker):
         return apply_process_metrics_level(level)
 
     @serialized_sleep_transition
+    @preserve_termination_handlers()
     def sleep(self, level: int = 1) -> None:
         # Resolve the backend before cleanup or KV unregistration so a bad
         # backend configuration leaves the worker state intact.
@@ -425,6 +426,7 @@ class NPUWorker(GPUWorker):
                 drain()
 
     @serialized_sleep_transition
+    @preserve_termination_handlers()
     def wake_up(self, tags: list[str] | None = None) -> None:
         manager = getattr(self, "sleep_wakeup_manager", None)
         reuse = manager.graph_reuse if isinstance(manager, SleepWakeupManager) else None
@@ -748,6 +750,7 @@ class NPUWorker(GPUWorker):
         num_blocks = plan.get_num_blocks(available_bytes)
         return num_blocks * sum(spec.page_size_bytes for spec in plan.logical_cache_spec.values())
 
+    @preserve_termination_handlers()
     @torch.inference_mode()
     def determine_available_memory(self) -> int:
         """Profiles the peak memory usage of the model to determine how much

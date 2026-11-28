@@ -48,6 +48,17 @@ def test_leaves_unchanged_handlers_and_unknown_native_handlers_alone():
         install.assert_not_called()
 
 
+def test_reinstalls_python_handler_even_when_registry_is_unchanged():
+    def handle_term(signum, frame):
+        pass
+
+    handlers = {signal.SIGTERM: handle_term, signal.SIGINT: signal.SIG_DFL}
+    with patch("signal.getsignal", side_effect=handlers.__getitem__), patch("signal.signal") as install:
+        with preserve_termination_handlers():
+            pass
+        install.assert_called_once_with(signal.SIGTERM, handle_term)
+
+
 def test_non_main_thread_does_not_touch_process_handlers():
     with (
         patch("threading.current_thread", return_value=object()),
