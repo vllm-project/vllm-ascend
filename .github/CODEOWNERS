@@ -285,3 +285,5 @@
 # SKIP(owner): /tests/deepseek_v41_utils.py
 # SKIP(owner): /tests/ut/
 # SKIP(owner): /tests/e2e/pull_request/
+
+/.github/agent-review/L2/triton/ @ShyRa1n @ZT-AIA @yiz-liu

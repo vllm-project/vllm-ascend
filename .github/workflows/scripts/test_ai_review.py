@@ -287,13 +287,16 @@ def test_request_rechecks_live_pr_after_queue(pr, phase, agent, change, notice):
         (["README.md"], {"doc-quality"}),
         (["README.zh.md"], {"doc-quality"}),
         (["docs/source/getting_started.md", "vllm_ascend/worker/model_runner.py"], {"doc-quality", "model-execution"}),
-        (["vllm_ascend/ops/triton/docs/kernels.md"], {"doc-quality"}),
+        (["vllm_ascend/ops/triton/docs/kernels.md"], {"doc-quality", "triton"}),
+        (["vllm_ascend/ops/triton/linearnorm/qsa_rmsnorm_mrope.py"], {"triton"}),
+        (["vllm_ascend/ops/triton/spec_decode/example.py"], {"speculative-decoding", "triton"}),
+        (["tests/e2e/nightly/single_node/ops/singlecard_ops/triton/test_qsa_rmsnorm_mrope.py"], {"ci", "triton"}),
         (["docs/source/locale/zh_CN/LC_MESSAGES/user_guide/getting_started.po"], {"doc-quality"}),
         (["docs/source/locale/de/LC_MESSAGES/guide.po", "examples/README.md"], set()),
         ([".github/agent-review/instructions.md"], {"ci"}),
     ],
 )
-def test_doc_quality_path_routing(history, paths, expected):
+def test_review_domain_path_routing(history, paths, expected):
     registry = (history.repo / ".github/agent-review/domains.yaml").read_text()
     assert {domain["name"] for domain in ai.resolve_domains(registry, paths)} == expected
 
