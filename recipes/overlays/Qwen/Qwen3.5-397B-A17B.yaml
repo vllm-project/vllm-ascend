@@ -157,10 +157,75 @@ variants:
     hardware_overrides:
       ascend_950dt:
         docker_image: quay.io/ascend/vllm-ascend:v0.23.0-950DT
+  # MTP is fixed in this variant's extra_args: the core qwen3_5_mtp mode
+  # does not allowlist this new variant and overlay rules cannot rewrite the
+  # allowlist, so the runtime spec_decoding toggle is not available here
+  # (same approach as the 910B w4a8-mtp variant). If the core recipe later
+  # allowlists this variant, this static flag must be dropped to avoid a
+  # duplicate --speculative-config.
+  ascend_w8a8_a3:
+    model_id: Eco-Tech/Qwen3.5-397B-A17B-w8a8-mtp
+    precision: int8
+    label: W8A8 (Ascend A3)
+    vram_minimum_gb: 477
+    supported_hardware:
+      - ascend_910c
+    tp: 16
+    min_vllm_version: 0.30.0
+    # spec_decoding is excluded from this list: MTP is static in extra_args
+    # (see above), matching the 910B w4a8_mtp variant.
+    supported_features:
+      - tool_calling
+      - reasoning
+      - text_only
+      - encoder_parallel
+      - long_context
+    extra_args:
+      - '--distributed-executor-backend'
+      - mp
+      - '--data-parallel-size'
+      - '1'
+      - '--enable-expert-parallel'
+      - '--seed'
+      - '1024'
+      - '--quantization'
+      - ascend
+      - '--speculative-config'
+      - '{"method":"qwen3_5_mtp","num_speculative_tokens":3,"enforce_eager":true}'
+      - '--max-num-seqs'
+      - '128'
+      - '--max-model-len'
+      - '133000'
+      - '--max-num-batched-tokens'
+      - '16384'
+      - '--trust-remote-code'
+      - '--gpu-memory-utilization'
+      - '0.90'
+      - '--enable-prefix-caching'
+      - '--compilation-config'
+      - '{"cudagraph_mode":"FULL_DECODE_ONLY"}'
+      - '--additional-config'
+      - '{"enable_cpu_binding": true, "enable_fused_mc2": 1, "enable_flashcomm1": true}'
+    extra_env:
+      VLLM_USE_MODELSCOPE: 'True'
+      HCCL_BUFFSIZE: '1024'
+      HCCL_OP_EXPANSION_MODE: AIV
+      VLLM_USE_V2_MODEL_RUNNER: '0'
+    hardware_overrides:
+      ascend_910c:
+        docker_image: quay.io/ascend/vllm-ascend:v0.30.0-a3
+        docker_serve_command: "vllm serve"
+        install:
+          pip: false
 meta:
   hardware:
     ascend_950dt: verified
     ascend_910b: verified
+    # The A3 bring-up (single Atlas 800 A3, TP16 + MTP, benchmarked
+    # 2026-10-28~30) ran on the nightly-main-a3 image (vLLM 0.32.0-dev); the
+    # pinned v0.30.0-a3 stable image has not been re-validated end-to-end,
+    # so this profile is declared supported rather than verified.
+    ascend_910c: supported
 # The 910B lane is PD-disaggregation only (1P1D, w4a8-mtp). Disable the other
 # serving strategies on the exact 910B profile only — the npu-brand key would
 # also hit the existing 950DT lanes, which must stay unchanged.
@@ -171,12 +236,18 @@ strategy_hardware:
     ascend_910b: unsupported
   single_node_dep:
     ascend_910b: unsupported
+    # The A3 (910C) lane is single-node TP16 x DP1: DEP would render 16 full
+    # replicas of the ~477 GB checkpoint on one 16-die node (and ignores the
+    # variant's static --data-parallel-size 1), so it is not offered.
+    ascend_910c: unsupported
   multi_node_tp:
     ascend_910b: unsupported
   multi_node_tp_pp:
     ascend_910b: unsupported
   multi_node_dep:
+    # Same full-replica explosion across nodes; not offered on 910C.
     ascend_910b: unsupported
+    ascend_910c: unsupported
   multi_node_tep:
     ascend_910b: unsupported
   pd_cluster:
@@ -289,6 +360,25 @@ presets:
             kv_connector_extra_config:
               prefill: { dp_size: 1, tp_size: 8, pp_size: null }
               decode: { dp_size: 1, tp_size: 8, pp_size: null }
+  ascend_a3_w8a8_tp16:
+    label: A3 W8A8 TP16
+    hardware: ascend_910c
+    strategy: single_node_tp
+    variants:
+      - ascend_w8a8_a3
+    default: true
+    description: >-
+      One Atlas 800 A3 node (16 die), TP16 x DP1 with MTP fixed in the variant
+      args: the core qwen3_5_mtp mode does not allowlist this variant, and
+      overlay rules cannot rewrite that allowlist. The bring-up ran on
+      the nightly-main-a3 image (vLLM 0.32.0-dev); the pinned v0.30.0-a3
+      stable image is not re-validated end-to-end yet.
+    select:
+      frontend: python
+      features:
+        tool_calling: false
+        reasoning: false
+        encoder_parallel: false
 guide_sections:
   ascend: |
     ### Ascend deployment (A2 PD, W4A8-MTP, 1P1D)
