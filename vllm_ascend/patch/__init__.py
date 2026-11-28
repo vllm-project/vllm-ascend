@@ -948,6 +948,19 @@
 #    Future Plan:
 #       Remove this patch when vllm-ascend supports pattern matching for this fused kernel.
 #
+#   4. `vllm.model_executor.models.qwen3_vl.Qwen3_VisionTransformer.fast_pos_embed_interpolate`
+#    Why:
+#       Upstream #37948's CUDA launch strategy has not been validated on Ascend;
+#       the existing patch unconditionally uses the native interpolation chain.
+#    How:
+#       Use bounded element tiles on Triton-capable NPUs with supported tables;
+#       preserve native on 310P, without Triton, or with unsupported layouts/dtypes.
+#    Related PR:
+#       https://github.com/vllm-project/vllm/pull/37948
+#    Future Plan:
+#       Remove the dispatch patch when upstream provides a validated Ascend
+#       implementation or a backend-selectable interpolation entry point.
+#
 # ** 19. File: worker/patch_routed_experts_capture.py**
 # ~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~
 #   1. `vllm.model_executor.layers.fused_moe.routed_experts_capturer.RoutedExpertsCapturer.capture`
