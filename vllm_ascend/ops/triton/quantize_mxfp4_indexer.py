@@ -11,6 +11,8 @@ _INDEXER_WIDTH = 128
 _GROUP_SIZE = 32
 _GROUP_COUNT = _INDEXER_WIDTH // _GROUP_SIZE
 _PACKED_WIDTH = _INDEXER_WIDTH // 2
+_QUERY_TILE_ROWS = 32
+_QUERY_TILE_MIN_ROWS = 2048
 
 
 @triton.jit
@@ -106,6 +108,39 @@ def _quantize_mxfp4_indexer_kernel(
 
 
 @triton.jit
+def _quantize_mxfp4_indexer_tiled_kernel(
+    input_ptr,
+    data_ptr,
+    scale_ptr,
+    WIDTH: tl.constexpr,
+    GROUP_SIZE: tl.constexpr,
+    ROWS_PER_BLOCK: tl.constexpr,
+):
+    num_groups: tl.constexpr = WIDTH // GROUP_SIZE
+    pairs_per_group: tl.constexpr = GROUP_SIZE // 2
+    rows = tl.program_id(0) * ROWS_PER_BLOCK + tl.arange(0, ROWS_PER_BLOCK)
+    columns = tl.arange(0, WIDTH)
+    values = tl.load(input_ptr + rows[:, None] * WIDTH + columns[None, :])
+    values = values.to(tl.float32).reshape((ROWS_PER_BLOCK, num_groups, pairs_per_group, 2))
+    even, odd = tl.split(values)
+    magnitudes = tl.maximum(tl.abs(even), tl.abs(odd))
+    amax = tl.max(magnitudes, axis=2)
+    exponent = _ceil_e8m0_scale_byte(tl.maximum(amax, 6.0 * 2.0**-126) / 6.0)
+    group_offsets = tl.arange(0, num_groups)
+    packed_scale = tl.sum(exponent << (8 * group_offsets[None, :]), axis=1)
+    tl.store(scale_ptr + rows, packed_scale)
+
+    scale = (exponent << 23).to(tl.float32, bitcast=True)
+    packed = _fp4_e2m1_code(even / scale[:, :, None])
+    packed |= _fp4_e2m1_code(odd / scale[:, :, None]) << 4
+    pairs = tl.arange(0, WIDTH // 2)
+    tl.store(
+        data_ptr + rows[:, None] * (WIDTH // 2) + pairs[None, :],
+        packed.reshape((ROWS_PER_BLOCK, WIDTH // 2)),
+    )
+
+
+@triton.jit
 def _write_mxfp4_indexer_cache_kernel(
     input_ptr,
     slots_ptr,
@@ -196,7 +231,18 @@ def quantize_mxfp4_indexer(x: torch.Tensor) -> tuple[torch.Tensor, torch.Tensor]
     rows = contiguous.numel() // _INDEXER_WIDTH
     data_i8 = torch.empty((rows, _PACKED_WIDTH), dtype=torch.int8, device=x.device)
     packed_scale = torch.empty((rows,), dtype=torch.int32, device=x.device)
-    if rows:
+    # Large indexer batches use one contiguous read and one reduction per
+    # group. Keep the single-row path for small decode batches and partial tiles.
+    if rows >= _QUERY_TILE_MIN_ROWS and rows % _QUERY_TILE_ROWS == 0:
+        _quantize_mxfp4_indexer_tiled_kernel[(rows // _QUERY_TILE_ROWS,)](
+            contiguous,
+            data_i8,
+            packed_scale,
+            WIDTH=_INDEXER_WIDTH,
+            GROUP_SIZE=_GROUP_SIZE,
+            ROWS_PER_BLOCK=_QUERY_TILE_ROWS,
+        )
+    elif rows:
         _quantize_mxfp4_indexer_kernel[(rows,)](
             contiguous,
             data_i8,
