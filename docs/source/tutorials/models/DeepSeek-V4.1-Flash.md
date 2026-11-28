@@ -2115,11 +2115,14 @@ Select the tab for the target hardware.
 
     ```ini
     ock.mmc.local_service.storage.enabled = true
-    ubsio.disk.path = /dev/loop0
+    ubsio.disk.path = <SSD_DEVICE_PATH>
     ubsio.mem.size_in_gb = 50
     ubsio.standalone.device_count = 1
     ubsio.standalone.force_new_disk = true
     ```
+
+    Replace `<SSD_DEVICE_PATH>` with the path to the dedicated block device for
+    SSD pooling.
 
     `world_size` is the maximum number of LocalServices that can join the pool, not
     the DP size. Changing it after LocalServices connect requires restarting
