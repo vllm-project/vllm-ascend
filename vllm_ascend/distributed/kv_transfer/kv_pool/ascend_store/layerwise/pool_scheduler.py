@@ -7,6 +7,7 @@ from vllm.v1.core.kv_cache_utils import BlockHash
 from vllm.v1.kv_cache_interface import KVCacheConfig
 from vllm.v1.request import Request
 
+from vllm_ascend.ascend_config import KVPPConfig
 from vllm_ascend.distributed.kv_transfer.kv_pool.ascend_store.backend import (
     resolve_backend,
 )
@@ -48,6 +49,8 @@ class LayerwiseKVPoolScheduler(BaseKVPoolScheduler):
         self.dspark_prefix_keys: DSparkPrefixKeys | None = None
         self.dspark_draft_only_group_ids = frozenset(getattr(kv_cache_config, "dspark_draft_only_group_ids", ()))
         super().__init__(vllm_config, use_layerwise, kv_cache_config)
+        if self.use_layerwise_transfer:
+            self._kvpp_size = KVPPConfig.from_vllm_config(vllm_config).size
         self.sharded_mamba_group_ids = get_sharded_mamba_group_ids(kv_cache_config)
         self.load_async = False
         self.layerwise_offload = (
@@ -324,8 +327,8 @@ class LayerwiseKVPoolScheduler(BaseKVPoolScheduler):
         backend's protocol module.
 
         Single-group uses PR #11585 format; multi-group includes group_id.
-        The protocol helper covers every PP stage and head, and every PCP
-        rank for sharded Mamba groups. PCP replicas share one object.
+        KVPP attention uses one key per owner in each PP stage. Sharded
+        Mamba groups also include each distinct PCP shard.
         """
         assert self.layerwise_keys is not None
         draft_keys = self.dspark_prefix_keys
@@ -334,6 +337,9 @@ class LayerwiseKVPoolScheduler(BaseKVPoolScheduler):
             return draft_keys.make_hit_check_keys(block_hash_hex)
         if group_id in self.sharded_mamba_group_ids or group_id in self.num_mamba_speculative_blocks_by_group:
             head_or_tp_ranks = self.tp_size
+        elif self.use_layerwise_transfer and self._kvpp_size > 1:
+            # Each KVPP owner stores different layers. A hit requires every owner's key on each PP stage.
+            head_or_tp_ranks = self._kvpp_size
         else:
             head_or_tp_ranks = self.tp_size // self.put_step
         keys = self.layerwise_keys.make_hit_check_keys(group_id, block_hash_hex, head_or_tp_ranks)

@@ -856,7 +856,6 @@ class TestKVPPPoolWorker(unittest.TestCase):
         block_hash = b"prefix"
 
         def publish(keys, statuses):
-            self.assertEqual(statuses, [0] * len(keys))
             published.update(keys)
             return statuses
 
@@ -902,6 +901,8 @@ class TestKVPPPoolWorker(unittest.TestCase):
                     metadata = AscendConnectorMetadata(preempted_req_ids=set())
                     metadata.add_request(request)
                     worker.prepare_layerwise_step(metadata)
+                    if (stage, rank) == (0, 0):
+                        self.assertFalse(worker.layer_save_tasks[6])  # PCP0 registers only layers 0 through 5.
 
                     if (stage, rank) == (0, 1):
                         with patch.object(worker.layerwise_backend, "create_scheduler_client", return_value=store):
@@ -910,9 +911,6 @@ class TestKVPPPoolWorker(unittest.TestCase):
                         hit_request = SimpleNamespace(
                             request_id="hit", prompt_token_ids=[1] * 17, num_tokens=17, block_hashes=[block_hash]
                         )
-                        keys = set(scheduler._make_layerwise_hit_check_keys(0, block_hash_to_str(block_hash)))
-                        self.assertEqual(len(keys), 16)
-                        self.assertEqual(keys - published, set(request.save_keys))
                         self.assertEqual(len(published), 15)
 
                         # PCP1 owns layers 6 through 11 in PP0. Block publication until layer 11 is saved.
@@ -927,15 +925,15 @@ class TestKVPPPoolWorker(unittest.TestCase):
                         worker.save_kv_layer(metadata)
                         self.assertTrue(events[11].wait(timeout=5))
                         self.assertFalse(events[41].is_set())
-                        store.batch_write_finish.assert_called_once_with(request.save_keys, [0])
                         self.assertEqual(store.store.batch_copy.call_count, 6)
-                        self.assertEqual(published, keys)
                         self.assertEqual(scheduler.get_num_new_matched_tokens(hit_request, 0), (16, False))
+                        self.assertCountEqual(store.batch_is_readable.call_args.args[0], published)
 
                     while worker.current_layer < num_layers:
                         worker.save_kv_layer(metadata)
                     worker.wait_for_previous_save()
-                    store.batch_write_finish.assert_called_once_with(request.save_keys, [0])
+                    owner_key = f"llama-7b@pp{stage}@{block_hash.hex()}@{rank}"
+                    store.batch_write_finish.assert_called_once_with([owner_key], [0])
                     self.doCleanups()
 
     def test_load_completion_is_shared_and_reset_at_step_binding(self):

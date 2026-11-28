@@ -1,5 +1,4 @@
 # Standard
-import hashlib
 import os
 import threading
 import time
@@ -8,11 +7,8 @@ from typing import Any
 
 import torch
 from vllm.config import ParallelConfig
-from vllm.config.utils import hash_config
-from vllm.distributed.utils import get_pp_indices
 from vllm.logger import logger
 
-from vllm_ascend.ascend_config import KVPPConfig
 from vllm_ascend.distributed.kv_transfer.kv_pool.ascend_store.backend.base import (
     QOS_VALUE_MAX,
     QOS_VALUE_MIN,
@@ -202,40 +198,11 @@ class MemcacheBackend(Backend):
         pp_size = parallel.pipeline_parallel_size
         pcp_size = getattr(parallel, "prefill_context_parallel_size", 1)
         pcp_sharded_group_ids = get_sharded_mamba_group_ids(kv_cache_config)
-        kvpp_size = (
-            KVPPConfig.from_vllm_config(vllm_config).size if getattr(vllm_config, "additional_config", None) else 1
-        )
-        if kvpp_size > 1:
-            transfer = getattr(vllm_config, "kv_transfer_config", None)
-            extra_config = getattr(transfer, "kv_connector_extra_config", None) or {}
-            if extra_config.get("layerwise_num_shared_buffers"):
-                raise ValueError("Memcache layerwise KVPP requires persistent owner caches.")
-            model = vllm_config.model_config
-            total_layers = model.get_total_num_hidden_layers()
-            partitions = tuple(get_pp_indices(total_layers, stage, pp_size) for stage in range(pp_size))
-            if num_groups != 1 or any(end - start < kvpp_size for start, end in partitions):
-                raise ValueError(
-                    "Memcache layerwise KVPP requires one KV cache group and at least one target layer "
-                    f"per KVPP rank in each PP stage. Got {num_groups=}, {kvpp_size=}, {partitions=}."
-                )
-            speculative = vllm_config.speculative_config
-            identity = (
-                parallel.tensor_parallel_size,
-                pcp_size,
-                partitions,
-                hash_config(model),
-                vllm_config.cache_config.cache_dtype,
-                getattr(getattr(vllm_config, "attention_config", None), "indexer_kv_dtype", None),
-                tuple(grouped_block_size),
-                hash_config(speculative) if speculative is not None else None,
-            )
-            digest = hashlib.sha256(repr(identity).encode()).hexdigest()[:24]
-            model_name = f"{model_name}@kvpp:{digest}"
 
         def make_key(group: int, block_hash: str, head: int, stage: int) -> str:
             return make_full_key(model_name, group, block_hash, head, num_groups, stage, pp_size)
 
-        return LayerwiseKeyBuilder(make_key, pp_size, pcp_size, pcp_sharded_group_ids, kvpp_size=kvpp_size)
+        return LayerwiseKeyBuilder(make_key, pp_size, pcp_size, pcp_sharded_group_ids)
 
     def __init__(
         self,

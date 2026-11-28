@@ -146,6 +146,8 @@ def test_joint_prefix_keys_keep_target_keys_and_require_every_final_pp_draft_rep
     target_keys = ["target-pp0-rank0", "target-pp1-rank0"]
     scheduler.layerwise_keys = SimpleNamespace(make_hit_check_keys=MagicMock(return_value=target_keys.copy()))
     scheduler.tp_size, scheduler.put_step = 4, 4
+    scheduler.use_layerwise_transfer = True
+    scheduler._kvpp_size = 1
     scheduler.num_mamba_speculative_blocks_by_group = {}
     scheduler._finished_partial_tail_metas = {}
     scheduler.dspark_prefix_keys = DSparkPrefixKeys("draft-contract", pp_size=2, tp_size=4) if dspark else None
@@ -172,6 +174,8 @@ def test_joint_prefix_draft_only_group_uses_companion_keys_without_losing_mixed_
     scheduler.sharded_mamba_group_ids = set()
     scheduler.layerwise_keys = SimpleNamespace(make_hit_check_keys=MagicMock(return_value=["target-group3"]))
     scheduler.tp_size, scheduler.put_step = 4, 4
+    scheduler.use_layerwise_transfer = True
+    scheduler._kvpp_size = 1
     scheduler.num_mamba_speculative_blocks_by_group = {}
     scheduler._finished_partial_tail_metas = {}
     scheduler.dspark_prefix_keys = DSparkPrefixKeys("draft-contract", pp_size=2, tp_size=4)
@@ -204,6 +208,8 @@ def test_prefix_lookup_rechecks_after_save_and_eviction(mode):
     # return_value would accumulate draft keys across lookups.
     scheduler.layerwise_keys = SimpleNamespace(make_hit_check_keys=MagicMock(side_effect=lambda *args: ["target"]))
     scheduler.tp_size, scheduler.put_step = 4, 4
+    scheduler.use_layerwise_transfer = True
+    scheduler._kvpp_size = 1
     scheduler.num_mamba_speculative_blocks_by_group = {}
     scheduler._finished_partial_tail_metas = {}
     scheduler.dspark_prefix_keys = (
@@ -291,6 +297,8 @@ def test_joint_prefix_group_ownership_survives_scheduler_conversion_and_empty_pp
         make_hit_check_keys=MagicMock(side_effect=lambda group_id, *_: [f"target-group{group_id}"])
     )
     scheduler.tp_size, scheduler.put_step = 4, 4
+    scheduler.use_layerwise_transfer = True
+    scheduler._kvpp_size = 1
     scheduler.num_mamba_speculative_blocks_by_group = {}
     scheduler._finished_partial_tail_metas = {}
     scheduler.dspark_prefix_keys = DSparkPrefixKeys("draft-contract", pp_size=2, tp_size=4)

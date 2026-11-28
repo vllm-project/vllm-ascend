@@ -22,6 +22,7 @@ from vllm.distributed.kv_transfer.kv_connector.v1.metrics import (
     PromMetric,
     PromMetricT,
 )
+from vllm.distributed.utils import get_pp_indices
 from vllm.forward_context import ForwardContext
 from vllm.logger import logger
 from vllm.v1.attention.backend import AttentionMetadata  # type: ignore
@@ -32,12 +33,15 @@ from vllm.v1.kv_cache_interface import KVCacheConfig
 from vllm.v1.outputs import KVConnectorOutput
 from vllm.v1.request import Request
 
+from vllm_ascend.ascend_config import KVPPConfig
 from vllm_ascend.distributed.kv_transfer.kv_pool.ascend_store.backend import (
     get_backend_class,
 )
 from vllm_ascend.distributed.kv_transfer.kv_pool.ascend_store.dspark_prefix_cache import DSparkPrefixKeys
 from vllm_ascend.distributed.kv_transfer.kv_pool.ascend_store.hisparse.layout import has_hisparse_cache_layout
 from vllm_ascend.distributed.kv_transfer.kv_pool.ascend_store.layerwise.layerwise_cache_layout import (
+    get_layerwise_reuse_backing_bytes,
+    get_layerwise_reuse_layout,
     has_shared_kv_sources,
 )
 from vllm_ascend.distributed.kv_transfer.kv_pool.ascend_store.layerwise.pool_scheduler import (
@@ -207,6 +211,27 @@ class AscendStoreConnector(KVConnectorBase_V1, SupportsHMA):
             if incompatibilities:
                 raise ValueError(
                     "HiSparse with AscendStore has incompatible configuration:\n- " + "\n- ".join(incompatibilities)
+                )
+        if (
+            self.use_layerwise
+            and self.backend_name == "memcache"
+            and (kvpp_size := KVPPConfig.from_vllm_config(vllm_config).size) > 1
+        ):
+            assert kv_cache_config is not None
+            # A reuse plan reaches workers as a layout and the scheduler as its backing size.
+            if (
+                get_layerwise_reuse_layout(kv_cache_config) is not None
+                or get_layerwise_reuse_backing_bytes(kv_cache_config) is not None
+            ):
+                raise ValueError("Memcache layerwise KVPP does not support cross-layer buffer reuse.")
+            num_groups = len(kv_cache_config.kv_cache_groups) or 1
+            total_layers = vllm_config.model_config.get_total_num_hidden_layers()
+            pp_size = vllm_config.parallel_config.pipeline_parallel_size
+            partitions = tuple(get_pp_indices(total_layers, stage, pp_size) for stage in range(pp_size))
+            if num_groups != 1 or any(end - start < kvpp_size for start, end in partitions):
+                raise ValueError(
+                    "Memcache layerwise KVPP requires one KV cache group and at least one target layer "
+                    f"per KVPP rank in each PP stage. Got {num_groups=}, {kvpp_size=}, {partitions=}."
                 )
         self.backend_class = get_backend_class(self.backend_name) if self.use_layerwise else None
         self.layerwise_data_plane = self.backend_class.layerwise_data_plane if self.backend_class is not None else None
