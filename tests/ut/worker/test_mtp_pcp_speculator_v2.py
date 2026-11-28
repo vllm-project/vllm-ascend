@@ -31,8 +31,8 @@ from vllm.v1.worker.gpu.spec_decode.target_dependent_ar import speculator as tar
 
 from vllm_ascend._310p.worker.v2.spec_decode.mtp_speculator import AscendMTPSpeculator310
 from vllm_ascend.attention.mla_v1 import AscendMLADecodeMetadata, AscendMLAMetadata
+from vllm_ascend.distributed.eplb.config import validate_eplb_config
 from vllm_ascend.patch.worker import patch_dspark
-from vllm_ascend.platform import _validate_eplb_config
 from vllm_ascend.worker.v2.spec_decode.eagle.speculator import AscendEagleSpeculator
 from vllm_ascend.worker.v2.spec_decode.mtp.speculator import (
     AscendMTPSpeculator,
@@ -170,7 +170,7 @@ def validate_eplb_on_cpu(monkeypatch):
 
     def check_and_update_config(config):
         original_check(config)
-        _validate_eplb_config(config)
+        validate_eplb_config(config)
 
     monkeypatch.setattr(platform, "check_and_update_config", check_and_update_config)
 

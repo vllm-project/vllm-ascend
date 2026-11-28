@@ -331,6 +331,19 @@ class TestAscendConfig(TestBase):
     def test_eplb_load_collection_phase_defaults_to_all(self):
         self.assertEqual(EplbConfig().load_collection_phase, "all")
 
+    def test_eplb_export_after_rearranges_validation(self):
+        self.assertIsNone(EplbConfig().export_after_rearranges)
+        self.assertEqual(
+            EplbConfig(expert_placement_path="d.json", export_after_rearranges=5).export_after_rearranges,
+            5,
+        )
+        with self.assertRaisesRegex(ValueError, "requires eplb_config.expert_placement_path"):
+            EplbConfig(export_after_rearranges=5)
+        with self.assertRaisesRegex(ValueError, "must be >= 1"):
+            EplbConfig(expert_placement_path="d.json", export_after_rearranges=0)
+        with self.assertRaisesRegex(ValueError, "requires eplb_config.export_after_rearranges"):
+            EplbConfig(expert_placement_path="d.json")
+
     def test_eplb_load_collection_phase_validation(self):
         self.assertEqual(
             EplbConfig(load_collection_phase="prefill").load_collection_phase,

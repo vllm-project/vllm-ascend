@@ -105,7 +105,10 @@ class TestAscendEPLBController(unittest.TestCase):
                     model=nn.Linear(2, 2),
                     set_eplb_state=MagicMock(),
                 )
-                draft_config = SimpleNamespace(model="draft")
+                draft_config = SimpleNamespace(
+                    model="draft",
+                    compute_hash=MagicMock(return_value="draft"),
+                )
                 with patch("vllm.v1.worker.gpu.eplb_utils.get_mixture_of_experts_model", return_value=speculator.model):
                     added = controller.maybe_register_speculator(
                         speculator, SimpleNamespace(draft_model_config=draft_config), False
@@ -123,7 +126,10 @@ class TestAscendEPLBController(unittest.TestCase):
                     speculator.set_eplb_state.assert_not_called()
 
                     target = nn.Linear(2, 2)
-                    model_config = SimpleNamespace(model="target")
+                    model_config = SimpleNamespace(
+                        model="target",
+                        compute_hash=MagicMock(return_value="target"),
+                    )
                     with patch("vllm.v1.worker.gpu.eplb_utils.get_mixture_of_experts_model", return_value=target):
                         added = controller.maybe_register_model(target, model_config)
                     controller.state.add_model.assert_called_once_with(target, model_config)
@@ -227,6 +233,48 @@ class TestAscendEPLBController(unittest.TestCase):
         )
         self.assertFalse(state.should_record_tensor.item())
         self.assertFalse(state._has_fresh_recorded_load)
+
+    def test_prepare_forward_exports_once_after_configured_cycles(self):
+        controller = self._make_controller()
+        controller.export_after_rearranges = 5
+        controller.expert_placement_path = "/tmp/deployment.json"
+        controller._kv_role = "kv_consumer"
+        controller.parallel_config.data_parallel_rank = 1
+        state = MagicMock()
+        state.uses_custom_load_stats = False
+        state.take_export_request.side_effect = [True, False]
+        controller.state = state
+
+        with (
+            patch.object(controller, "export_placement", return_value={"path": "x"}) as export,
+            patch(
+                "vllm_ascend.worker.v2.eplb.get_current_hardware_profile",
+                return_value=get_hardware_profile(AscendDeviceType.A5),
+            ),
+        ):
+            controller.prepare_forward(SimpleNamespace(), 4)
+            controller.prepare_forward(SimpleNamespace(), 4)
+
+        export.assert_called_once_with("/tmp/deployment.kv_consumer.dp1.json")
+        self.assertEqual(state.take_export_request.call_count, 2)
+
+    def test_prepare_forward_skips_export_without_a_trigger(self):
+        controller = self._make_controller()
+        state = MagicMock()
+        state.uses_custom_load_stats = False
+        controller.state = state
+
+        with (
+            patch.object(controller, "export_placement") as export,
+            patch(
+                "vllm_ascend.worker.v2.eplb.get_current_hardware_profile",
+                return_value=get_hardware_profile(AscendDeviceType.A5),
+            ),
+        ):
+            controller.prepare_forward(SimpleNamespace(), 4)
+
+        state.take_export_request.assert_not_called()
+        export.assert_not_called()
 
     def test_setup_from_mapping_updates_registered_state(self):
         controller = self._make_controller()
