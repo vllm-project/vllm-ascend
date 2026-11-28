@@ -810,7 +810,7 @@ class NPUModelRunner(GPUModelRunner):
                 # align_skip_drafts_across_dp.
                 dp_agreed_scheduler_output = align_skip_drafts_across_dp(
                     scheduler_output,
-                    self.dp_size,
+                    self.vllm_config,
                     skip_dp_metadata_sync,
                 )
                 output = super().execute_model(

@@ -21,12 +21,23 @@ from copy import copy
 from typing import TYPE_CHECKING
 
 if TYPE_CHECKING:
+    from vllm.config import VllmConfig
     from vllm.v1.core.sched.output import SchedulerOutput
+
+
+def _dp_group_size(vllm_config: "VllmConfig | None") -> int:
+    """Return the size of the DP group, or 1 when the config does not say."""
+    parallel_config = getattr(vllm_config, "parallel_config", None)
+    data_parallel_size = getattr(parallel_config, "data_parallel_size", 1)
+    try:
+        return int(data_parallel_size)
+    except (TypeError, ValueError):
+        return 1
 
 
 def align_skip_drafts_across_dp(
     scheduler_output: "SchedulerOutput",
-    dp_size: int,
+    vllm_config: "VllmConfig | None",
     skip_dp_metadata_sync: bool,
 ) -> "SchedulerOutput":
     """Return a scheduler output whose ``skip_drafts`` flag is safe for the DP group.
@@ -50,9 +61,12 @@ def align_skip_drafts_across_dp(
     optimization (it only tells the drafter that no scheduled request can use
     the proposed drafts), so dropping it does not change the sampled tokens.
 
+    Without a DP group there is nobody to agree with, so the flag is kept:
+    upstream never reaches the collective and reads the flag as is.
+
     Args:
         scheduler_output: The scheduler output of the current step.
-        dp_size: Number of ranks in the DP group.
+        vllm_config: The engine config, used to read the DP group size.
         skip_dp_metadata_sync: Whether this rank skips the DP metadata
             all-reduce.
 
@@ -60,7 +74,7 @@ def align_skip_drafts_across_dp(
         ``scheduler_output`` unchanged when the flag is already safe, and a
         shallow copy with ``skip_drafts`` cleared otherwise.
     """
-    if not skip_dp_metadata_sync or dp_size <= 1:
+    if not skip_dp_metadata_sync or _dp_group_size(vllm_config) <= 1:
         return scheduler_output
     if not getattr(scheduler_output, "skip_drafts", False):
         return scheduler_output
