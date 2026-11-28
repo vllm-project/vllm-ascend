@@ -20,7 +20,6 @@ import vllm_ascend.patch.platform.patch_distributed  # noqa
 import vllm_ascend.patch.platform.patch_kimi_k31_config  # noqa
 import vllm_ascend.patch.platform.patch_kv_cache_admission  # noqa
 import vllm_ascend.patch.platform.patch_mamba_block_aligned_split  # noqa
-import vllm_ascend.patch.platform.patch_online_quant  # noqa
 import vllm_ascend.patch.platform.patch_parallel_config  # noqa
 import vllm_ascend.patch.platform.patch_pp_mtp  # noqa
 import vllm_ascend.patch.platform.patch_use_v2_model_runner  # noqa
@@ -117,3 +116,12 @@ import vllm_ascend.patch.platform.patch_example_connector  # noqa
 # Upstream plan: contribute physical-block accounting to vLLM and remove this
 # patch once both supported vLLM versions cover first-time and shared-block
 # admission accounting.
+
+# Online quantization dispatches through vLLM's global tables, so this has to run
+# in every process that builds layers. Apply it last: importing it pulls in the
+# Ascend ops package, which must happen after the MoE factory patch above.
+from vllm_ascend.patch.platform.patch_online_quant import (  # noqa: E402
+    apply_online_quantization_patch,
+)
+
+apply_online_quantization_patch()

@@ -15,24 +15,14 @@
 # limitations under the License.
 #
 
-import contextlib
 import unittest
 from types import SimpleNamespace
 from unittest.mock import MagicMock, patch
 
 import torch
-from vllm.config.quantization import QuantizationConfigArgs, QuantSpec
 from vllm.model_executor.layers.linear import LinearBase, RowParallelLinear
-from vllm.model_executor.layers.quantization.utils.quant_utils import (
-    kFp8StaticChannelSym,
-    kInt8StaticChannelSym,
-)
 
 from tests.ut.base import TestBase
-from vllm_ascend.quantization.configs.online_config import (
-    AscendOnlineQuantizationConfig,
-    build_ascend_online_quant_config,
-)
 from vllm_ascend.quantization.methods.online.int8 import (
     AscendInt8PerChannelOnlineLinearMethod,
     AscendInt8PerChannelOnlineMoEMethod,
@@ -47,29 +37,7 @@ from vllm_ascend.quantization.methods.w8a8.w8a8_dynamic import (
 )
 
 MODULE = "vllm_ascend.quantization.methods.online.int8"
-CONFIG_MODULE = "vllm_ascend.quantization.configs.online_config"
 PROCESSED_FLAG = "_already_called_process_weights_after_loading"
-
-
-def _int8_moe_config(**kwargs):
-    from vllm.config.quantization import QuantizationConfigArgs
-
-    return AscendOnlineQuantizationConfig(QuantizationConfigArgs(moe=QuantSpec(weight=kInt8StaticChannelSym), **kwargs))
-
-
-class _LinearLayer(LinearBase):
-    """Minimal LinearBase subclass.
-
-    vLLM resolves online targets from the layer *type*, so the tests need a real
-    LinearBase subclass instead of a ``MagicMock(spec=LinearBase)``.
-    """
-
-    def __init__(self, prefix: str = "model.layers.0.mlp.down_proj") -> None:
-        torch.nn.Module.__init__(self)
-        self.prefix = prefix
-        self.tp_size = 1
-        self.input_size = 64
-        self.input_size_per_partition = 64
 
 
 class TestQuantizeLastDimToInt8(TestBase):
@@ -378,208 +346,6 @@ class TestReduceGroupSelection(TestBase):
             self.assertIs(_linear_reduce_group(layer), mlp_tp_group)
 
 
-class TestAscendOnlineQuantizationConfig(TestBase):
-    def test_supports_the_int8_weight_key(self):
-        method_cls = _int8_moe_config()._get_method_cls(QuantSpec(weight=kInt8StaticChannelSym), {}, LinearBase)
-
-        self.assertIs(method_cls, AscendInt8PerChannelOnlineLinearMethod)
-
-    def test_rejects_unsupported_weight_keys_with_a_hardware_hint(self):
-        with self.assertRaises(NotImplementedError) as raised:
-            _int8_moe_config()._get_method_cls(QuantSpec(weight=kFp8StaticChannelSym), {}, LinearBase)
-
-        self.assertIn("INT8", str(raised.exception))
-
-    def test_rejects_activation_overrides(self):
-        spec = QuantSpec(weight=kInt8StaticChannelSym, activation=kInt8StaticChannelSym)
-
-        with self.assertRaises(ValueError):
-            _int8_moe_config()._get_method_cls(spec, {}, LinearBase)
-
-    def test_accepts_both_a_layer_and_a_layer_type(self):
-        # vLLM #55686 changed the third argument of _get_method_cls from the
-        # layer instance to its type. Both spellings must keep resolving.
-        config = _int8_moe_config()
-
-        for layer_arg in (LinearBase, _LinearLayer()):
-            self.assertIs(
-                config._get_method_cls(QuantSpec(weight=kInt8StaticChannelSym), {}, layer_arg),
-                AscendInt8PerChannelOnlineLinearMethod,
-            )
-
-    def test_override_still_matches_the_upstream_signature(self):
-        # _get_method_cls is a private vLLM hook with a single upstream caller,
-        # so a reshape of it must fail here rather than in production.
-        import inspect
-
-        from vllm.model_executor.layers.quantization.online.base import (
-            OnlineQuantizationConfig as UpstreamOnlineQuantizationConfig,
-        )
-
-        ours = inspect.signature(AscendOnlineQuantizationConfig._get_method_cls).parameters
-        theirs = inspect.signature(UpstreamOnlineQuantizationConfig._get_method_cls).parameters
-
-        self.assertEqual(
-            [parameter.kind for parameter in ours.values()],
-            [parameter.kind for parameter in theirs.values()],
-            "vLLM changed the shape of _get_method_cls; update the Ascend override in "
-            "vllm_ascend/quantization/configs/online_config.py.",
-        )
-
-    def test_moe_only_shorthand_leaves_linears_on_the_ascend_unquantized_path(self):
-        from vllm_ascend.ops.linear import AscendUnquantizedLinearMethod
-
-        config = _int8_moe_config()
-        layer = _LinearLayer("model.layers.0.mlp.gate_proj")
-
-        self.assertIsInstance(
-            config.get_quant_method(layer, "model.layers.0.mlp.gate_proj"),
-            AscendUnquantizedLinearMethod,
-        )
-
-    def test_ignored_layers_also_use_the_ascend_unquantized_path(self):
-        from vllm.config.quantization import QuantizationConfigArgs
-
-        from vllm_ascend.ops.linear import AscendUnquantizedLinearMethod
-
-        config = AscendOnlineQuantizationConfig(
-            QuantizationConfigArgs(
-                moe=QuantSpec(weight=kInt8StaticChannelSym),
-                ignore=["model.layers.0.mlp.gate_proj"],
-            )
-        )
-        layer = _LinearLayer("model.layers.0.mlp.gate_proj")
-
-        self.assertIsInstance(
-            config.get_quant_method(layer, "model.layers.0.mlp.gate_proj"),
-            AscendUnquantizedLinearMethod,
-        )
-
-    def test_matched_linear_layer_is_wrapped_in_the_ascend_online_method(self):
-        from vllm.config.quantization import QuantizationConfigArgs
-
-        from vllm_ascend.quantization.method_adapters import AscendOnlineLinearMethod
-
-        config = AscendOnlineQuantizationConfig(QuantizationConfigArgs(linear=QuantSpec(weight=kInt8StaticChannelSym)))
-        layer = _LinearLayer("model.layers.0.mlp.down_proj")
-        vllm_config = SimpleNamespace(model_config=SimpleNamespace(dtype=torch.bfloat16))
-
-        # OnlineLinearBase.__init__ records the model dtype.
-        with patch(
-            "vllm.model_executor.layers.quantization.online.fp8.get_current_vllm_config",
-            return_value=vllm_config,
-        ):
-            method = config.get_quant_method(layer, "model.layers.0.mlp.down_proj")
-
-        self.assertIsInstance(method, AscendOnlineLinearMethod)
-        self.assertIn("model.layers.0.mlp.down_proj", config.quantized_layers)
-
-
-class TestAscendOnlineQuantConfig(TestBase):
-    def _profile(self, family):
-        return patch(
-            "vllm_ascend.device.hardware_profile.get_current_hardware_profile",
-            return_value=SimpleNamespace(quantization_backend_family=family),
-        )
-
-    def test_standard_backend_builds_the_config(self):
-        from vllm_ascend.device.hardware_profile import QuantizationBackendFamily
-
-        args = QuantizationConfigArgs(moe=QuantSpec(weight=kInt8StaticChannelSym))
-        with self._profile(QuantizationBackendFamily.STANDARD):
-            config = AscendOnlineQuantizationConfig(args)
-
-        self.assertIs(config.args, args)
-        self.assertEqual(AscendOnlineQuantizationConfig.get_min_capability(), 0)
-
-    def test_non_standard_quantization_backend_is_rejected(self):
-        from vllm_ascend.device.hardware_profile import QuantizationBackendFamily
-
-        args = QuantizationConfigArgs(moe=QuantSpec(weight=kInt8StaticChannelSym))
-        with self._profile(QuantizationBackendFamily.COMPATIBILITY), self.assertRaises(NotImplementedError):
-            AscendOnlineQuantizationConfig(args)
-
-    def test_inherits_upstream_argument_validation(self):
-        """vLLM's own check still applies: a config must select something."""
-        from vllm_ascend.device.hardware_profile import QuantizationBackendFamily
-
-        with self._profile(QuantizationBackendFamily.STANDARD), self.assertRaises(ValueError):
-            AscendOnlineQuantizationConfig(QuantizationConfigArgs())
-
-
-class TestBuildAscendOnlineQuantConfig(TestBase):
-    def _standard_profile(self):
-        from vllm_ascend.device.hardware_profile import QuantizationBackendFamily
-
-        return patch(
-            "vllm_ascend.device.hardware_profile.get_current_hardware_profile",
-            return_value=SimpleNamespace(quantization_backend_family=QuantizationBackendFamily.STANDARD),
-        )
-
-    def test_shorthand_builds_the_ascend_config(self):
-        model_config = SimpleNamespace(
-            quantization="int8_per_channel_weight_only",
-            quantization_config=None,
-            dtype=torch.bfloat16,
-        )
-
-        with self._standard_profile():
-            config = build_ascend_online_quant_config(model_config)
-
-        self.assertIsInstance(config, AscendOnlineQuantizationConfig)
-        self.assertIsNotNone(config.args.moe)
-        self.assertIsNone(config.args.linear)
-
-    def test_dict_quantization_config_is_normalized(self):
-        model_config = SimpleNamespace(
-            quantization="online",
-            quantization_config={"moe": "int8_per_channel_static"},
-            dtype=torch.bfloat16,
-        )
-
-        with self._standard_profile():
-            config = build_ascend_online_quant_config(model_config)
-
-        self.assertEqual(config.args.moe, QuantSpec(weight=kInt8StaticChannelSym))
-
-    def test_explicit_online_requires_a_quantization_config(self):
-        model_config = SimpleNamespace(quantization="online", quantization_config=None, dtype=torch.bfloat16)
-
-        with self._standard_profile(), self.assertRaises(ValueError) as raised:
-            build_ascend_online_quant_config(model_config)
-
-        self.assertIn("--quantization-config", str(raised.exception))
-
-    def test_unsupported_dtype_is_rejected(self):
-        model_config = SimpleNamespace(
-            quantization="int8_per_channel_weight_only",
-            quantization_config=None,
-            dtype=torch.float32,
-        )
-
-        with self._standard_profile(), self.assertRaises(ValueError) as raised:
-            build_ascend_online_quant_config(model_config)
-
-        self.assertIn("not supported", str(raised.exception))
-
-    def test_non_standard_quantization_backend_is_rejected(self):
-        from vllm_ascend.device.hardware_profile import QuantizationBackendFamily
-
-        model_config = SimpleNamespace(
-            quantization="int8_per_channel_weight_only",
-            quantization_config=None,
-            dtype=torch.bfloat16,
-        )
-        with (
-            patch(
-                "vllm_ascend.device.hardware_profile.get_current_hardware_profile",
-                return_value=SimpleNamespace(quantization_backend_family=QuantizationBackendFamily.COMPATIBILITY),
-            ),
-            self.assertRaises(NotImplementedError),
-        ):
-            build_ascend_online_quant_config(model_config)
-
-
 class TestRequantizationIsRejected(TestBase):
     """vLLM's `resolve_quant_method` opens this path for a quantized checkpoint."""
 
@@ -602,35 +368,6 @@ class TestRequantizationIsRejected(TestBase):
 
         with self.assertRaises(NotImplementedError):
             method.set_requantization_source(MagicMock())
-
-
-class TestQuantizationConfigPatch(TestBase):
-    def test_ascend_online_names_are_diverted(self):
-        from vllm.config.vllm import VllmConfig
-
-        patched = VllmConfig._get_quantization_config
-        self.assertTrue(getattr(patched, "_vllm_ascend_online_quant_patched", False))
-
-        model_config = SimpleNamespace(quantization="int8_per_channel_weight_only", quantization_config=None)
-        sentinel = object()
-        with patch(f"{CONFIG_MODULE}.build_ascend_online_quant_config", return_value=sentinel) as builder:
-            self.assertIs(patched(model_config, None), sentinel)
-
-        builder.assert_called_once_with(model_config)
-
-    def test_other_quantization_methods_keep_using_upstream(self):
-        from vllm.config.vllm import VllmConfig
-
-        model_config = SimpleNamespace(quantization="compressed-tensors", quantization_config=None)
-        # The fake ModelConfig cannot drive the upstream path; what matters here
-        # is that the Ascend builder is never consulted.
-        with (
-            patch(f"{CONFIG_MODULE}.build_ascend_online_quant_config") as builder,
-            contextlib.suppress(Exception),
-        ):
-            VllmConfig._get_quantization_config(model_config, None)
-
-        builder.assert_not_called()
 
 
 if __name__ == "__main__":

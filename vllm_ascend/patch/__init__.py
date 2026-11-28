@@ -1674,27 +1674,48 @@
 #
 # ** 37. File: platform/patch_online_quant.py**
 # ~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~
-#   1. `vllm.config.vllm.VllmConfig._get_quantization_config`
+#   1. `vllm.model_executor.layers.quantization.online.base._ONLINE_LINEAR_METHODS`
+#      `vllm.model_executor.layers.quantization.online.base._ONLINE_MOE_METHODS`
 #    Why:
-#       Online quantization is dispatched by constructing the concrete upstream
-#       `OnlineQuantizationConfig` at each online return site of
-#       `get_quant_config`, one of them behind an identity test
-#       (`quant_cls is OnlineQuantizationConfig`). Construction is therefore
-#       hardcoded, so the config registered through
-#       `register_quantization_config` for `online` /
-#       `int8_per_channel_weight_only` is never instantiated and Ascend's INT8
-#       implementation cannot be reached without patching the loader.
+#       vLLM dispatches an online quantization layer from a
+#       `(layer kind, QuantKey) -> method class` table. Its MOE entry for
+#       `int8_per_channel_static` is the CUDA-only `Int8OnlineMoEMethod`, and
+#       there is no INT8 linear entry at all, so Ascend's INT8 recipe cannot be
+#       reached. The same table also drives the "checkpoint format + online
+#       overlay" path, which instantiates the upstream
+#       `OnlineQuantizationConfig` directly in
+#       `weight_utils.maybe_compose_online_quantization` (untouched by
+#       vllm-project/vllm#64056).
 #    How:
-#       Wrap `VllmConfig._get_quantization_config` and divert only those two
-#       method names to `build_ascend_online_quant_config`. Every other
-#       quantization method -- checkpoint formats included -- still takes the
-#       upstream path. Patching the config funnel rather than
-#       `get_quant_config` avoids pulling the model-loader import graph into
-#       the platform hook.
+#       Write Ascend's `ONLINE_METHODS` / `ONLINE_MOE_METHODS` entries
+#       (`vllm_ascend/quantization/methods/online/__init__.py`) into the two
+#       upstream tables. vLLM's `--quantization` table is left alone, so every
+#       upstream recipe and checkpoint format keeps resolving; an Ascend-only
+#       name would be added on top of it, and a recipe Ascend cannot execute is
+#       rejected explicitly by `vllm_ascend.quantization.online_validate` from
+#       `NPUPlatform.apply_config_platform_defaults`. No config class is
+#       subclassed or registered and the `_get_quantization_config` funnel is
+#       left alone, so the patch behaves the same whether upstream instantiates
+#       the config through the hardcoded call site (v0.34.0) or through
+#       `get_quantization_config` (#64056).
 #    Related PR (if no, explain why):
-#       vllm-project/vllm#64056.
+#       vllm-project/vllm#64056 fixed the class dispatch on the plain online
+#       path; the method tables and the composition site are still hardcoded.
 #    Future Plan:
-#       Delete this module, its import in `patch/platform/__init__.py` and this
-#       entry once the upstream dispatch fix lands. `AscendOnlineQuantizationConfig`
-#       is already registered for both method names, so nothing else changes:
-#       the upstream dispatch takes over as soon as the patch is gone.
+#       Delete this entry once vLLM lets a platform contribute its own
+#       `(QuantKey -> method class)` entries.
+#
+#   2. `vllm.model_executor.layers.quantization.online.base.OnlineQuantizationConfig.get_quant_method`
+#    Why:
+#       A layer that online quantization leaves alone must still use Ascend's
+#       unquantized method: it applies the NPU post-load weight processing (NZ
+#       layout, fp32 precast, the wo_a reshape). vLLM's fallback returns its own
+#       `UnquantizedLinearMethod` / `UnquantizedFusedMoEMethod`.
+#    How:
+#       Wrap the method: when no online target resolves for the layer, return
+#       Ascend's unquantized method directly (vLLM's is never constructed); a
+#       layer with a target still runs the upstream body, so its bookkeeping
+#       (`quantized_layers`, hadamard wrapping, activation kwargs) stays put.
+#    Future Plan:
+#       Delete this entry once vLLM dispatches the unquantized fallback per
+#       platform.

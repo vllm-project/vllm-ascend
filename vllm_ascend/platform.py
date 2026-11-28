@@ -256,8 +256,9 @@ class NPUPlatform(Platform):
         # execution path. register_quantization_config() cannot add these two
         # names automatically because they already live in vLLM's
         # QuantizationMethods Literal, so verify_quantization() needs them here.
-        # Dispatch to the Ascend config comes from patch_online_quant until
-        # vLLM instantiates the registered class itself.
+        # patch_online_quant dispatches them to Ascend's method classes, and
+        # `apply_config_platform_defaults` rejects the online weight keys
+        # Ascend has no method for.
         *ASCEND_ONLINE_QUANT_METHODS,
     ]
 
@@ -574,7 +575,6 @@ class NPUPlatform(Platform):
                 AscendFp8Config,
                 AscendModelOptMxFp8Config,
                 AscendModelSlimConfig,
-                AscendOnlineQuantizationConfig,
             )
         else:
             from vllm_ascend._310p.quantization import AscendModelSlimConfig310  # noqa: F401
@@ -584,6 +584,14 @@ class NPUPlatform(Platform):
     @classmethod
     def apply_config_platform_defaults(cls, vllm_config: VllmConfig) -> None:
         """Apply Ascend-specific defaults."""
+
+        # Reject an online quantization request Ascend has no method for before
+        # any weight is loaded; vLLM would otherwise fail per layer.
+        from vllm_ascend.quantization.online_validate import (
+            validate_online_quantization,
+        )
+
+        validate_online_quantization(vllm_config)
 
         # TODO: Remove this memory-saving capture-size override and its ceiling
         # restoration once MC2 is no longer used.

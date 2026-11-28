@@ -14,7 +14,25 @@
 # See the License for the specific language governing permissions and
 # limitations under the License.
 #
-"""Ascend online (load-time) quantization methods."""
+"""Ascend online (load-time) quantization methods.
+
+vLLM's online quantization is table driven: ``(layer kind, QuantKey)`` selects a
+method class and a ``--quantization`` name selects default
+``QuantizationConfigArgs``.
+
+This package declares the recipes Ascend supports: ``ONLINE_METHODS`` /
+``ONLINE_MOE_METHODS`` for the dispatch and ``ONLINE_SHORTHANDS`` for the
+``--quantization`` names. ``patch_online_quant`` applies them on top of vLLM's
+tables; vLLM's other entries are left untouched, and a recipe Ascend cannot
+execute is rejected explicitly by ``vllm_ascend.quantization.online_validate``
+before the model is built.
+"""
+
+from vllm.config.quantization import QuantizationConfigArgs, QuantSpec
+from vllm.model_executor.layers.quantization.utils.quant_utils import (
+    QuantKey,
+    kInt8StaticChannelSym,
+)
 
 from .int8 import (
     AscendInt8PerChannelOnlineLinearMethod,
@@ -22,8 +40,40 @@ from .int8 import (
     quantize_last_dim_to_int8,
 )
 
+# ``(layer kind, QuantKey) -> Ascend method class``. ``patch_online_quant``
+# writes these into vLLM's dispatch tables; their keys are the weight keys
+# ``online_validate`` accepts, so listing a method here is what makes a recipe
+# supported end to end.
+ONLINE_METHODS: dict[QuantKey, type] = {
+    kInt8StaticChannelSym: AscendInt8PerChannelOnlineLinearMethod,
+}
+ONLINE_MOE_METHODS: dict[QuantKey, type] = {
+    # vLLM maps this key to its CUDA-only Int8OnlineMoEMethod.
+    kInt8StaticChannelSym: AscendInt8PerChannelOnlineMoEMethod,
+}
+
+# Weight keys Ascend has an execution path for, for either layer kind.
+SUPPORTED_ONLINE_WEIGHT_KEYS: frozenset[QuantKey] = frozenset(ONLINE_METHODS) | frozenset(ONLINE_MOE_METHODS)
+
+# The online ``--quantization`` names Ascend supports, with the config we test
+# them with. They are *applied on top of* vLLM's table: a name vLLM already
+# knows is rewritten to this definition, every other vLLM entry is left
+# untouched, and a recipe Ascend cannot execute is rejected by
+# ``online_validate`` instead of being removed here.
+ONLINE_SHORTHANDS: dict[str, QuantizationConfigArgs] = {
+    # Upstream meaning: experts only, matching vLLM's shorthand of the same
+    # name.
+    "int8_per_channel_weight_only": QuantizationConfigArgs(
+        moe=QuantSpec(weight=kInt8StaticChannelSym),
+    ),
+}
+
 __all__ = [
     "AscendInt8PerChannelOnlineLinearMethod",
     "AscendInt8PerChannelOnlineMoEMethod",
+    "ONLINE_METHODS",
+    "ONLINE_MOE_METHODS",
+    "ONLINE_SHORTHANDS",
+    "SUPPORTED_ONLINE_WEIGHT_KEYS",
     "quantize_last_dim_to_int8",
 ]

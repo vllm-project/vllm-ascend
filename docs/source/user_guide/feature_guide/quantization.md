@@ -181,8 +181,9 @@ Notes:
   staged on the meta device by vLLM's online quantization base and materialized
   just before it is quantized, so the peak weight footprint is roughly one BF16
   layer plus the already-quantized INT8 prefix.
-- FP8, MXFP8 and MXFP4 online recipes are rejected with an explanatory error:
-  they need an FP8 matmul path that Ascend A2/A3 does not provide.
+- FP8, MXFP8 and MXFP4 online recipes are rejected before any weight is loaded,
+  with the supported weight keys in the message: they need an FP8 matmul path
+  that Ascend A2/A3 does not provide.
 - Online re-quantization of a checkpoint-quantized layer is not supported yet;
   such a combination is rejected while the layer is built.
 - Reloading weights into an online-quantized model is not supported yet.
