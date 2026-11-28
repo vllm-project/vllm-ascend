@@ -103,6 +103,7 @@ _EXPECTED_CAPABILITIES = {
             HardwareCapability.CANN_MEGAMOE,
             HardwareCapability.CANN_MEGAMOE_MXFP,
             HardwareCapability.CANN_MEGAMOE_SHARED_EXPERT_FUSION,
+            HardwareCapability.CANN_MEGAMOE_UNBOUNDED_INTERMEDIATE,
             HardwareCapability.CHUNKED_PREFILL_PHASE_SPLIT,
             HardwareCapability.DEVICE_LENGTH_FLASH_ATTN,
             HardwareCapability.FLASH_ATTN_NPU_3,
