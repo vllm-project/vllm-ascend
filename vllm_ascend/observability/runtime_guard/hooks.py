@@ -212,7 +212,9 @@ def runtime_guard_sample_tokens(sample_tokens_fn):
             )
             with logits_ctx, wrap_postprocess_sampled(self):
                 output = sample_tokens_fn(self, grammar_output)
-            sampling_batch = _resolve_sampling_input_batch(self, peeked_batch)
+            # With no execute state the parent returns before PCP restores a
+            # batch. Its manager can still hold the previous wave's requests.
+            sampling_batch = _resolve_sampling_input_batch(self, peeked_batch) if peeked_batch is not None else None
             # None → empty req_ids in SamplePhaseResult (no wrong local ids).
             return _build_sample_phase_result(self, output, sampling_batch, finished_req_ids)
 

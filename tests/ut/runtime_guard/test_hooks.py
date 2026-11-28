@@ -280,6 +280,28 @@ def test_sample_tokens_orchestrates_guard_around_body():
     }
 
 
+def test_sample_tokens_without_execute_state_ignores_previous_pcp_batch():
+    guard = _active_guard()
+    guard.runtime_config.detector_get.return_value = False
+    guard.needs_sample_phase_hooks.return_value = False
+    runner = _SampleRunner(guard)
+    runner.execute_model_state = None
+    runner.pcp_manager = SimpleNamespace(_sampling_global_batch=SimpleNamespace(req_ids=["previous"]))
+    results = []
+
+    def run_phase(sample_fn, **kwargs):
+        result = sample_fn()
+        results.append(result)
+        return result
+
+    guard.run_sample_phase.side_effect = run_phase
+    # The parent sample_tokens returns None immediately when there is no execute state.
+    sample = runtime_guard_sample_tokens(lambda self, grammar_output: None)
+    assert sample(runner, None) is None
+    assert results[0].req_ids_output_copy == []
+    assert results[0].input_batch is None
+
+
 def test_resolve_sampling_input_batch_prefers_pcp_sampling_global():
     """Last-PP PCP: use restored sampling batch, not the peeked local partition."""
     from vllm_ascend.observability.runtime_guard.hooks import _resolve_sampling_input_batch
