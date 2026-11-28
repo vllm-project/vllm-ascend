@@ -1,0 +1,5 @@
+pr: 23660
+entries:
+  - category: feature
+    text: With a compatible vLLM build, Qwen3.8-Flash-Next on Ascend 950DT can use a smaller MTP depth on prefill with MooncakeConnectorV2 Pull and aligned Mamba caching. Set the prefill physical state window to the decode MTP depth.
+    model: Qwen3.8-Flash-Next
