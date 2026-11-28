@@ -14,6 +14,8 @@ MIB = 1024**2
 @pytest.mark.parametrize(
     ("routes", "expected"),
     [
+        ([], None),
+        ([0, 1], None),
         ([0, 1, 0, 1, 2, 3, 2, 3], 2),
         ([0, 1, 2, 3, 2, 3, 2, 3], 1),
         ([0, 1, 0, 1, 0, 1, 2, 3], 3),
@@ -22,6 +24,15 @@ MIB = 1024**2
 )
 def test_find_nearest_feasible_contiguous_cut(routes, expected):
     assert _find_decode_split(routes, top_k=2, capacity=2) == expected
+
+
+@pytest.mark.parametrize("reverse", [False, True])
+def test_decode_split_near_edge_of_large_batch(reverse):
+    rows = 2048
+    routes = list(range(8)) + list(range(8, 16)) * (rows - 1)
+    if reverse:
+        routes.reverse()
+    assert _find_decode_split(routes, top_k=8, capacity=8) == (rows - 1 if reverse else 1)
 
 
 @pytest.mark.parametrize(

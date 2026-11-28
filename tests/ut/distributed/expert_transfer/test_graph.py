@@ -13,7 +13,7 @@ import torch
 from vllm.config.compilation import CUDAGraphMode
 from vllm.v1.worker.gpu.cudagraph_utils import BatchExecutionDescriptor, CudaGraphManager
 
-from vllm_ascend.distributed.expert_transfer.conditional_expert_graph import ConditionalExpertGraph
+from vllm_ascend.distributed.expert_transfer.conditional_expert_graph import ConditionalExpertGraph, _bind_acl
 from vllm_ascend.distributed.expert_transfer.expert_offload_manager import ExpertOffloadManager
 
 
@@ -96,6 +96,7 @@ def test_wide_graph_capture_selects_conditional_when_runtime_supports_it(native_
         runtime.capture_stream = capture_stream
 
     monkeypatch.setattr(ConditionalExpertGraph, "__init__", initialize)
+    monkeypatch.setattr(ConditionalExpertGraph, "_probe", Mock())
 
     manager.prepare_graph_capture(graph, lambda: True)
 
@@ -106,6 +107,39 @@ def test_wide_graph_capture_selects_conditional_when_runtime_supports_it(native_
     else:
         assert manager.conditional_graph is None
         native_runtime.npu._subscribe_report.assert_not_called()
+
+
+@pytest.mark.parametrize("status", [200001, 200006, 207000, 107017])
+def test_conditional_probe_falls_back_only_for_unsupported_status(native_runtime, monkeypatch, status):
+    manager = ExpertOffloadManager()
+    manager.bindings = {"layer": SimpleNamespace(top_k=2, num_slots=2)}
+    desc = SimpleNamespace(num_tokens=2, uniform_token_count=1)
+    graph = SimpleNamespace(device=torch.device("cpu"), _capture_descs={"full": [desc]}, _candidates={}, capture=Mock())
+    probe_graph = Mock()
+    monkeypatch.setattr(native_runtime.npu, "NPUGraph", Mock(return_value=probe_graph), raising=False)
+    monkeypatch.setattr(native_runtime.npu, "graph", Mock(return_value=nullcontext()), raising=False)
+    library = SimpleNamespace(aclmdlRICondHandleCreate=Mock(return_value=status))
+    monkeypatch.setattr(ctypes, "CDLL", Mock(return_value=library))
+
+    def initialize(runtime, device, library):
+        runtime._capture_info = Mock()
+        runtime._create_condition = _bind_acl(library, "aclmdlRICondHandleCreate")
+        runtime._condition_pointer = Mock()
+
+    monkeypatch.setattr(ConditionalExpertGraph, "__init__", initialize)
+
+    if status == 107017:  # ACL_ERROR_RT_INVALID_HANDLE
+        with pytest.raises(RuntimeError, match="aclmdlRICondHandleCreate failed: ACL error 107017"):
+            manager.prepare_graph_capture(graph, lambda: True)
+    else:
+        manager.prepare_graph_capture(graph, lambda: True)
+        assert graph._capture_descs["full"] == [desc]
+        assert graph._capture_stream == manager.capture_stream
+
+    library.aclmdlRICondHandleCreate.assert_called_once()
+    probe_graph.reset.assert_called_once_with()
+    assert manager.conditional_graph is None
+    native_runtime.npu._subscribe_report.assert_not_called()
 
 
 @pytest.mark.parametrize("uniform_token_count", [1, 4])

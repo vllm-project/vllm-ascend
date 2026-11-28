@@ -35,7 +35,10 @@ class DecodeSplitPlan:
 
 def _find_decode_split(routed_ids: list[int], top_k: int, capacity: int) -> int | None:
     """Find a feasible contiguous cut, starting as close to the midpoint as possible."""
-    midpoint = len(routed_ids) // top_k // 2
+    num_tokens = len(routed_ids) // top_k
+    if num_tokens < 2:
+        return None
+    midpoint = num_tokens // 2
     offset = midpoint * top_k
     left_fits = len(set(routed_ids[:offset])) <= capacity
     right_fits = len(set(routed_ids[offset:])) <= capacity
@@ -44,22 +47,22 @@ def _find_decode_split(routed_ids: list[int], top_k: int, capacity: int) -> int 
     if not left_fits and not right_fits:
         return None
 
-    # Shorten only the overflowing group. Stop when the other group outgrows
-    # resident capacity, since it can only gain experts as the cut moves.
+    # Find the longest fitting prefix or suffix on the overflowing side.
+    # Any shorter group moves the cut farther away and can only add experts to
+    # the other group, so we only need to check that side at the closest cut.
+    experts: set[int] = set()
     if not left_fits:
-        for cut in range(midpoint - 1, 0, -1):
-            offset = cut * top_k
-            if len(set(routed_ids[offset:])) > capacity:
-                break
-            if len(set(routed_ids[:offset])) <= capacity:
-                return cut
+        for index in range(offset):
+            experts.add(routed_ids[index])
+            if len(experts) > capacity:
+                cut = index // top_k
+                return cut if cut > 0 and len(set(routed_ids[cut * top_k :])) <= capacity else None
     else:
-        for cut in range(midpoint + 1, len(routed_ids) // top_k):
-            offset = cut * top_k
-            if len(set(routed_ids[:offset])) > capacity:
-                break
-            if len(set(routed_ids[offset:])) <= capacity:
-                return cut
+        for index in range(len(routed_ids) - 1, offset - 1, -1):
+            experts.add(routed_ids[index])
+            if len(experts) > capacity:
+                cut = index // top_k + 1
+                return cut if cut < num_tokens and len(set(routed_ids[: cut * top_k])) <= capacity else None
     return None
 
 
