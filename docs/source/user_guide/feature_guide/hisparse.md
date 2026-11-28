@@ -220,3 +220,15 @@ sends the ready layer from that slot and its WRITE completion gates slot
 reuse. Decode publishes its Host Source for Main KV and its NPU Indexer.
 With a shared Host pool only TP rank 0 publishes the Host Source. The normal
 Mooncake DONE path reports completion to the Decode scheduler.
+
+### A3 Device RDMA with a pinned Decode Host pool
+
+Use TP=1 on both sides, INT8 KV and the MemFabric layerwise Push configuration
+above. Set `memfabric_transfer_protocol` to `device_rdma` in both
+`MooncakeConnectorV2` entries. Set `memfabric_host_allocator` to `pinned` in
+the Decode entry. This option lets Prefill write Main KV directly into
+the Decode Host pool that HiSparse uses for refills. MemFabric owns the
+registration for the lifetime of the Decode worker.
+
+The A3 prototype was verified with MemFabric 1.5.0+b013. The default
+`memfabric_host_allocator` value is `shared`.

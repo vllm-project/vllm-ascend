@@ -9,9 +9,12 @@ unchanged.
 from __future__ import annotations
 
 import threading
-from typing import Any
+from typing import TYPE_CHECKING, Any
 
 from vllm.logger import logger
+
+if TYPE_CHECKING:
+    from torch import Tensor
 
 BACKEND_MEMFABRIC = "memfabric"
 MEMFABRIC_ROLE_PREFILL = "Prefill"
@@ -79,6 +82,7 @@ class GlobalMemfabricTE:
         self._hostname: str | None = None
         self._unique_id: str | None = None
         self._is_buffer_registered = False
+        self._pinned_host_buffer: Tensor | None = None
         self._engine_lock = threading.Lock()
         self._register_buffer_lock = threading.Lock()
 
@@ -216,6 +220,18 @@ class GlobalMemfabricTE:
         self._unique_id = f"{hostname}:{advertised_rpc_port}"
         return MemfabricBackend(raw_engine, advertised_rpc_port)
 
+    def register_pinned_host_buffer(self, buffer: Tensor) -> None:
+        """Register and retain the Decode Host allocation for the engine's lifetime."""
+        with self._register_buffer_lock:
+            if self._engine is None or self._is_buffer_registered:
+                raise RuntimeError("MemFabric must register the pinned Host pool before the KV buffers")
+            if self._pinned_host_buffer is not None:
+                raise RuntimeError("MemFabric pinned Host pool has already been registered")
+            ret = self._engine.register_memory(buffer.data_ptr(), buffer.nbytes)
+            if ret != 0:
+                raise RuntimeError(f"MemFabric pinned Host pool registration failed with ret_value={ret}")
+            self._pinned_host_buffer = buffer
+
     def register_buffer(self, ptrs: list[int], sizes: list[int]) -> None:
         if len(ptrs) != len(sizes):
             raise ValueError(f"MemFabric registration pointer/size counts differ: {len(ptrs)} != {len(sizes)}")
@@ -224,7 +240,15 @@ class GlobalMemfabricTE:
                 raise RuntimeError("MemFabric transfer engine must be initialized")
             if self._is_buffer_registered:
                 return
+            pinned = self._pinned_host_buffer
+            pinned_ptr = None if pinned is None else pinned.data_ptr()
+            if pinned is not None and any(
+                ptr == pinned_ptr and size != pinned.nbytes for ptr, size in zip(ptrs, sizes)
+            ):
+                raise ValueError("MemFabric pinned Host pool registration extent changed")
             for ptr, size in zip(ptrs, sizes):
+                if ptr == pinned_ptr:
+                    continue
                 ret = self._engine.register_memory(ptr, size)
                 if ret != 0:
                     raise RuntimeError(f"MemFabric memory registration failed with ret_value={ret}")
