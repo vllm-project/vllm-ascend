@@ -74,6 +74,7 @@ def test_kda_output_norm_uses_checkpoint_epsilon():
         attention.conv_size = 4
         attention.local_projection_size = 2
         attention.model_config = SimpleNamespace(dtype=torch.bfloat16)
+        attention.gate_lower_bound = None
         attention.conv1d = nn.Module()
         attention.conv1d.weight = nn.Parameter(torch.empty(6, 1, 4))
         attention.conv1d.quant_method = SimpleNamespace(process_weights_after_loading=lambda: None)

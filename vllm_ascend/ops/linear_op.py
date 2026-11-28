@@ -218,6 +218,14 @@ class KimiOProjMMReduceScatterOp(CustomRowParallelOp):
         )
         return output, None
 
+    def reduce_projected_output(self, output: torch.Tensor) -> torch.Tensor:
+        """Apply this op's token-shard contract to an already projected delta.
+
+        MegaKDA includes OProj, so running apply_impl again would duplicate
+        the GEMM. The decoder still skips its RS when this op is installed.
+        """
+        return sp_reduce_scatter(output)
+
     def apply_into(self, input_: torch.Tensor, output: torch.Tensor) -> torch.Tensor:
         """Write the ordinary decode projection directly into its TP shard."""
         assert self.quant_method is not None

@@ -316,6 +316,7 @@ def test_expert_loading_initializes_every_replica(
         linear_attn_config={},
         q_lora_rank=None,
         is_linear_attn=False,
+        attn_res_block_size=None,
     )
     model.num_redundant_experts = model.n_redundant_experts = num_redundant_experts
     layer = nn.Module()
