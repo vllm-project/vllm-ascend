@@ -100,7 +100,19 @@ def _ascend_resolve_kv_cache_block_sizes(
     groups = kv_cache_config.kv_cache_groups
     cacheable_groups = [group for group in groups if is_prefix_cacheable(group.kv_cache_spec)]
     filtered_private_groups = bool(cacheable_groups) and len(cacheable_groups) != len(groups)
-    if filtered_private_groups and not is_deepseek_v41_cache(groups):
+    # GLM private tails may be stripped before resolve. DeepSeek-V4/V4.1 keep
+    # compressor/state groups in the group list so LCM/scheduler sizing and the
+    # shared-tuple planner stay aligned; hashing still uses cacheable_groups.
+    is_dsv4_family = is_deepseek_v41_cache(groups) or any(
+        getattr(spec, "model_version", None) in {"deepseek_v4", "deepseek_v41"}
+        for group in groups
+        for spec in (
+            group.kv_cache_spec.kv_cache_specs.values()
+            if isinstance(group.kv_cache_spec, UniformTypeKVCacheSpecs)
+            else (group.kv_cache_spec,)
+        )
+    )
+    if filtered_private_groups and not is_dsv4_family:
         # A fixed tail block is not a token-page scheduling or hashing unit.
         # Pool alignment is enforced by the GLM planner and prefix coordinator.
         kv_cache_config = replace(kv_cache_config, kv_cache_groups=cacheable_groups)

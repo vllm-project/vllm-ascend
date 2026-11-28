@@ -165,6 +165,19 @@ def is_deepseek_v41(hf_config: Any) -> bool:
     )
 
 
+def is_deepseek_v4_family(hf_config: Any) -> bool:
+    """Identify V4/V4.1 configs whose attention uses device sequence lengths."""
+    model_types = ("deepseek_v4", "deepseek_v4_text", "deepseek_v41", "deepseek_v41_text")
+    if isinstance(hf_config, dict):
+        return hf_config.get("model_type") in model_types or is_deepseek_v4_family(hf_config.get("text_config"))
+    # DSpark can replace the instance model_type; preserve the config-class identity.
+    return (
+        getattr(type(hf_config), "model_type", None) in model_types
+        or getattr(hf_config, "model_type", None) in model_types
+        or (getattr(hf_config, "text_config", None) is not None and is_deepseek_v4_family(hf_config.text_config))
+    )
+
+
 def normalize_deepseek_v41_config(hf_config: Any) -> Any:
     """Prepare runtime defaults not supplied by upstream's released config."""
     for name, default in (("num_hash_layers", 0), ("n_group", 1), ("topk_group", 1)):
@@ -1503,6 +1516,10 @@ def refresh_block_size(vllm_config):
 
     if cache_config.block_size is None:
         cache_config.block_size = 128
+    # Remember the value the user asked for before any group-driven
+    # shrinking happens, so an invalid collapse can be recovered.
+    if not hasattr(cache_config, "_ascend_requested_block_size"):
+        cache_config._ascend_requested_block_size = cache_config.block_size
 
     # Hybrid page padding is handled by the upstream cache planner. C8 only
     # constrains the scheduler block to contain whole 512-token kernel blocks.
@@ -1517,12 +1534,32 @@ def refresh_block_size(vllm_config):
     if not scheduler_config or not model_config:
         return
 
-    if model_config.hf_config.model_type == "deepseek_v4":
-        if cache_config.block_size is None:
-            cache_config.block_size = 32
-        elif cache_config.block_size not in [32, 64, 128]:
+    # DSpark overwrites the instance model_type. The class, text config, and
+    # V4/V4.1 names all share DSV4_BLOCK_SIZES, so PD peers must keep the same
+    # scheduler block instead of falling through to the prefix-cache reset.
+    if is_deepseek_v4_family(model_config.hf_config):
+        allowed_block_sizes = (16, 32, 64, 128)
+        if cache_config.block_size not in allowed_block_sizes:
+            requested = getattr(cache_config, "_ascend_requested_block_size", None)
+            if (
+                getattr(cache_config, "user_specified_block_size", False)
+                and requested in allowed_block_sizes
+            ):
+                logger.warning(
+                    "deepseek_v4 block size collapsed to %s (group min); restoring "
+                    "the requested block size %s.",
+                    cache_config.block_size,
+                    requested,
+                )
+                cache_config.block_size = requested
+                return
+            if getattr(cache_config, "user_specified_block_size", False):
+                raise ValueError(
+                    "deepseek_v4 block size must be one of 16, 32, 64 or 128, "
+                    f"got {cache_config.block_size}."
+                )
             logger.warning(
-                "For deepseek_v4 model, block size should be 32, 64 or 128. "
+                "For deepseek_v4 model, block size should be 16, 32, 64 or 128. "
                 "Setting block size to 32 for better performance."
             )
             cache_config.block_size = 32
