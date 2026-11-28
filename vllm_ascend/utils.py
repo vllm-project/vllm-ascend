@@ -846,9 +846,11 @@ def uses_external_mamba_prefix_cache(vllm_config: VllmConfig) -> bool:
     """Main's AscendStore needs aligned Mamba states even with local reuse off."""
     if vllm_version_is("0.34.0") or not uses_ascend_kv_store(vllm_config):
         return False
+    cache_config = getattr(vllm_config, "cache_config", None)
+    scheduler_config = getattr(vllm_config, "scheduler_config", None)
     return (
-        not vllm_config.cache_config.enable_prefix_caching
-        and not getattr(vllm_config.scheduler_config, "disable_hybrid_kv_cache_manager", False)
+        getattr(cache_config, "enable_prefix_caching", None) is False
+        and not getattr(scheduler_config, "disable_hybrid_kv_cache_manager", False)
         and getattr(getattr(vllm_config, "speculative_config", None), "method", None) != "extract_hidden_states"
     )
 

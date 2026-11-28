@@ -1572,7 +1572,7 @@ class NPUModelRunner(GPUModelRunner):
             self.use_pp
             and not self.is_last_pp_rank
             and isinstance(self.model_state, MambaHybridModelState)
-            and get_mamba_cache_mode(self.cache_config, self.vllm_config) == "align"
+            and get_mamba_cache_mode(self.cache_config, getattr(self, "vllm_config", None)) == "align"
         ):
             # Deferred PP results belong to an older batch than input_block_tables.
             # Restore its rows before Mamba aligns the accepted recurrent state.

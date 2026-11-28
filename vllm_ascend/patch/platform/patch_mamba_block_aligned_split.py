@@ -207,7 +207,7 @@ if not vllm_version_is("0.34.0"):
     @functools.wraps(_original_scheduler_init)
     def _init_scheduler_with_external_mamba_cache(self, vllm_config, *args, **kwargs):
         _original_scheduler_init(self, vllm_config, *args, **kwargs)
-        if self.has_mamba_layers and uses_external_mamba_prefix_cache(vllm_config):
+        if uses_external_mamba_prefix_cache(vllm_config) and getattr(self, "has_mamba_layers", False):
             self.need_mamba_block_aligned_split = True
 
     Scheduler.__init__ = _init_scheduler_with_external_mamba_cache
