@@ -453,10 +453,15 @@ class AisbenchRunner:
     def _accuracy_verify_ge(self):
         self._get_result_accuracy()
         acc_value = self.result
-        assert acc_value >= self.baseline, (
+        # threshold widens the lower bound only (baseline - threshold); the
+        # upper bound is never enforced - a result above baseline only logs a
+        # re-baselining hint, per the team review decision that accuracy
+        # exceeding the upper bound should not fail a case.
+        lower_bound = self.baseline - self.threshold if self.threshold is not None else self.baseline
+        assert acc_value >= lower_bound, (
             "Accuracy verification failed. "
             f"The accuracy of {self.dataset_path} is {acc_value}, "
-            f"which is not greater than or equal to baseline {self.baseline}."
+            f"which is not greater than or equal to baseline {self.baseline} - threshold {self.threshold}."
         )
 
     def _spec_decode_verify(self):
