@@ -6,9 +6,8 @@ from types import SimpleNamespace
 
 import pytest
 import requests
-from starlette.requests import Request
-
 from examples.rfork.rfork_planner import Scheduler, SeedRemovalResult, Settings, Store, _build_arg_parser, build_router
+from starlette.requests import Request
 
 
 def test_lease_ttl_default_and_configuration_precedence(monkeypatch):

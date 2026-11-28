@@ -27,6 +27,7 @@ import torch
 import torch.distributed as dist
 from vllm.config.compilation import CUDAGraphMode
 from vllm.distributed import get_dp_group
+from vllm.distributed.kv_transfer import get_kv_transfer_group, has_kv_transfer_group
 from vllm.forward_context import get_forward_context, set_forward_context
 from vllm.utils.platform_utils import is_pin_memory_available
 from vllm.v1.kv_cache_interface import CircularBufferSpec, KVCacheConfig
@@ -549,6 +550,7 @@ class AscendModelState(DefaultModelState):
         pool_active = getattr(self, "_offload_pool_active", None)
         request_states = getattr(self, "_offload_request_states", None)
         restore_copy_sfa_tails = False
+        complete_copy_sfa_decode: Callable[[bool], None] | None = None
         if request_states is not None:
             assert pool_slots is not None and pool_active is not None
             offload_dummy = getattr(input_batch, "is_dummy", False)
@@ -573,6 +575,16 @@ class AscendModelState(DefaultModelState):
                 lim_cache_histories=histories,
                 generations=pool_generations.np if pool_generations is not None else None,
             )
+            if not offload_dummy and has_kv_transfer_group():
+                prepare = getattr(get_kv_transfer_group(), "prepare_copy_sfa_decode", None)
+                if prepare is not None:
+                    restore_copy_sfa_tails, dense_fills, complete_copy_sfa_decode = prepare(
+                        input_batch,
+                        pool_slots.np,
+                        block_tables,
+                        dense_fills,
+                        restore_tails=restore_copy_sfa_tails,
+                    )
             if dense_fills:
                 get_sparse_kv_offload_manager().dense_fill_copy_sfa_rows(
                     dense_fills,
@@ -675,12 +687,17 @@ class AscendModelState(DefaultModelState):
             else None,
         )
         self._prepare_decoder_replay(input_batch, cudagraph_mode, attn_groups, kv_cache_config)
+        restored = False
         if restore_copy_sfa_tails:
             manager = get_sparse_kv_offload_manager()
             for metadata in self.attn_metadata.values():
                 if getattr(metadata, "copy_sfa_copy_src_offsets", None) is not None:
                     manager.restore_copy_sfa_tails(metadata)
+                    restored = True
                     break
+        # Validate the first-decode PD handoff before D2H can consume its rows.
+        if complete_copy_sfa_decode is not None:
+            complete_copy_sfa_decode(restored)
         # Delayed D2H planning and launching moved to the runner's step
         # boundary (model_runner._sparse_kv_offload_d2h_plan_launch): the
         # builder only settles offload state and consumes it here.

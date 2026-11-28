@@ -4,7 +4,7 @@
 
 import math
 import os
-from typing import TYPE_CHECKING
+from typing import TYPE_CHECKING, Any
 
 import torch
 import torch_npu  # noqa: F401
@@ -379,12 +379,14 @@ class MooncakeBaseConnectorWorker(MooncakeTransferAddressMixin):
 
         logger.info("Initializing Mooncake worker %s", engine_id)
 
-    def _get_transfer_engine(self, device_name: str | None):
+    def _get_transfer_engine(self, device_name: str | None) -> Any:
+        """Initialize the default engine; subclasses may select another transport."""
         return global_te.get_transfer_engine(self.side_channel_host, device_name=device_name)
 
     def _register_transfer_buffers(self, ptrs: list[int], lengths: list[int]) -> None:
-        """Register the memory ranges collected for KV transfer."""
-        global_te.register_buffer(ptrs, lengths)
+        """Register physical storage independently of the published cache views."""
+        if ptrs:
+            global_te.register_buffer(ptrs, lengths)
 
     def get_handshake_metadata(self) -> KVConnectorHandshakeMetadata | None:
         """Return the registered cache descriptor for either transfer mode."""
@@ -710,8 +712,8 @@ class MooncakeBaseConnectorWorker(MooncakeTransferAddressMixin):
         self.xfer_handshake_metadata = transfer_metadata
 
         logger.info(
-            "Registered Mooncake KV caches: engine_id=%s, num_layers=%d, "
-            "num_blocks=%d, num_regions=%d, registered_bytes=%d",
+            "Published Mooncake KV cache metadata: engine_id=%s, num_layers=%d, "
+            "num_blocks=%d, num_regions=%d, cache_region_bytes=%d",
             self.engine_id,
             len(layer_names),
             self.num_blocks,

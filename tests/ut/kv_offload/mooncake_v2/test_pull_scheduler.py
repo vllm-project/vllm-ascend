@@ -75,8 +75,8 @@ def make_sending_thread(
     )
 
 
-def make_pull_scheduler() -> MooncakePullConnectorScheduler:
-    scheduler = MooncakePullConnectorScheduler.__new__(MooncakePullConnectorScheduler)
+def make_pull_scheduler(*, scheduler_cls=MooncakePullConnectorScheduler) -> MooncakePullConnectorScheduler:
+    scheduler = scheduler_cls.__new__(scheduler_cls)
     scheduler.need_truncate = False
     scheduler._logged_mamba_allocation = False
     scheduler.num_speculative_tokens = 0
@@ -2003,6 +2003,7 @@ def test_consumer_always_starts_heartbeat_with_configured_interval(monkeypatch, 
     def init_base(self, vllm_config, engine_id, kv_cache_config):
         self.kv_transfer_config = config
         self.engine_id = engine_id
+        self.ascend_config = SimpleNamespace(sparse_kv_offload_config=None)
 
     monkeypatch.setattr(MooncakeBaseConnectorScheduler, "__init__", init_base)
     logger = MagicMock()

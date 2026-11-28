@@ -78,15 +78,21 @@ def test_registered_v2_selects_requested_protocol(connector_name, extra, expecte
     classes = facade()
     registry = registration()
     module, name = registry[connector_name]
-    assert module == "vllm_ascend.distributed.kv_transfer.kv_p2p.mooncake.connector"
-    assert name == connector_name
+    if connector_name == "MooncakeConnectorV2":
+        assert module == "vllm_ascend.distributed.kv_transfer.kv_p2p.mooncake_sfa.connector"
+        assert name == "MooncakeSFACompatibleConnector"
+        classes["init_ascend_config"] = lambda _config: SimpleNamespace(sparse_kv_offload_config=None)
+        execute("kv_p2p/mooncake_sfa/connector.py", classes)
+    else:
+        assert module == "vllm_ascend.distributed.kv_transfer.kv_p2p.mooncake.connector"
+        assert name == connector_name
     assert "HiSparseMooncakePullConnector" not in registry
     assert "_HiSparseMooncakePullConnector" not in registry
     config = SimpleNamespace(
         kv_transfer_config=SimpleNamespace(kv_connector=connector_name, kv_connector_extra_config=extra)
     )
     role, cache = object(), object()
-    expected_cls = classes.get(expected, hisparse_pd._HiSparseMooncakePullConnector)
+    expected_cls = classes[expected]
     with patch.object(expected_cls, "__init__", return_value=None) as init:
         result = classes[name](config, role, cache)
     assert type(result) is expected_cls

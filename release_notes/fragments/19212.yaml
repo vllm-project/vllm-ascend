@@ -1,0 +1,17 @@
+pr: 19212
+entries:
+  - category: feature
+    text: >-
+      Added opt-in MooncakeConnectorV2 support for SFA-managed Host KV offload
+      on Atlas A3 with ModelRunner V2. Enable VLLM_USE_V2_MODEL_RUNNER=1 on P
+      and D, select MooncakeConnectorV2 on both, and set
+      additional_config.sparse_kv_offload_config.enabled=true on D.
+  - category: config
+    text: >-
+      This combination requires LIM + Copy-SFA, BF16 main KV,
+      kv_connector_extra_config.use_layerwise=false,
+      additional_config.sparse_kv_offload_config.use_fused_overlap=false
+      and kv_load_failure_policy="fail". Send the same original prompt to P
+      and D; discard P's output token and let D generate the complete output.
+      Context/pipeline parallel offload, MultiConnector wrapping and DSpark
+      integration are unsupported.

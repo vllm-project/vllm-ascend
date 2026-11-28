@@ -50,16 +50,19 @@ class GlobalTE:
     def register_buffer(self, ptrs: list[int], sizes: list[int]):
         with self.register_buffer_lock:
             assert self.transfer_engine is not None, "Transfer engine must be initialized"
-            # Register once per process. Once recorded, buffers dropped by
-            # unregister_buffer() come back through reregister_buffer(), so a
-            # stray call here cannot register a still-registered buffer twice.
-            if self.registered_buffers:
-                return
+            # Admit late-created staging buffers without registering known
+            # regions twice. Dropped regions remain known: only
+            # reregister_buffer() restores them after sleep or partial failure.
+            known_regions = set(self.registered_buffers)
             for ptr, size in zip(ptrs, sizes):
+                ptr, size = int(ptr), int(size)
+                if (ptr, size) in known_regions:
+                    continue
                 ret_value = self.transfer_engine.register_memory(ptr, size)
                 if ret_value != 0:
-                    raise RuntimeError("Mooncake memory registration failed.")
-            self.registered_buffers = list(zip(ptrs, sizes))
+                    raise RuntimeError(f"Mooncake memory registration failed for ptr={ptr:#x}, ret_value={ret_value}")
+                self.registered_buffers.append((ptr, size))
+                known_regions.add((ptr, size))
 
     def unregister_buffer(self):
         with self.register_buffer_lock:

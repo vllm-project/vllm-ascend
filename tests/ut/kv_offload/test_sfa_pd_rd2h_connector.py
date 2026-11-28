@@ -14,17 +14,17 @@ import pytest
 pytest.importorskip("torch")
 pytest.importorskip("vllm")
 
-from vllm.distributed.kv_transfer.kv_connector.factory import (  # noqa: E402
-    KVConnectorFactory,
-)
-from vllm.distributed.kv_transfer.kv_connector.v1.base import KVConnectorRole  # noqa: E402
-
 from examples.disaggregated_prefill_v1 import (  # noqa: E402
     load_balance_proxy_layerwise_server_example as proxy_example,
 )
 from examples.disaggregated_prefill_v1.load_balance_proxy_layerwise_server_example import (  # noqa: E402
     get_api_request_ids,
 )
+from vllm.distributed.kv_transfer.kv_connector.factory import (  # noqa: E402
+    KVConnectorFactory,
+)
+from vllm.distributed.kv_transfer.kv_connector.v1.base import KVConnectorRole  # noqa: E402
+
 from vllm_ascend.distributed.kv_transfer import register_connector  # noqa: E402
 from vllm_ascend.distributed.kv_transfer.kv_p2p.sfa_pd_rd2h.connector import (  # noqa: E402
     SfaRemoteD2HConnector,

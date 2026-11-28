@@ -190,6 +190,22 @@ for staging.
 For startup scripts and a proxy example, see
 [D2RH Deployment on Atlas 850E SuperPoD (Air-Cooled) (UBoE)](../../tutorials/features/pd_disaggregation_mooncake_multi_node.md#d2rh-deployment-on-atlas-850e-superpod-air-cooled-uboe).
 
+#### DSA Host KV offload with MooncakeConnectorV2
+
+Mooncake V2 Pull can transfer sparse-attention KV from Prefill into the Decode
+node's existing `SparseKVOffloadManager` Host pool. Main KV lands through a
+bounded HBM staging window; indexer and hot/tail KV use direct HBM reads.
+Receive completion drains all pending Host copies before Decode uses the KV.
+
+- Use ModelRunner V2 and a direct `MooncakeConnectorV2` on both nodes.
+- Enable `sparse_kv_offload_config` only on Decode and keep `use_fused_overlap=false`.
+- Use Atlas A3; **950 DT&950PR products are not supported**.
+- Route the same original prompt to both nodes and discard Prefill's first output token.
+
+See [Mooncake V2 with SFA KV Offload](../../user_guide/feature_guide/mooncake_sfa_v2.md)
+for Prefill/Decode configuration, parameter defaults, staging options and constraints.
+The existing `SfaRemoteD2HConnector` retains its separate MemFabric transfer protocol.
+
 ### 3. Interface Design
 
 Taking MooncakeConnector as an example, the system is organized into three primary classes:

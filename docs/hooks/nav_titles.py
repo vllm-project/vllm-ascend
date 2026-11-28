@@ -225,6 +225,10 @@ TITLES = {
         "en": "Mooncake Layerwise Adaptation and Optimization",
         "zh": "Mooncake Layerwise 适配与优化",
     },
+    "user_guide/feature_guide/mooncake_sfa_v2.md": {
+        "en": "Mooncake V2 with SFA KV Offload",
+        "zh": "Mooncake V2 与 SFA KV 卸载",
+    },
     "user_guide/feature_guide/kvpp.md": {"en": "KVPP", "zh": "KVPP"},
     "user_guide/feature_guide/large_scale_ep.md": {"en": "Large Scale EP", "zh": "大规模 EP"},
     "user_guide/feature_guide/lmcache_ascend_deployment.md": {

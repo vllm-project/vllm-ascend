@@ -1,7 +1,6 @@
 import asyncio
 
 import pytest
-
 from examples.disaggregated_prefill_v1 import load_balance_proxy_server_example as proxy
 
 

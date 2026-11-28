@@ -193,6 +193,74 @@ class TestGlobalTE(unittest.TestCase):
         self.assertEqual(global_te._unregistered_ptrs, set())
         self.assertEqual(global_te.transfer_engine.register_memory.call_count, 4)
 
+    def test_late_registration_is_preserved_across_sleep_and_wake(self):
+        global_te = self.global_te_cls()
+        engine = MagicMock(spec_set=["register_memory", "unregister_memory"])
+        engine.register_memory.return_value = 0
+        engine.unregister_memory.return_value = 0
+        global_te.transfer_engine = engine
+
+        global_te.register_buffer([0x1000], [128])
+        global_te.register_buffer([0x1000, 0x2000, 0x2000], [128, 256, 256])
+        global_te.unregister_buffer()
+        global_te.unregister_buffer()
+        global_te.reregister_buffer()
+        global_te.reregister_buffer()
+
+        self.assertEqual(engine.unregister_memory.call_args_list, [call(0x1000), call(0x2000)])
+        self.assertEqual(
+            engine.register_memory.call_args_list,
+            [call(0x1000, 128), call(0x2000, 256), call(0x1000, 128), call(0x2000, 256)],
+        )
+        self.assertEqual(global_te._unregistered_ptrs, set())
+
+    def test_register_after_sleep_leaves_known_buffers_for_wake(self):
+        global_te = self.global_te_cls()
+        engine = MagicMock(spec_set=["register_memory", "unregister_memory"])
+        engine.register_memory.return_value = 0
+        engine.unregister_memory.return_value = 0
+        global_te.transfer_engine = engine
+        global_te.register_buffer([0x1000], [128])
+        global_te.unregister_buffer()
+        global_te.register_buffer([0x1000, 0x2000], [128, 256])
+        self.assertEqual(global_te._unregistered_ptrs, {0x1000})
+        global_te.reregister_buffer()
+
+        self.assertEqual(
+            engine.register_memory.call_args_list, [call(0x1000, 128), call(0x2000, 256), call(0x1000, 128)]
+        )
+
+    def test_late_registration_after_partial_unregister_preserves_recovery(self):
+        global_te = self.global_te_cls()
+        engine = MagicMock(spec_set=["register_memory", "unregister_memory"])
+        engine.register_memory.return_value = 0
+        engine.unregister_memory.side_effect = [0, -1]
+        global_te.transfer_engine = engine
+        global_te.register_buffer([0x1000, 0x2000], [128, 256])
+        with self.assertRaisesRegex(RuntimeError, "ptr=0x2000"):
+            global_te.unregister_buffer()
+        global_te.register_buffer([0x1000, 0x2000, 0x3000], [128, 256, 512])
+        self.assertEqual(global_te._unregistered_ptrs, {0x1000})
+        global_te.reregister_buffer()
+        self.assertEqual(
+            engine.register_memory.call_args_list,
+            [call(0x1000, 128), call(0x2000, 256), call(0x3000, 512), call(0x1000, 128)],
+        )
+        self.assertEqual(global_te._unregistered_ptrs, set())
+
+    def test_partial_initial_registration_retries_only_unregistered_regions(self):
+        global_te = self.global_te_cls()
+        engine = MagicMock(spec_set=["register_memory", "unregister_memory"])
+        engine.register_memory.side_effect = [0, -1, 0]
+        global_te.transfer_engine = engine
+        with self.assertRaisesRegex(RuntimeError, "ptr=0x2000"):
+            global_te.register_buffer([0x1000, 0x2000], [128, 256])
+        self.assertEqual(global_te.registered_buffers, [(0x1000, 128)])
+        global_te.register_buffer([0x1000, 0x2000], [128, 256])
+        self.assertEqual(
+            engine.register_memory.call_args_list, [call(0x1000, 128), call(0x2000, 256), call(0x2000, 256)]
+        )
+
     def test_unregister_failure_leaves_completed_buffers_unregistered(self):
         global_te = self.global_te_cls()
         global_te.transfer_engine = MagicMock(spec_set=["register_memory", "unregister_memory"])
