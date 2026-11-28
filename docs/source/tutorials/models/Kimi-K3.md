@@ -32,7 +32,8 @@ Refer to [feature guide](../../user_guide/feature_guide/index.md) to get the fea
 
 | Weight Version | Hardware Requirements | Download Links | Notes |
 | --- | --- | --- | --- |
-| `Kimi-K3-w4a8` (W4A8) | • Mixed deployment: 4 × 950DT products (8 devices per node), 4 × Atlas 800I A3 (64GB × 16 per node), or 8 × Atlas 800I A2 (64GB × 8 per node).<br>• PD deployment: 8 × 950DT products or 8 × Atlas 800I A3. | [ModelScope](https://www.modelscope.cn/models/Eco-Tech/Kimi-K3-w4a8) | Target model quantized with ModelSlim W4A8. See [Section 5](#5-online-service-deployment) for deployment topologies and configurations. |
+| `Kimi-K3-w4a8` (W4A8) | • Mixed deployment: 4 × Atlas 800I A3 (64GB × 16 per node) or 8 × Atlas 800I A2 (64GB × 8 per node).<br>• PD deployment: 8 × Atlas 800I A3. | [ModelScope](https://www.modelscope.cn/models/Eco-Tech/Kimi-K3-w4a8) | Target model quantized with ModelSlim W4A8. See [Section 5](#5-online-service-deployment) for deployment topologies and configurations. |
+| `Kimi-K3-w4a8-mxfp-QuaRot` (W4A8 MXFP) | 950DT products (A5 only, 8 devices per node).<br>• Mixed deployment: 4 nodes.<br>• PD deployment: 8 nodes. | [ModelScope](https://www.modelscope.cn/models/Eco-Tech/Kimi-K3-w4a8-mxfp-QuaRot) | Target model with W4A8 MXFP quantization and QuaRot rotation. |
 | `Kimi-K3-DSpark-MLA-NPU` | Atlas 800I A3 | [ModelScope](https://modelscope.cn/models/Eco-Tech/Kimi-K3-DSpark-MLA-NPU) | Draft model for DSpark speculative decoding; further trained by Ant Group. Download in addition to the target model. |
 | `Kimi-K3-DSpark-Block5` | 950DT products | [ModelScope](https://modelscope.cn/models/Inferact/Kimi-K3-DSpark-Block5) | Draft model for DSpark speculative decoding. Download in addition to the target model. |
 
@@ -48,6 +49,8 @@ If you want to deploy multi-node environment, you need to verify multi-node comm
 
 ### 4.1 Docker Image Installation
 
+{% include "getting_started/installation/ascend_docker_runtime.inc.md" %}
+
 Select an image based on your host operating system and start it on every node. For more container options, refer to [installation requirements](../../getting_started/installation.md#installation-requirements).
 
 === "950DT products"
@@ -59,24 +62,11 @@ Select an image based on your host operating system and start it on every node. 
         ```bash
         export IMAGE=quay.io/ascend/vllm-ascend:{{ vllm_ascend_version }}-a5
         docker run --rm \
+            -e ASCEND_VISIBLE_DEVICES=0-7 \
             --name vllm-ascend \
             --shm-size=1g \
             --net=host \
-            --privileged=true \
-            --device /dev/davinci0 \
-            --device /dev/davinci1 \
-            --device /dev/davinci2 \
-            --device /dev/davinci3 \
-            --device /dev/davinci4 \
-            --device /dev/davinci5 \
-            --device /dev/davinci6 \
-            --device /dev/davinci7 \
-            --device /dev/davinci_manager \
-            --device /dev/hisi_hdc \
-            -v /usr/local/dcmi:/usr/local/dcmi \
             -v /usr/local/Ascend/driver:/usr/local/Ascend/driver \
-            -v /usr/local/bin/npu-smi:/usr/local/bin/npu-smi \
-            -v /etc/ascend_install.info:/etc/ascend_install.info \
             -v /root/.cache:/root/.cache \
             -it $IMAGE bash
         ```
@@ -86,24 +76,11 @@ Select an image based on your host operating system and start it on every node. 
         ```bash
         export IMAGE=quay.io/ascend/vllm-ascend:{{ vllm_ascend_version }}-a5-openeuler
         docker run --rm \
+            -e ASCEND_VISIBLE_DEVICES=0-7 \
             --name vllm-ascend \
             --shm-size=1g \
             --net=host \
-            --privileged=true \
-            --device /dev/davinci0 \
-            --device /dev/davinci1 \
-            --device /dev/davinci2 \
-            --device /dev/davinci3 \
-            --device /dev/davinci4 \
-            --device /dev/davinci5 \
-            --device /dev/davinci6 \
-            --device /dev/davinci7 \
-            --device /dev/davinci_manager \
-            --device /dev/hisi_hdc \
-            -v /usr/local/dcmi:/usr/local/dcmi \
             -v /usr/local/Ascend/driver:/usr/local/Ascend/driver \
-            -v /usr/local/bin/npu-smi:/usr/local/bin/npu-smi \
-            -v /etc/ascend_install.info:/etc/ascend_install.info \
             -v /root/.cache:/root/.cache \
             -it $IMAGE bash
         ```
@@ -119,35 +96,11 @@ Select an image based on your host operating system and start it on every node. 
         ```bash
         export IMAGE=quay.io/ascend/vllm-ascend:{{ vllm_ascend_version }}-a3
         docker run --rm \
+            -e ASCEND_VISIBLE_DEVICES=0-15 \
             --name vllm-ascend \
             --shm-size=1g \
             --net=host \
-            --privileged=true \
-            --device /dev/davinci0 \
-            --device /dev/davinci1 \
-            --device /dev/davinci2 \
-            --device /dev/davinci3 \
-            --device /dev/davinci4 \
-            --device /dev/davinci5 \
-            --device /dev/davinci6 \
-            --device /dev/davinci7 \
-            --device /dev/davinci8 \
-            --device /dev/davinci9 \
-            --device /dev/davinci10 \
-            --device /dev/davinci11 \
-            --device /dev/davinci12 \
-            --device /dev/davinci13 \
-            --device /dev/davinci14 \
-            --device /dev/davinci15 \
-            --device /dev/davinci_manager \
-            --device /dev/devmm_svm \
-            --device /dev/hisi_hdc \
-            -v /usr/local/dcmi:/usr/local/dcmi \
             -v /usr/local/Ascend/driver/tools/hccn_tool:/usr/local/Ascend/driver/tools/hccn_tool \
-            -v /usr/local/bin/npu-smi:/usr/local/bin/npu-smi \
-            -v /usr/local/Ascend/driver/lib64/:/usr/local/Ascend/driver/lib64/ \
-            -v /usr/local/Ascend/driver/version.info:/usr/local/Ascend/driver/version.info \
-            -v /etc/ascend_install.info:/etc/ascend_install.info \
             -v /root/.cache:/root/.cache \
             -it $IMAGE bash
         ```
@@ -157,35 +110,11 @@ Select an image based on your host operating system and start it on every node. 
         ```bash
         export IMAGE=quay.io/ascend/vllm-ascend:{{ vllm_ascend_version }}-a3-openeuler
         docker run --rm \
+            -e ASCEND_VISIBLE_DEVICES=0-15 \
             --name vllm-ascend \
             --shm-size=1g \
             --net=host \
-            --privileged=true \
-            --device /dev/davinci0 \
-            --device /dev/davinci1 \
-            --device /dev/davinci2 \
-            --device /dev/davinci3 \
-            --device /dev/davinci4 \
-            --device /dev/davinci5 \
-            --device /dev/davinci6 \
-            --device /dev/davinci7 \
-            --device /dev/davinci8 \
-            --device /dev/davinci9 \
-            --device /dev/davinci10 \
-            --device /dev/davinci11 \
-            --device /dev/davinci12 \
-            --device /dev/davinci13 \
-            --device /dev/davinci14 \
-            --device /dev/davinci15 \
-            --device /dev/davinci_manager \
-            --device /dev/devmm_svm \
-            --device /dev/hisi_hdc \
-            -v /usr/local/dcmi:/usr/local/dcmi \
             -v /usr/local/Ascend/driver/tools/hccn_tool:/usr/local/Ascend/driver/tools/hccn_tool \
-            -v /usr/local/bin/npu-smi:/usr/local/bin/npu-smi \
-            -v /usr/local/Ascend/driver/lib64/:/usr/local/Ascend/driver/lib64/ \
-            -v /usr/local/Ascend/driver/version.info:/usr/local/Ascend/driver/version.info \
-            -v /etc/ascend_install.info:/etc/ascend_install.info \
             -v /root/.cache:/root/.cache \
             -it $IMAGE bash
         ```
@@ -201,27 +130,11 @@ Select an image based on your host operating system and start it on every node. 
         ```bash
         export IMAGE=quay.io/ascend/vllm-ascend:{{ vllm_ascend_version }}
         docker run --rm \
+            -e ASCEND_VISIBLE_DEVICES=0-7 \
             --name vllm-ascend \
             --shm-size=1g \
             --net=host \
-            --privileged=true \
-            --device /dev/davinci0 \
-            --device /dev/davinci1 \
-            --device /dev/davinci2 \
-            --device /dev/davinci3 \
-            --device /dev/davinci4 \
-            --device /dev/davinci5 \
-            --device /dev/davinci6 \
-            --device /dev/davinci7 \
-            --device /dev/davinci_manager \
-            --device /dev/devmm_svm \
-            --device /dev/hisi_hdc \
-            -v /usr/local/dcmi:/usr/local/dcmi \
             -v /usr/local/Ascend/driver/tools/hccn_tool:/usr/local/Ascend/driver/tools/hccn_tool \
-            -v /usr/local/bin/npu-smi:/usr/local/bin/npu-smi \
-            -v /usr/local/Ascend/driver/lib64/:/usr/local/Ascend/driver/lib64/ \
-            -v /usr/local/Ascend/driver/version.info:/usr/local/Ascend/driver/version.info \
-            -v /etc/ascend_install.info:/etc/ascend_install.info \
             -v /root/.cache:/root/.cache \
             -it $IMAGE bash
         ```
@@ -231,27 +144,11 @@ Select an image based on your host operating system and start it on every node. 
         ```bash
         export IMAGE=quay.io/ascend/vllm-ascend:{{ vllm_ascend_version }}-openeuler
         docker run --rm \
+            -e ASCEND_VISIBLE_DEVICES=0-7 \
             --name vllm-ascend \
             --shm-size=1g \
             --net=host \
-            --privileged=true \
-            --device /dev/davinci0 \
-            --device /dev/davinci1 \
-            --device /dev/davinci2 \
-            --device /dev/davinci3 \
-            --device /dev/davinci4 \
-            --device /dev/davinci5 \
-            --device /dev/davinci6 \
-            --device /dev/davinci7 \
-            --device /dev/davinci_manager \
-            --device /dev/devmm_svm \
-            --device /dev/hisi_hdc \
-            -v /usr/local/dcmi:/usr/local/dcmi \
             -v /usr/local/Ascend/driver/tools/hccn_tool:/usr/local/Ascend/driver/tools/hccn_tool \
-            -v /usr/local/bin/npu-smi:/usr/local/bin/npu-smi \
-            -v /usr/local/Ascend/driver/lib64/:/usr/local/Ascend/driver/lib64/ \
-            -v /usr/local/Ascend/driver/version.info:/usr/local/Ascend/driver/version.info \
-            -v /etc/ascend_install.info:/etc/ascend_install.info \
             -v /root/.cache:/root/.cache \
             -it $IMAGE bash
         ```

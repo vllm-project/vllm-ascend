@@ -10,7 +10,8 @@ from vllm_ascend.worker.v2.kv_connector import MambaCopyKVConnector
 
 
 @pytest.mark.parametrize("sync_load", [True, False])
-def test_bulk_copy_reads_state_after_pre_forward(monkeypatch, sync_load):
+@pytest.mark.parametrize("non_aggregating_parent", [True, False])
+def test_bulk_copy_reads_state_after_pre_forward(monkeypatch, sync_load, non_aggregating_parent):
     """A remote load must update the source before it is copied for forward."""
     from vllm_ascend.worker.v2.model_states import mamba_hybrid
     from vllm_ascend.worker.v2.model_states.mamba_hybrid import AscendMambaHybridModelState
@@ -41,14 +42,13 @@ def test_bulk_copy_reads_state_after_pre_forward(monkeypatch, sync_load):
     )
     monkeypatch.setattr(mamba_hybrid, "preprocess_mamba_align_fused_kernel", DecisionKernel())
     monkeypatch.setattr(mamba_hybrid, "has_kv_transfer_group", lambda: True)
-    monkeypatch.setattr(
-        mamba_hybrid,
-        "get_kv_transfer_group",
-        lambda: SimpleNamespace(requires_mamba_state_copy_after_load=True),
-    )
+    child = SimpleNamespace(requires_mamba_state_copy_after_load=True)
+    connector_group = SimpleNamespace(sub_connectors=[child]) if non_aggregating_parent else child
+    monkeypatch.setattr(mamba_hybrid, "get_kv_transfer_group", lambda: connector_group)
     batch = SimpleNamespace(num_reqs=1, idx_mapping=None, query_start_loc=None)
     AscendMambaHybridModelState.preprocess_state(state, batch, (), None, None)
     assert events == ["decision"]
+    assert state._pending_bulk_copy is not None
 
     def load(scheduler_output, **kwargs):
         events.append("pre_forward")

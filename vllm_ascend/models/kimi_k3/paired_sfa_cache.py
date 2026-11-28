@@ -23,13 +23,6 @@ from vllm.v1.kv_cache_interface import (
 
 from vllm_ascend.core.kv_cache_interface import AscendMLAAttentionSpec, AscendSFAIndexerCacheSpec
 from vllm_ascend.models.kimi_k3.cache_config import make_kimi_cache_groups
-from vllm_ascend.utils import vllm_version_is
-
-# vLLM main moved this helper to kv_cache_planning after v0.32.0.
-if vllm_version_is("0.32.0"):
-    from vllm.v1.core.kv_cache_utils import may_override_num_blocks
-else:
-    from vllm.v1.core.kv_cache_planning import may_override_num_blocks
 
 
 def _draft_layer_specs(groups):
@@ -176,13 +169,12 @@ def paired_sfa_pool_bytes(groups):
 def paired_sfa_cache_config(
     vllm_config: VllmConfig,
     kv_cache_groups: list[KVCacheGroupSpec],
-    available_memory: int,
+    num_blocks: int,
 ) -> KVCacheConfig:
     _, main_mla_names, indexer_names, kda_groups, main_page_size, indexer_page_size, num_main_slots = _layout(
         kv_cache_groups
     )
     pool_bytes = paired_sfa_pool_bytes(kv_cache_groups)
-    num_blocks = may_override_num_blocks(vllm_config, available_memory // pool_bytes)
     backing_size = pool_bytes * num_blocks
     main_layer_size = main_page_size * num_blocks
     # Recurrent groups overlay the target MLA region. Their block IDs are

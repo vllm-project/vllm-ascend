@@ -113,7 +113,7 @@ vllm serve /path/to/GLM-5.3-Flash --tensor-parallel-size 8 --trust-remote-code
 
 How the weights are executed depends on the hardware:
 
-- **950PR&950DT Products**: the block scales are re-grouped into MXFP8 at load time, so weights stay at one byte per element and the native FP8 matmul is used.
+- **950PR&950DT Products**: the block scales are re-grouped into MXFP8 at load time, so weights stay at one Byte per element and the native FP8 matmul is used.
 - **Other Ascend generations**: A2/A3 and Atlas 300I Duo have no FP8 matmul, so such a checkpoint is rejected at startup. Dequantizing it into the model dtype instead would double the weight footprint to run an unquantized GEMM, which is not what the checkpoint promises. Serve the BF16 release of the model there, or re-quantize it with ModelSlim or LLM-Compressor.
 
 Layers the checkpoint left unquantized, such as `visual.merger.*` on multimodal models, are listed in `ignored_layers` or `modules_to_not_convert` and are served unquantized.
@@ -144,10 +144,6 @@ llm = LLM(model="/path/to/your/quantized_model",
           # Set appropriate TP and DP values
           tensor_parallel_size=2,
           data_parallel_size=1,
-          # Set an unused port
-          port=8000,
-          # Set serving model name
-          served_model_name="quantized_model",
           # Specify `quantization="ascend"` to enable quantization for models quantized by ModelSlim
           quantization="ascend")
 
@@ -169,6 +165,7 @@ python -m vllm.entrypoints.api_server \
     --tensor-parallel-size 2 \
     --data-parallel-size 1 \
     --served-model-name quantized_model \
+    --quantization ascend \
     --trust-remote-code
 ```
 

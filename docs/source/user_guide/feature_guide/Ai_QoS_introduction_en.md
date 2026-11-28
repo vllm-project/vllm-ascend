@@ -78,9 +78,11 @@ python -m tools.ai_qos unset
 
 ​Due to underlying driver limitations, the QoS configuration for AIV does not take effect currently. Once the required adaptation capabilities are added in a future driver release, this feature will be delivered through a module upgrade.
 
-The AI QoS feature supports the Atlas 800T A3 server and Atlas 900 A3 SuperPoD cluster. It must be used in privileged containers and requires the following software versions:
+The AI QoS feature supports the Atlas 800T A3 server and Atlas 900 A3 SuperPoD cluster and requires the following software versions:
 
 | Software     |             Matched Version              |
 | :----------: | :--------------------------------------: |
 | Ascend HDK   | 25.5.2 or later                          |
 | UB Switch    | LingQu Computing Network 1.5.1 or later  |
+
+When running the AI QoS tool in a container, mount the DSMI driver library and pass the required NPU devices with appropriate permissions. Verify that the host driver permits QoS configuration through the container before use.

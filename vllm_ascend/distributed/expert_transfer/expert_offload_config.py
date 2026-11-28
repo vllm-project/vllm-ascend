@@ -29,8 +29,6 @@ def validate_expert_offload_config(
         return
     if get_current_hardware_profile().device_adaptor_family != DeviceAdaptorFamily.FP8_OPTIMIZED:
         raise ValueError("expert offload currently requires Ascend 950 (A5) hardware")
-    if not vllm_config.use_v2_model_runner:
-        raise ValueError("expert offload requires Model Runner V2")
     if not vllm_config.model_config.enforce_eager:
         from vllm.config.compilation import CompilationMode, CUDAGraphMode
 
@@ -113,7 +111,5 @@ def validate_expert_offload_config(
     for name in ("mix_placement", "enable_force_eplb", "enable_fused_mc2", "multistream_overlap_shared_expert"):
         if getattr(ascend_config, name):
             raise ValueError(f"expert offload has no slot/pool integration for {name}; disable {name}")
-    if ascend_config.eplb_config.dynamic_eplb:
-        raise ValueError("expert offload does not coordinate dynamic EPLB with resident slots; disable dynamic EPLB")
     if ascend_config.rl_config.enabled:
         raise ValueError("expert offload cannot rebuild prepared host bytes and graphs during RL weight reloading")

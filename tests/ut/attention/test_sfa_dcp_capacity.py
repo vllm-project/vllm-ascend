@@ -6,7 +6,6 @@ from unittest.mock import patch
 
 import pytest
 import torch
-from vllm.v1.worker.gpu.block_table import BlockTables
 from vllm.v1.worker.utils import AttentionGroup
 
 from vllm_ascend.attention.context_parallel.common_cp import DCPMetadataBuilderMixin
@@ -19,7 +18,6 @@ from vllm_ascend.attention.indexer import AscendSFAIndexerMetadataBuilder
 from vllm_ascend.core.kv_cache_interface import AscendMLAAttentionSpec, AscendSFAIndexerCacheSpec
 from vllm_ascend.platform import _validate_sfa_dcp_kv_sp
 from vllm_ascend.utils import enable_sfa_dcp_sharded_indexer
-from vllm_ascend.worker.v2.block_table import AscendBlockTables
 
 
 def _config(max_len, interleave):
@@ -37,7 +35,7 @@ def _config(max_len, interleave):
     )
 
 
-def _create_builder(spec, config, indexer):
+def _create_attention_group(spec, config, indexer):
     # Exercise the real upstream factory, including its kernel-size spec copy.
     cls = AscendSFAIndexerMetadataBuilder if indexer else AscendSFADCPMetadataBuilder
     backend = SimpleNamespace(get_builder_cls=lambda: cls, get_supported_kernel_block_sizes=lambda _spec: [128])
@@ -58,7 +56,7 @@ def _create_builder(spec, config, indexer):
         patch("vllm_ascend.attention.indexer.enable_sfa_dcp_sharded_indexer", return_value=False),
     ):
         group.create_metadata_builders(config, torch.device("cpu"), kernel_block_size=128)
-    return group.get_metadata_builder()
+    return group
 
 
 @pytest.mark.parametrize("indexer", [False, True])
@@ -68,28 +66,21 @@ def test_dcp_factory_preserves_complete_physical_pages(indexer, physical_size, m
     config = _config(max_len, physical_size)
     spec_cls = AscendSFAIndexerCacheSpec if indexer else AscendMLAAttentionSpec
     spec = spec_cls(block_size=physical_size, num_kv_heads=1, head_size=128, dtype=torch.uint8)
-    builder = _create_builder(spec, config, indexer)
+    group = _create_attention_group(spec, config, indexer)
+    builder = group.get_metadata_builder()
     physical_cols = spec.max_num_blocks_per_req(config, max_len)
     split = physical_size // 128
     assert builder.blocks_per_phys_block == split
     assert builder.max_local_block_table_cols == physical_cols * split
 
-    table = AscendBlockTables.__new__(AscendBlockTables)
-    table.blocks_per_kv_block = [split]
-    storage = torch.zeros(30, physical_cols * split, dtype=torch.int32)
-
-    def write_row(self, req_index, new_block_ids, overwrite):
-        assert overwrite
-        storage[req_index, : len(new_block_ids[0])] = torch.tensor(new_block_ids[0], dtype=torch.int32)
-
     # Distinct non-consecutive physical pages expose both lost tail columns and
     # accidental reads from the next request. Include the last batch row.
-    # Exercise V2's real expansion; replace only the parent's staged device write.
-    with patch.object(BlockTables, "append_block_ids", write_row):
-        for row in range(30):
-            pages = [1 + 2 * col + row * physical_cols * 3 for col in range(physical_cols)]
-            table.append_block_ids(row, (pages,), overwrite=True)
-    local = get_sfa_dcp_local_block_table(storage, 30, builder.max_local_block_table_cols)
+    manager_table = torch.tensor(
+        [[1 + 2 * col + row * physical_cols * 3 for col in range(physical_cols)] for row in range(30)],
+        dtype=torch.int32,
+    )
+    kernel_table = group.map_to_kernel_block_table(manager_table)
+    local = get_sfa_dcp_local_block_table(kernel_table, 30, builder.max_local_block_table_cols)
     assert local.is_contiguous()
     assert local.shape == (30, physical_cols * split)
 
@@ -122,7 +113,7 @@ def test_kernel_spec_copy_keeps_manager_size_without_mutating_original(spec_cls)
 def test_report_boundary_and_replicated_indexer_addresses():
     config = _config(140000, 768)
     spec = AscendMLAAttentionSpec(block_size=768, num_kv_heads=1, head_size=128, dtype=torch.uint8)
-    builder = _create_builder(spec, config, False)
+    builder = _create_attention_group(spec, config, False).get_metadata_builder()
     assert builder.max_local_block_table_cols == 138
     # 135807 + four verify tokens crosses local token 17536 (column 137).
     local = torch.arange(138, dtype=torch.int32).view(1, -1) + 6
@@ -154,7 +145,7 @@ def test_wider_table_is_packed_with_operator_row_stride():
 def test_dcp_builder_refreshes_captured_local_block_table():
     config = _config(140000, 768)
     spec = AscendMLAAttentionSpec(block_size=768, num_kv_heads=1, head_size=128, dtype=torch.uint8)
-    builder = _create_builder(spec, config, False)
+    builder = _create_attention_group(spec, config, False).get_metadata_builder()
     backing = torch.arange(2 * 144, dtype=torch.int32).reshape(2, 144)
     captured = builder._get_dcp_local_block_table(backing, 2)
     other = backing.clone()
@@ -175,12 +166,11 @@ def test_kimi_k31_dcp_uses_final_physical_interleave(interleave):
     config.model_config.hf_text_config = SimpleNamespace(model_type="kimi_k31", index_topk=2048)
     config.cache_config = SimpleNamespace(block_size=768, cache_dtype="fp8")
     config.kv_transfer_config = None
-    config.use_v2_model_runner = True
     with patch("vllm_ascend.platform.enable_sp", return_value=False):
         _validate_sfa_dcp_kv_sp(config)
     assert config.parallel_config.cp_kv_cache_interleave_size == 768
     assert enable_sfa_dcp_sharded_indexer(config)
     spec = AscendMLAAttentionSpec(block_size=768, num_kv_heads=1, head_size=128, dtype=torch.uint8)
-    builder = _create_builder(spec, config, False)
+    builder = _create_attention_group(spec, config, False).get_metadata_builder()
     assert builder.cp_kv_cache_interleave_size == 768
     assert builder.max_local_block_table_cols == 138

@@ -16,17 +16,6 @@ def _gbsa_metadata_op():
         return generic_block_sparse_attention_metadata
 
 
-def _gbsa_op():
-    try:
-        return torch.ops._C_ascend.npu_generic_block_sparse_attention
-    except AttributeError:
-        from cann_ops_transformer.ops.attention.generic_block_sparse_attention import (
-            generic_block_sparse_attention,
-        )
-
-        return generic_block_sparse_attention
-
-
 class GBSAMaskMode(IntEnum):
     NO_MASK = 0
     CAUSAL = 1
@@ -129,7 +118,11 @@ def generic_block_sparse_attention(
     attention_out_dtype: torch.dtype | None = None,
 ) -> tuple[torch.Tensor, torch.Tensor]:
     """Run GBSA using metadata generated for the same inputs and attributes."""
-    return _gbsa_op()(
+    from cann_ops_transformer.ops.attention.generic_block_sparse_attention import (
+        generic_block_sparse_attention as cann_gbsa,
+    )
+
+    return cann_gbsa(
         q,
         k,
         v,

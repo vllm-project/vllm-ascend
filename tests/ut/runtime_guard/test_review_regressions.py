@@ -514,6 +514,79 @@ def test_v12b_logits_finite_decode_rows_still_attributed():
     assert alerts[0].req_id == "b"
 
 
+def test_v12b2_logits_finite_misaligned_without_indices_does_not_guess_req():
+    """nrows != num_reqs and no logits_indices → warn, never req_ids[row].
+
+    Spec-style layout [A, A, B] with NaN on the second A row used to hard-map
+    row=1 → req_ids[1]=B when indices were missing.
+    """
+    from ._helpers import capture_logger_text
+
+    section = {"enabled": True}
+    rc = SimpleNamespace(
+        detector_section=lambda name: section,
+        detector_get=lambda sec, key, default=None: section.get(key, default),
+    )
+    input_batch = SimpleNamespace(req_ids=["A", "B"])
+    runner = SimpleNamespace(input_batch=input_batch)
+    det = LogitsFiniteDetector(runtime_config=rc, runner=runner)
+
+    logits = torch.randn(3, 8)
+    logits[1, :] = float("nan")
+    with capture_logger_text(
+        "vllm_ascend.observability.runtime_guard.detector.logits_finite",
+        level=logging.WARNING,
+    ) as buf:
+        det.check_all(logits=logits, logits_indices=None, input_batch=input_batch)
+        assert det.check_deferred() == []
+    assert "cannot attribute" in buf.getvalue()
+
+
+def test_v12b3_logits_finite_misaligned_with_indices_maps_correct_req():
+    """Same [A, A, B] layout: indices + qsl attribute the NaN row to A."""
+    section = {"enabled": True}
+    rc = SimpleNamespace(
+        detector_section=lambda name: section,
+        detector_get=lambda sec, key, default=None: section.get(key, default),
+    )
+    qsl = np.array([0, 2, 3], dtype=np.int64)
+    input_batch = SimpleNamespace(req_ids=["A", "B"], query_start_loc_np=qsl)
+    runner = SimpleNamespace(input_batch=input_batch)
+    det = LogitsFiniteDetector(runtime_config=rc, runner=runner)
+
+    logits = torch.randn(3, 8)
+    logits[1, :] = float("nan")
+    idx = torch.tensor([0, 1, 2], dtype=torch.int64)
+    det.check_all(logits=logits, logits_indices=idx, input_batch=input_batch)
+    alerts = det.check_deferred()
+    assert len(alerts) == 1
+    assert alerts[0].req_id == "A"
+    assert alerts[0].detail.get("logits_row") == 1
+
+
+@pytest.mark.parametrize("item_sync", [False, True])
+def test_logits_finite_uses_admitted_query_boundaries(item_sync):
+    section = {"enabled": True, "item_sync": item_sync}
+    config = SimpleNamespace(
+        detector_section=lambda name: section,
+        detector_get=lambda sec, key, default=None: section.get(key, default),
+    )
+    # The host splits two draft slots evenly. The device admitted both for A.
+    batch = SimpleNamespace(
+        req_ids=["A", "B"],
+        query_start_loc_np=np.array([0, 2, 4]),
+        query_start_loc=torch.tensor([0, 3, 4]),
+    )
+    runner = SimpleNamespace(input_batch=batch, adaptive_verification=object(), use_fia=False)
+    detector = LogitsFiniteDetector(runtime_config=config, runner=runner)
+    logits = torch.zeros(4, 2)
+    logits[2, 0] = float("nan")
+    detector.check_all(logits=logits, logits_indices=torch.arange(4), input_batch=batch)
+    # The next wave may reuse the device buffer before the deferred check.
+    batch.query_start_loc.copy_(torch.tensor([0, 1, 4]))
+    assert [alert.req_id for alert in detector.check_deferred()] == ["A"]
+
+
 def test_v12c_logits_finite_alerts_same_step_no_window():
     """Dirty logits alert on the same step's check_deferred (no multi-step OR)."""
     section = {"enabled": True}
@@ -1009,7 +1082,22 @@ def test_v18_dump_payload_carries_tp_rank_and_heads(tmp_path: Path):
     from vllm_ascend.observability.runtime_guard.dump import KvCacheReader
 
     cache = torch.randn(4, 8, 2, 16)  # [blocks, block_size, kv_heads, head_dim]
-    runner = SimpleNamespace(kv_caches={"L0": cache}, tp_rank=3, dp_rank=0, dcp_rank=0, dcp_size=1)
+    runner = SimpleNamespace(
+        kv_caches={"L0": cache},
+        kv_cache_config=SimpleNamespace(
+            kv_cache_groups=[SimpleNamespace(layer_names=["L0"])],
+        ),
+        requests={"r1": SimpleNamespace(block_ids=([0, 2],))},
+        block_tables=SimpleNamespace(blocks_per_kv_block=[1]),
+        compilation_config=None,
+        input_batch=None,
+        execute_model_state=None,
+        req_states=None,
+        tp_rank=3,
+        dp_rank=0,
+        dcp_rank=0,
+        dcp_size=1,
+    )
     reader = KvCacheReader(runner)
     snaps = reader.snapshot_request_blocks(
         req_id="r1",
@@ -1032,6 +1120,12 @@ def test_v18c_list_kv_caches_use_global_layer_names(tmp_path: Path):
     runner = SimpleNamespace(
         kv_caches=[cache0, cache1],
         kv_cache_config=SimpleNamespace(kv_cache_groups=groups),
+        requests={"r1": SimpleNamespace(block_ids=([0],))},
+        block_tables=SimpleNamespace(blocks_per_kv_block=[1]),
+        compilation_config=None,
+        input_batch=None,
+        execute_model_state=None,
+        req_states=None,
         model=SimpleNamespace(start_layer=14),
         tp_rank=0,
         dp_rank=0,
@@ -1053,8 +1147,19 @@ def test_v18d_list_kv_caches_fallback_start_layer(tmp_path: Path):
     from vllm_ascend.observability.runtime_guard.dump import KvCacheReader
 
     cache = torch.randn(2, 4, 1, 8)
+    # Fallback list name is layer_{start}; it must still be registered in
+    # kv_cache_groups so dump does not silent-fallback to group 0.
     runner = SimpleNamespace(
         kv_caches=[cache],
+        kv_cache_config=SimpleNamespace(
+            kv_cache_groups=[SimpleNamespace(layer_names=["layer_14"])],
+        ),
+        requests={"r1": SimpleNamespace(block_ids=([0],))},
+        block_tables=SimpleNamespace(blocks_per_kv_block=[1]),
+        compilation_config=None,
+        input_batch=None,
+        execute_model_state=None,
+        req_states=None,
         model=SimpleNamespace(start_layer=14),
         tp_rank=0,
         dp_rank=0,
@@ -1069,8 +1174,33 @@ def test_v18d_list_kv_caches_fallback_start_layer(tmp_path: Path):
     assert snaps[0].payload["layer"] == "layer_14"
 
 
+def test_v18d2_missing_kv_cache_groups_skips_dump(tmp_path: Path):
+    """No layer→group map: refuse silent group-0 dump (alex #1)."""
+    from vllm_ascend.observability.runtime_guard.dump import KvCacheReader
+
+    cache = torch.randn(2, 4, 1, 8)
+    runner = SimpleNamespace(
+        kv_caches=[cache],
+        model=SimpleNamespace(start_layer=14),
+        tp_rank=0,
+        dp_rank=0,
+        dcp_rank=0,
+        dcp_size=1,
+    )
+    snaps = KvCacheReader(runner).snapshot_request_blocks(
+        req_id="r1",
+        block_ids=[0],
+        out_dir=tmp_path / "kv",
+    )
+    assert snaps == []
+
+
 @pytest.mark.parametrize("tp_rank", [0, 1])
-def test_v18b_kv_drain_dumps_on_tp_ranks(tmp_path: Path, tp_rank: int):
+@pytest.mark.parametrize(
+    "job_fields",
+    [{"incident_type": "token_repeat"}, {"incident_type": "manual_trigger", "manager_block_ids_by_group": [[]]}],
+)
+def test_v18b_kv_drain_dumps_on_tp_ranks(tmp_path: Path, tp_rank: int, job_fields):
     from vllm_ascend.observability.runtime_guard.dump import KvCacheReader
     from vllm_ascend.observability.runtime_guard.processor import RuntimeGuardProcessor
     from vllm_ascend.observability.runtime_guard.rank_gate import dump_rank_tag
@@ -1078,6 +1208,15 @@ def test_v18b_kv_drain_dumps_on_tp_ranks(tmp_path: Path, tp_rank: int):
     cache = torch.randn(2, 4, 1, 8)
     runner = SimpleNamespace(
         kv_caches={"L0": cache},
+        kv_cache_config=SimpleNamespace(
+            kv_cache_groups=[SimpleNamespace(layer_names=["L0"])],
+        ),
+        requests={"r1": SimpleNamespace(block_ids=([0],))},
+        block_tables=SimpleNamespace(blocks_per_kv_block=[1]),
+        compilation_config=None,
+        input_batch=None,
+        execute_model_state=None,
+        req_states=None,
         tp_rank=tp_rank,
         dp_rank=0,
         dcp_rank=0,
@@ -1091,19 +1230,16 @@ def test_v18b_kv_drain_dumps_on_tp_ranks(tmp_path: Path, tp_rank: int):
             submit_heavy=None,
         ),
         quota=MagicMock(),
+        wave_tracker=SimpleNamespace(current_wave=lambda: 2),
     )
     jobs = [
         {
             "req_id": "r1",
-            "incident_type": "token_repeat",
+            **job_fields,
         }
     ]
-    with patch(
-        "vllm_ascend.observability.runtime_guard.processor_dump.block_ids_for_request",
-        return_value=[0],
-    ):
-        RuntimeGuardProcessor._run_kv_dumps(proc, jobs)
-    shard = tmp_path / "kv_cache" / "token_repeat" / "r1" / "wave_unknown" / dump_rank_tag(runner)
+    RuntimeGuardProcessor._run_kv_dumps(proc, jobs)
+    shard = tmp_path / "kv_cache" / job_fields["incident_type"] / "r1" / "wave_unknown" / dump_rank_tag(runner)
     assert shard.is_dir()
     assert list(shard.glob("*.pt"))
 
@@ -1654,8 +1790,13 @@ def test_v19e_queue_fail_refunds_quota():
     quota.refund.assert_called_once_with(consume_quota=True)
 
 
-def test_v19f_multi_job_arm_refunds_once_when_all_fail(tmp_path: Path):
-    """Same arm_id + consume_quota: all skips → single refund (not N)."""
+@pytest.mark.parametrize("marker_writable", [True, False])
+def test_v19f_multi_job_arm_keeps_quota_when_directory_exists(tmp_path: Path, monkeypatch, marker_writable):
+    """Same arm_id + empty block_ids: dump_skipped tree counts as dumped → no refund.
+
+    Quota semantics: once drain creates a dump directory / skip marker, the arm
+    keeps its auto_max_times unit even when D2H cannot run (empty_block_ids).
+    """
     from vllm_ascend.observability.runtime_guard.processor import RuntimeGuardProcessor
     from vllm_ascend.observability.runtime_guard.state import RequestGuardStore
 
@@ -1685,7 +1826,53 @@ def test_v19f_multi_job_arm_refunds_once_when_all_fail(tmp_path: Path):
                 "arm_id": arm,
             },
         ]
+        if not marker_writable:
+            monkeypatch.setattr(Path, "write_text", MagicMock(side_effect=OSError("disk full")))
         RuntimeGuardProcessor._run_kv_dumps(proc, jobs)
+        quota.refund.assert_not_called()
+        assert (tmp_path / "token_repeat" / "r1").is_dir()
+        assert (tmp_path / "token_repeat" / "r2").is_dir()
+        assert len(list(tmp_path.rglob("dump_skipped.json"))) == (2 if marker_writable else 0)
+    finally:
+        RequestGuardStore.reset_for_tests()
+
+
+def test_v19f2_multi_job_arm_refunds_once_when_no_dump_tree(tmp_path: Path):
+    """Same arm_id: if skip markers cannot be written, refund once (not N)."""
+    from vllm_ascend.observability.runtime_guard.processor import RuntimeGuardProcessor
+    from vllm_ascend.observability.runtime_guard.state import RequestGuardStore
+
+    RequestGuardStore.reset_for_tests()
+    try:
+        RequestGuardStore.get().mark_finished(["r1", "r2"], wave=0)
+        quota = MagicMock()
+        runner = SimpleNamespace(tp_rank=0, dp_rank=0, dcp_rank=0, dcp_size=1)
+        proc = SimpleNamespace(
+            runner=runner,
+            runtime_config=SimpleNamespace(dump_root=lambda: str(tmp_path)),
+            action_executor=SimpleNamespace(_kv_reader=MagicMock(), submit_heavy=None),
+            quota=quota,
+        )
+        arm = "arm-shared"
+        jobs = [
+            {
+                "req_id": "r1",
+                "incident_type": "token_repeat",
+                "consume_quota": True,
+                "arm_id": arm,
+            },
+            {
+                "req_id": "r2",
+                "incident_type": "token_repeat",
+                "consume_quota": True,
+                "arm_id": arm,
+            },
+        ]
+        with patch(
+            "vllm_ascend.observability.runtime_guard.processor_dump.write_kv_dump_skipped",
+            return_value=None,
+        ):
+            RuntimeGuardProcessor._run_kv_dumps(proc, jobs)
         quota.refund.assert_called_once_with(consume_quota=True)
     finally:
         RequestGuardStore.reset_for_tests()

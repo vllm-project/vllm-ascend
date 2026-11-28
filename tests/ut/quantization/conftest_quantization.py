@@ -123,12 +123,8 @@ def create_mock_vllm_config(
     return mock_config
 
 
-def create_mock_ascend_config(
-    dynamic_eplb=False,
-):
-    mock_config = Mock()
-    mock_config.eplb_config = Mock(dynamic_eplb=dynamic_eplb)
-    return mock_config
+def create_mock_ascend_config():
+    return Mock()
 
 
 def create_moe_layer(

@@ -48,6 +48,8 @@ If you want to deploy multi-node environment, you need to verify multi-node comm
 
 ### 4.1 Docker Image Installation
 
+{% include "getting_started/installation/ascend_docker_runtime.inc.md" %}
+
 Select an image based on your machine type and start the Docker image on your node, refer to [using Docker](../../getting_started/installation.md#installation-prebuilt-image).
 
 It is **recommended to use the latest release candidate (rc) version or the latest official version** of the `vllm-ascend` image to ensure the best compatibility and access to the latest features. As a minimum-version requirement, use `vllm-ascend:v0.17.0rc1` (or a later version) for `Qwen3.5-27B`, and `vllm-ascend:v0.18.0rc1` (or a later version) for `Qwen3.6-27B`. For `Qwen3.6-27B` on Atlas 800I A3, please use the matching `v0.18.0rc1-a3` (or a later `-a3`) image. For Atlas 300I Duo, use `vllm-ascend:v0.23.0rc1-310p` (or a later `-310p`) image.
@@ -59,34 +61,11 @@ It is **recommended to use the latest release candidate (rc) version or the late
     ```bash
     export IMAGE=quay.io/ascend/vllm-ascend:{{ vllm_ascend_version }}-a3
     docker run --rm \
+        -e ASCEND_VISIBLE_DEVICES=0-15 \
         --name vllm-ascend \
         --shm-size=1g \
         --net=host \
-        --device /dev/davinci0 \
-        --device /dev/davinci1 \
-        --device /dev/davinci2 \
-        --device /dev/davinci3 \
-        --device /dev/davinci4 \
-        --device /dev/davinci5 \
-        --device /dev/davinci6 \
-        --device /dev/davinci7 \
-        --device /dev/davinci8 \
-        --device /dev/davinci9 \
-        --device /dev/davinci10 \
-        --device /dev/davinci11 \
-        --device /dev/davinci12 \
-        --device /dev/davinci13 \
-        --device /dev/davinci14 \
-        --device /dev/davinci15 \
-        --device /dev/davinci_manager \
-        --device /dev/devmm_svm \
-        --device /dev/hisi_hdc \
-        -v /usr/local/dcmi:/usr/local/dcmi \
         -v /usr/local/Ascend/driver/tools/hccn_tool:/usr/local/Ascend/driver/tools/hccn_tool \
-        -v /usr/local/bin/npu-smi:/usr/local/bin/npu-smi \
-        -v /usr/local/Ascend/driver/lib64/:/usr/local/Ascend/driver/lib64/ \
-        -v /usr/local/Ascend/driver/version.info:/usr/local/Ascend/driver/version.info \
-        -v /etc/ascend_install.info:/etc/ascend_install.info \
         -v /root/.cache:/root/.cache \
         -it $IMAGE bash
     ```
@@ -98,26 +77,11 @@ It is **recommended to use the latest release candidate (rc) version or the late
     ```bash
     export IMAGE=quay.io/ascend/vllm-ascend:{{ vllm_ascend_version }}
     docker run --rm \
+        -e ASCEND_VISIBLE_DEVICES=0-7 \
         --name vllm-ascend \
         --shm-size=1g \
         --net=host \
-        --device /dev/davinci0 \
-        --device /dev/davinci1 \
-        --device /dev/davinci2 \
-        --device /dev/davinci3 \
-        --device /dev/davinci4 \
-        --device /dev/davinci5 \
-        --device /dev/davinci6 \
-        --device /dev/davinci7 \
-        --device /dev/davinci_manager \
-        --device /dev/devmm_svm \
-        --device /dev/hisi_hdc \
-        -v /usr/local/dcmi:/usr/local/dcmi \
         -v /usr/local/Ascend/driver/tools/hccn_tool:/usr/local/Ascend/driver/tools/hccn_tool \
-        -v /usr/local/bin/npu-smi:/usr/local/bin/npu-smi \
-        -v /usr/local/Ascend/driver/lib64/:/usr/local/Ascend/driver/lib64/ \
-        -v /usr/local/Ascend/driver/version.info:/usr/local/Ascend/driver/version.info \
-        -v /etc/ascend_install.info:/etc/ascend_install.info \
         -v /root/.cache:/root/.cache \
         -it $IMAGE bash
     ```
@@ -129,24 +93,9 @@ It is **recommended to use the latest release candidate (rc) version or the late
     ```bash
     export IMAGE=quay.io/ascend/vllm-ascend:{{ vllm_ascend_version }}-310p
     docker run --rm \
+        -e ASCEND_VISIBLE_DEVICES=0-7 \
         --name vllm-ascend \
         --shm-size=1g \
-        --device /dev/davinci0 \
-        --device /dev/davinci1 \
-        --device /dev/davinci2 \
-        --device /dev/davinci3 \
-        --device /dev/davinci4 \
-        --device /dev/davinci5 \
-        --device /dev/davinci6 \
-        --device /dev/davinci7 \
-        --device /dev/davinci_manager \
-        --device /dev/devmm_svm \
-        --device /dev/hisi_hdc \
-        -v /usr/local/dcmi:/usr/local/dcmi \
-        -v /usr/local/bin/npu-smi:/usr/local/bin/npu-smi \
-        -v /usr/local/Ascend/driver/lib64/:/usr/local/Ascend/driver/lib64/ \
-        -v /usr/local/Ascend/driver/version.info:/usr/local/Ascend/driver/version.info \
-        -v /etc/ascend_install.info:/etc/ascend_install.info \
         -v /root/.cache:/root/.cache \
         -p 8000:8000 \
         -it $IMAGE bash
@@ -161,29 +110,15 @@ It is **recommended to use the latest release candidate (rc) version or the late
     export NAME=vllm-ascend
 
     docker run --rm \
+        -e ASCEND_VISIBLE_DEVICES=0-7 \
         --name $NAME \
         --net=host \
         --shm-size=1g \
-        --device /dev/davinci0 \
-        --device /dev/davinci1 \
-        --device /dev/davinci2 \
-        --device /dev/davinci3 \
-        --device /dev/davinci4 \
-        --device /dev/davinci5 \
-        --device /dev/davinci6 \
-        --device /dev/davinci7 \
-        --device /dev/davinci_manager \
-        --device /dev/hisi_hdc \
-        --device /dev/ummu \
-        --device /dev/uburma \
         -v /usr/local/Ascend/driver:/usr/local/Ascend/driver \
-        -v /etc/ascend_install.info:/etc/ascend_install.info \
         -v /etc/hccl_rootinfo.json:/etc/hccl_rootinfo.json \
         -v /etc/hixlep/:/etc/hixlep/ \
         -v /root/.cache:/root/.cache \
         -v /usr/local/sbin:/usr/local/sbin \
-        -v /usr/local/dcmi:/usr/local/dcmi \
-        -v /usr/local/bin/npu-smi:/usr/local/bin/npu-smi \
         -v /usr/local/sbin/npu-smi:/usr/local/sbin/npu-smi \
         -v /usr/lib64:/usr/lib64 \
         -it $IMAGE bash
@@ -367,6 +302,7 @@ Both `Qwen3.5-27B` and `Qwen3.6-27B` share the same MTP head design, so the `qwe
             --host 0.0.0.0 \
             --port 8000 \
             --tensor-parallel-size 4 \
+            --quantization ascend \
             --served-model-name qwen3.5 \
             --max-num-seqs 128 \
             --max-model-len 16384 \
@@ -396,6 +332,7 @@ Both `Qwen3.5-27B` and `Qwen3.6-27B` share the same MTP head design, so the `qwe
             --host 0.0.0.0 \
             --port 8000 \
             --tensor-parallel-size 4 \
+            --quantization ascend \
             --served-model-name qwen3.6 \
             --max-num-seqs 128 \
             --max-model-len 16384 \
@@ -481,7 +418,7 @@ Both `Qwen3.5-27B` and `Qwen3.6-27B` share the same MTP head design, so the `qwe
     - Prefix caching is enabled by default, and the example above uses the default. Add `--no-enable-prefix-caching` to disable it if needed. For workloads with long shared prefixes, finer-grained hybrid prefix matching can be enabled with `--enable-prefix-caching --prefix-match-unit 16`. The match unit must divide every KV cache group's block size. A smaller unit can reuse more of a partial physical page, at the cost of additional hash metadata, copy-on-write operations, and an extra prefill split at the final matching boundary.
     - `--quantization ascend` indicates that quantization is used. To disable quantization, remove this option.
     - `--kv-cache-dtype mxfp8` enables the C8 (MXFP8 KV cache) and is required by the `Qwen3.6-27B-w8a8c8-mxfp8` weights. It stores the KV cache of the full-attention layers as FP8 (E4M3) with E8M0 scales, and runs the full-attention layers on the dedicated QFA (quant flash attention) kernel. The W8A8C8 weights bring performance gains in long-sequence scenarios. With this option, `--block-size` must be a multiple of `512` (it defaults to `512` if unset).
-    - For short-sequence scenarios (e.g., 16K input length), the W8A8 weights (e.g., `Qwen3.6-27B-w8a8-mxfp8`) are recommended instead. When serving a W8A8 weight, remove `--kv-cache-dtype mxfp8` from the startup command. Note that C8 quantization is only supported on 950PR&950DT Products.
+    - For short-sequence scenarios (e.g., 16k input length), the W8A8 weights (e.g., `Qwen3.6-27B-w8a8-mxfp8`) are recommended instead. When serving a W8A8 weight, remove `--kv-cache-dtype mxfp8` from the startup command. Note that C8 quantization is only supported on 950PR&950DT Products.
     - `--speculative-config` uses `qwen3_5_mtp` for `Qwen3.6-27B` because it shares the same MTP head design as `Qwen3.5-27B`.
     - `--compilation-config` contains configurations related to the aclgraph graph mode. The most significant configurations are `"cudagraph_mode"` and `"cudagraph_capture_sizes"`, which have the following meanings:
         - `"cudagraph_mode"`: represents the specific graph mode. Currently, `"PIECEWISE"` and `"FULL_DECODE_ONLY"` are supported. The graph mode is mainly used to reduce the cost of operator dispatch. Currently, `"FULL_DECODE_ONLY"` is recommended.
@@ -621,7 +558,7 @@ Refer to [vLLM Benchmark](https://docs.vllm.ai/en/latest/benchmarking/) for more
 >
 > **Atlas 300I Duo**: Currently only the TP scenario is supported. Choose **TP=2** or **TP=4** according to the available devices. With **TP=4**, `--max-model-len` can support **128k** and **256k** long-sequence scenarios.
 >
-> **950DT Products**: The `Qwen3.6-27B-w8a8c8-mxfp8` model weight easily fits in a single NPU (96 GB HBM per NPU). Following the **DP-first** principle, **TP=1 is the recommended default** for most scenarios, and the remaining NPUs should be allocated to DP for parallel request batches. The C8 weights are recommended for long-sequence scenarios and are served with `--kv-cache-dtype mxfp8`; for short-sequence scenarios (e.g., 16K input), use `Qwen3.6-27B-w8a8-mxfp8` without `--kv-cache-dtype mxfp8`. `--max-model-len` can support up to **262144** in the same TP=1 + DP=8 layout.
+> **950DT Products**: The `Qwen3.6-27B-w8a8c8-mxfp8` model weight easily fits in a single NPU (96 GB HBM per NPU). Following the **DP-first** principle, **TP=1 is the recommended default** for most scenarios, and the remaining NPUs should be allocated to DP for parallel request batches. The C8 weights are recommended for long-sequence scenarios and are served with `--kv-cache-dtype mxfp8`; for short-sequence scenarios (e.g., 16k input), use `Qwen3.6-27B-w8a8-mxfp8` without `--kv-cache-dtype mxfp8`. `--max-model-len` can support up to **262144** in the same TP=1 + DP=8 layout.
 
 #### Table 1: Scenario Overview
 
@@ -640,11 +577,11 @@ Refer to [vLLM Benchmark](https://docs.vllm.ai/en/latest/benchmarking/) for more
 
 | Scenario | Configuration | NPUs | TP | DP | Max Num Seqs | Max Num Batched Tokens | Max Model Len | MTP Speculation Num | Async Scheduling |
 |----------|---------------|-------|----|----|----|-------------|--------------------|---------------------|------------------|
-| High Throughput (128k) | Single-Node (A2) | 8 | 2 | 4 | 32 | 16384 | 133000 | 3 | On |
-| High Throughput (128k) | Single-Node (A3) | 16 | 2 | 8 | 32 | 16384 | 133000 | 3 | On |
-| Low Latency (128k) | Single-Node (A3) | 16 | 2 | 8 | 4 | 4096 | 133000 | 3 | On |
+| High Throughput (128k) | Single-Node (A2) | 8 | 2 | 4 | 32 | 16384 | 133120 | 3 | On |
+| High Throughput (128k) | Single-Node (A3) | 16 | 2 | 8 | 32 | 16384 | 133120 | 3 | On |
+| Low Latency (128k) | Single-Node (A3) | 16 | 2 | 8 | 4 | 4096 | 133120 | 3 | On |
 | Long Context (256k+) | Single-Node (A3) | 16 | 8 | 2 | 8 | 8192 | 262144 | 3 | On |
-| High Throughput (128k) | Single-Node (950DT Products) | 8 | 1 | 8 | 32 | 16384 | 133000 | 3 | On |
+| High Throughput (128k) | Single-Node (950DT Products) | 8 | 1 | 8 | 32 | 16384 | 133120 | 3 | On |
 | Long Context (256k+) | Single-Node (950DT Products) | 8 | 1 | 8 | 32 | 16384 | 262144 | 3 | On |
 
 > For complete startup commands and parameter descriptions, please refer to the deployment examples in [Section 5](#5-online-service-deployment).

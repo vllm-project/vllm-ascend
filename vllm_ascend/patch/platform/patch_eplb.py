@@ -425,9 +425,7 @@ def _patch_initial_expert_layout() -> None:
     if not getattr(original_get, _PATCH_MARKER, False):
         routed_experts.get_expert_mapping = _with_expert_mapping_ep_size(
             original_get,
-            lambda self, *_args, **_kwargs: (
-                self.moe_config.ep_size if getattr(self, "_use_v2_model_runner", False) else 1
-            ),
+            lambda self, *_args, **_kwargs: self.moe_config.ep_size,
         )
 
     original_make = routed_experts.make_expert_params_mapping
@@ -439,11 +437,7 @@ def _patch_initial_expert_layout() -> None:
             if not bound.arguments.get("num_redundant_experts", 0):
                 return 1
             model = bound.arguments["model"]
-            ep_sizes = {
-                module.moe_config.ep_size
-                for module in model.modules()
-                if isinstance(module, routed_experts) and getattr(module, "_use_v2_model_runner", False)
-            }
+            ep_sizes = {module.moe_config.ep_size for module in model.modules() if isinstance(module, routed_experts)}
             if len(ep_sizes) > 1:
                 raise RuntimeError("MRV2 redundant expert loading requires one EP size")
             return ep_sizes.pop() if ep_sizes else 1
@@ -857,6 +851,13 @@ def _wrap_move_to_workspace(original_move):
                 result = original_move(*bound.args, **bound.kwargs)
             if layer_idx is not None:
                 refresh_model_routing_tables(model_state, layer_idx)
+                export_map = getattr(model_state, "_placement_export_map", None)
+                committed_layer_map = getattr(pending_result, "new_physical_to_logical_map", None)
+                if export_map is not None and committed_layer_map is not None:
+                    export_map[layer_idx].copy_(committed_layer_map)
+                    on_committed = getattr(model_state, "_on_placement_layer_committed", None)
+                    if on_committed is not None:
+                        on_committed()
                 if full_target is not None and hasattr(full_target, "predicted_mean_ratios"):
                     predicted_ratio = full_target.predicted_mean_ratios[layer_idx]
                     if np.isfinite(predicted_ratio):

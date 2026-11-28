@@ -41,23 +41,23 @@ The following table lists additional configuration options available in vLLM Asc
 | `kv_trace`                  | dict | `{}`    | Per-engine KV cache address diagnostics for Model Runner V2. `enabled` defaults to `false`; `action` accepts `"log"` (default) or `"raise"`. See [KV Trace](../feature_guide/kv_trace.md). |
 | `ascend_compilation_config`         | dict | `{}`    | Configuration options for Ascend compilation                                                              |
 | `ascend_warmup_config`              | dict | `{}`    | Configuration options for startup warmup that overlaps weight loading                                     |
-| `eplb_config`                       | dict | `{}`    | Runner-specific EPLB extensions. See [Expert Parallelism Load Balancer](../feature_guide/expert_parallelism_load_balancer.md). |
+| `eplb_config`                       | dict | `{}`    | Ascend extensions for upstream EPLB. See [Expert Parallelism Load Balancer](../feature_guide/expert_parallelism_load_balancer.md). |
 | `scheduler_config`                  | dict | `{}`    | Configuration options for Ascend scheduler extensions, including balance scheduling, recompute scheduling, DyntraLB, ShortRequestFirst, and dynamic chunked pipeline parallel. |
-| `refresh`                           | bool | `false` | Whether to refresh global Ascend configuration content. This is usually used by rlhf or UT/E2E test case. |
+| `refresh`                           | bool | `False` | Whether to refresh global Ascend configuration content. This is usually used by rlhf or UT/E2E test case. |
 | `runtime_config_path`               | str  | `None`  | Path to Runtime Guard JSON config. Default: `<cwd>/runtime/config/runtime_config.json`. See [Runtime Guard](../feature_guide/runtime_guard.md). |
-| `runtime_config_hot_reload`         | bool | `false` | Enable hot-reload of `runtime_config.json` (startup-only; not a JSON field). |
+| `runtime_config_hot_reload`         | bool | `False` | Enable hot-reload of `runtime_config.json` (startup-only; not a JSON field). |
 | `runtime_config`                    | dict | `None`  | Startup overlay merged into runtime config defaults (detectors, dump quota, report flags). |
 | `runtime_report_dir`                | str  | `None`  | Override report root directory. Default: `<cwd>/runtime/report`. |
 | `runtime_dump_dir`                 | str  | `None`  | Seed KV dump root (`dump.dump_dir`). Default derived from report root. |
 | `dump_config`                       | dict | `None`  | Inline msprobe dump configuration. vLLM Ascend will materialize it to a temporary JSON file and pass that file to the debugger. |
 | `dump_config_path`                  | str  | `None`  | Configuration file path for msprobe dump (compatible legacy option).                                      |
 | `enable_shared_expert_dp`           | bool | `False` | Replicate shared-expert weights across TP ranks and run the shared expert with data parallelism. This option is independent of upstream MoE sequence parallelism; either feature or both can be enabled. It improves performance but consumes more memory. |
-| `enable_force_eplb`                 | bool | `False` | Force a deterministic round-robin expert routing to measure the EPLB performance ceiling. **Analysis and profiling only — never enable in production.** It replaces the real MoE router output, so model results and accuracy are invalid. Cannot be combined with `eplb_config.dynamic_eplb`. |
+| `enable_force_eplb`                 | bool | `False` | Force a deterministic round-robin expert routing to measure the EPLB performance ceiling. **Analysis and profiling only — never enable in production.** It replaces the real MoE router output, so model results and accuracy are invalid. |
 | `multistream_overlap_shared_expert` | bool | `False` | Whether to enable multi-stream shared expert. This option only takes effect on MoE models with shared experts. |
 | `enable_cpu_binding`                | bool | `True`  | Enables Ascend-native CPU binding on ARM servers. Set to `False` to disable. See [CPU Binding](../feature_guide/cpu_binding.md). |
 | `pa_shape_list`                     | list | `[]`    | The custom shape list of page attention ops.                                                              |
 | `enable_kv_nz`                      | bool | `False` | Whether to enable KV cache NZ layout. This option only takes effect on models using MLA (e.g., DeepSeek).                                      |
-| `kv_pool_range_debug`               | bool | `false` | Emit JSON audit logs for KV pool whole-key operations, per-layer ranges, and commits. Use instead of the legacy `VLLM_ASCEND_KVPOOL_RANGE_DEBUG` environment variable; keep disabled during normal operation to avoid per-layer logging overhead. |
+| `kv_pool_range_debug`               | bool | `False` | Emit JSON audit logs for KV pool whole-key operations, per-layer ranges, and commits. Use instead of the legacy `VLLM_ASCEND_KVPOOL_RANGE_DEBUG` environment variable; keep disabled during normal operation to avoid per-layer logging overhead. |
 | `mc2_comm_alg`                      | str  | `""`    | set dispatch/combine op's `comm_alg` param, only supports `""/"fullmesh"/"hierarchy"/"fullmesh_v2"`. `"hierarchy"` is only supported by A2/A3, and `"fullmesh_v2"` is only supported by A3 now. |
 | `enable_mc2_hierarchy_comm`         | bool | `False` | Enable dispatch/combine op inter-node communication by RoCE. This param will be deprecated and be replaced by mc2_comm_alg = "hierarchy" |
 | `enable_prefill_mc2`                | bool | `False` | Whether to reserve mc2_token_capacity for prefill batches. When enabled, `max_num_batched_tokens` is used to calculate the mc2_token_capacity instead of the decode-only capacity. In this scenario, the recommended maximum value of `max_num_batched_tokens` is `tp_size * 512`. This is a temporary switch; once MC2 operators are complete for all scenarios, this switch will be removed and MC2 will be enabled by default. |
@@ -71,10 +71,10 @@ The following table lists additional configuration options available in vLLM Asc
 | `enable_flashcomm1`                 | bool | `False` | Whether to enable SP MoE. See [Sequence Parallelism](../feature_guide/sequence_parallelism.md). |
 | `enable_pcp_o_proj_weight_sharding` | bool | `True` | Whether PCP shards O-projection weights across the PCP group. This option controls SFA-PCP `o_proj` and DSA-PCP two-stage O-projection (`wo_a`/`wo_b`). If the weight method or PCP partition does not support sharding, the option is disabled with a warning. Set it to `false` at server startup to disable sharding. Other attention backends do not use this option. |
 | `enable_pcp_embedding_lmhead_weight_sharding` | bool | `True` | Whether PCP shards embedding and LM Head weights across PCP ranks inside each TP shard. This option is enabled by default, takes effect when PCP size is greater than 1, and is incompatible with batch-sharded sampling (`enable_batch_sharded_sampling`) and fine-grained TP for these modules. |
-| `rejection_sampler_config`          | dict | `{}`    | Configuration options for rejection sampler (block verify and entropy verify). |
-| `multistream_dsv4_dsa_overlap`      | bool | `True`  | Whether to enable dsa multi-stream overlap for DeepSeek V4.  |
+| `rejection_sampler_config`          | dict | `{}`    | Configures entropy verification for speculative decoding. |
+| `multistream_dsv4_dsa_overlap`      | bool | `True`  | Whether to enable DSA multi-stream overlap for DeepSeek V4. For PCP batches with global prefill, this option controls overlap of local Q projection with global cache preparation on nonempty query shards. Set it to `false` to run these operations serially.  |
 | `rl_config`                        | dict | `{}`    | One-click RL mode configuration. See <a href="#rl_config">rl_config</a> for all fields, the two deployment modes, usage examples, and the migration guide. |
-| `combine_quant_mode`                | int  | `0`     | Fused MC2 configuration. This configuration will be passed as the `comm_quant_mode` argument for the `torch_npu.npu_moe_distribute_combine_v2` operator. Please refer to the operator documentation for the valid value range. |
+| `combine_quant_mode`                | int  | `0`     | Controls communication quantization for the MC2 combine operation. The default (`0`) lets the runtime select the mode. Set `2`, `3`, or `4` to override the `comm_quant_mode` argument to `torch_npu.npu_moe_distribute_combine_v2`. |
 
 The details of each configuration option are as follows:
 
@@ -85,7 +85,7 @@ Runtime Guard provides online anomaly detection, structured incident reports, an
 | Name | Type | Default | Description |
 | ---- | ---- | ------- | ----------- |
 | `runtime_config_path` | str | `None` | Path to `runtime_config.json`. When omitted, vLLM Ascend uses `<cwd>/runtime/config/runtime_config.json` (created with defaults on first start). |
-| `runtime_config_hot_reload` | bool | `false` | Enable hot-reload (startup-only; not a JSON field). `false` = static config after startup. |
+| `runtime_config_hot_reload` | bool | `False` | Enable hot-reload (startup-only; not a JSON field). `false` = static config after startup. |
 | `runtime_config` | dict | `None` | Startup overlay: `defaults ← runtime_config`. Bootstrap overwrites the JSON file with this effective config. Hot-reload re-reads the JSON file only. |
 | `runtime_report_dir` | str | `None` | Report and KV dump root. Default `<cwd>/runtime/report`. |
 | `runtime_dump_dir` | str | `None` | Seed `dump.dump_dir` at startup; JSON hot-reload of `dump.dump_dir` wins afterwards. |
@@ -122,7 +122,9 @@ Design / ops (analysis branch): `docs/source/developer_guide/Design_Documents/ru
 | `mlp_tensor_parallel_size`       | int  | `1` | The custom tensor parallel size of `mlp`.       |
 | `lmhead_tensor_parallel_size`    | int  | `1` | The custom tensor parallel size of `lm_head`.    |
 | `embedding_tensor_parallel_size` | int  | `1` | The custom tensor parallel size of `embedding`. |
+| `shared_expert_tensor_parallel_size` | int | `1` | Independent shared-expert TP along DP. Requires graph-dispatched PD decode with global TP=PCP=DCP=PP=1. See [shared-expert TP](../feature_guide/Fine_grained_TP.md#shared-expert-fine-grained-tp). |
 | `qkv_iproj_tensor_parallel_size`  | int  | `1` | The custom tensor parallel size of QKV input projections. See [QKV IProj preconditions](../feature_guide/Fine_grained_TP.md#preconditions-for-qkv-iproj-tp). |
+| `gproj_tensor_parallel_size` | int | `1` | Independent Kimi full-rank output-gate projection TP. Requires the Kimi graph-decode conditions in [QKV IProj preconditions](../feature_guide/Fine_grained_TP.md#preconditions-for-qkv-iproj-tp). |
 
 **ascend_compilation_config**
 
@@ -146,8 +148,8 @@ Both warmups run on a background thread during weight loading. The worker waits 
 
 **eplb_config**
 
-Accepts `load_collection_phase` and `stair_config`. Configure upstream EPLB
-through `--enable-eplb` and `--eplb-config`. Ascend uses the STAIR policy by
+Accepts `load_collection_phase`, `expert_placement_path`, and `stair_config`.
+Configure upstream EPLB through `--enable-eplb` and `--eplb-config`. Ascend uses the STAIR policy by
 default and moves expert weights asynchronously over HIXL when it is available
 on every EPLB rank, falling back to Gloo CPU staging otherwise. Select
 `default` or `stair` only through the upstream `--eplb-config.policy` option.
@@ -155,24 +157,33 @@ See the
 [EPLB tuning suggestions table](../feature_guide/expert_parallelism_load_balancer.md#tuning-suggestions)
 for the advanced STAIR fields and their defaults.
 
-The legacy `dynamic_eplb`, `expert_map_path`, `expert_heat_collection_interval`,
-`algorithm_execution_interval`, `expert_map_record_path`,
-`num_redundant_experts`, `eplb_policy_type`, and `eplb_heat_collection_stage`
-fields configured the Model Runner V1 EPLB implementation, which has been
-removed. They no longer take effect.
-
 | Name | Type | Default | Description |
 | ---- | ---- | ------- | ----------- |
 | `load_collection_phase` | str | `"all"` | Select `"all"`, `"prefill"`, or `"decode"` load submission. Only effective with the STAIR policy; a value other than `"all"` requires `--enable-eplb`. Any batch containing a prefill request is classified entirely as prefill. |
+| `expert_placement_path` | str | `None` | JSON file path on global rank 0's host where committed expert placements are atomically exported whenever a rearranged layout achieves a new lowest observed whole-model peak-to-mean rank-load ratio before the next rearrangement. Requires `--enable-eplb`, elastic EP disabled, and one EP group per PP stage covering all worker ranks. |
 | `stair_config` | dict | `{}` | Advanced STAIR policy tuning. See the [EPLB tuning suggestions table](../feature_guide/expert_parallelism_load_balancer.md#tuning-suggestions) for all fields, defaults, and ranges. |
 
-**scheduler_config**
+<span id="scheduler_config"></span>**scheduler_config**
 
 The legacy top-level `enable_balance_scheduling`, `recompute_scheduler_enable`, `short_request_first_config` keys remain supported during the migration period, but are deprecated. If both formats provide the same field, the value in `scheduler_config` takes precedence.
 
+!!! warning "Balance scheduling deprecated in v0.33.0"
+
+    Balance scheduling is deprecated as of v0.33.0 and is planned for removal in a future release. Enabling it through either configuration format still activates the feature and emits a startup warning. Moving an enabled value from the legacy key to `scheduler_config` does not remove the feature deprecation. See [RFC #23229](https://github.com/vllm-project/vllm-ascend/issues/23229).
+
+To migrate, merge the following setting into your existing `--additional-config`
+object and remove the legacy top-level `enable_balance_scheduling` key:
+
+```json
+{"scheduler_config": {"enable_balance_scheduling": false}}
+```
+
+This uses the normal scheduler path without the global admission gate. You can
+also remove both forms of the option, since the default is `false`.
+
 | Name | Type | Default | Description |
 | ---- | ---- | ------- | ----------- |
-| `enable_balance_scheduling` | bool | `False` | Whether to enable balance scheduling. The legacy `VLLM_ASCEND_BALANCE_SCHEDULING` environment variable is no longer supported. |
+| `enable_balance_scheduling` | bool | `False` | **Deprecated as of v0.33.0**; planned for removal in a future release. Enabling balance scheduling emits a startup warning; keep `false` to use the normal scheduler path. See [RFC #23229](https://github.com/vllm-project/vllm-ascend/issues/23229). The legacy `VLLM_ASCEND_BALANCE_SCHEDULING` environment variable is no longer supported. |
 | `recompute_scheduler_enable` | bool | `False` | Whether to enable the recompute scheduler. **Only valid on PD-disaggregated D nodes** (`kv_role` is `kv_consumer`). **Do not enable on P nodes or in PD-mixed mode** (no `kv_transfer_config`, `kv_role` is `kv_producer`, or `kv_role` is `kv_both`); startup will fail with a clear error. |
 | `short_request_first_config` | dict | `{}` | Configuration options for ShortRequestFirst prefill scheduling on FCFS synchronous or asynchronous, PD-prefill (P), or PD-mixed nodes. |
 | `batch_job_sched_config` | dict | `{}` | Configuration options for the batch-job-aware scheduler. See [Batch-Job-Aware Scheduler](../feature_guide/batch_job_aware_scheduler.md) for details. |
@@ -202,7 +213,7 @@ Enable Entropy Verify with `enable_entropy_verify=true` and `speculative_config.
 
 > **Note**: Entropy verify improves speculative decoding performance (higher acceptance rate, lower latency) at the cost of reduced sampling precision. A larger `posterior_alpha` makes the adjustment more aggressive — it further lowers the acceptance threshold for high-entropy tokens, improving throughput but degrading output quality. Users should tune these parameters based on their specific model weights and application scenario to find the right trade-off between performance and precision.
 
-`enable_block_verify` is no longer accepted: passing `true` fails at startup. Use `enable_entropy_verify` instead.
+Setting the legacy `enable_block_verify` flag to `true` fails at startup. To use block verification, set `speculative_config.rejection_sample_method="block"` and leave entropy verification disabled.
 
 | Name | Type | Default | Description |
 | ---- | ---- | ------- | ----------- |
@@ -224,7 +235,7 @@ ShortRequestFirst is a waiting-queue policy for FCFS synchronous or asynchronous
 
 | Name | Type | Default | Description |
 | ---- | ---- | ------- | ----------- |
-| `enabled` | bool | `false` | Enable the batch-job-aware scheduler. |
+| `enabled` | bool | `False` | Enable the batch-job-aware scheduler. |
 | `max_jobs` | int | `20` | Maximum number of tracked jobs. `0` means unlimited. |
 | `reserve_margin_blocks` | int | `2` | Extra block margin added to the KV cache reserve as safety buffer. |
 | `reserve_max_blocks` | int | `8` | Maximum number of blocks that can be reserved. |
@@ -239,10 +250,10 @@ When RL mode is enabled, its fixed NZ setting takes precedence over the top-leve
 
 | Name | Type | Default | Description |
 | ---- | ---- | ------- | ----------- |
-| `enabled` | bool | `false` | Master switch for RL mode. When `true`, all RL best-practice defaults below are applied. |
-| `sleep_mode_extra_cleanup` | bool | `false` | Same-device mode. Enables HCCL process-group release + ACL graph workspace cleanup during sleep, returning more NPU memory to the trainer at the cost of increased wakeup latency. This option is available only under `rl_config`; the former top-level `enable_sleep_mode_extra_cleanup` key has been removed. |
-| `enable_training_consistency` | bool | `false` | Both modes. Enables the FA3 attention backend used for training-inference consistency. Requires the `flash_attn_npu_v3` package and does not implicitly enable batch invariance. |
-| `enable_batch_invariant` | bool | `false` | Both modes. Provides an additional way to enable batch-invariant deterministic computation: when `true`, sets `VLLM_BATCH_INVARIANT=1` before workers are started. Worker-side batch-invariant initialization then sets `HCCL_DETERMINISTIC=strict` and `LCCL_DETERMINISTIC=1`. When `false`, an existing `VLLM_BATCH_INVARIANT` environment setting is preserved. Requires building vllm-ascend from source with `COMPILE_CUSTOM_KERNELS=1`; RL mode already forces `weight_nz_mode=0`. |
+| `enabled` | bool | `False` | Master switch for RL mode. When `true`, all RL best-practice defaults below are applied. |
+| `sleep_mode_extra_cleanup` | bool | `False` | Same-device mode. Enables HCCL process-group release + ACL graph workspace cleanup during sleep, returning more NPU memory to the trainer at the cost of increased wakeup latency. This option is available only under `rl_config`; the former top-level `enable_sleep_mode_extra_cleanup` key has been removed. |
+| `enable_training_consistency` | bool | `False` | Both modes. Enables the FA3 attention backend used for training-inference consistency. Requires the `flash_attn_npu_v3` package and does not implicitly enable batch invariance. |
+| `enable_batch_invariant` | bool | `False` | Both modes. Provides an additional way to enable batch-invariant deterministic computation: when `true`, sets `VLLM_BATCH_INVARIANT=1` before workers are started. Worker-side batch-invariant initialization then sets `HCCL_DETERMINISTIC=strict` and `LCCL_DETERMINISTIC=1`. When `false`, an existing `VLLM_BATCH_INVARIANT` environment setting is preserved. Requires building vllm-ascend from source with `COMPILE_CUSTOM_KERNELS=1`; RL mode already forces `weight_nz_mode=0`. |
 
 **Deployment modes**
 

@@ -37,6 +37,7 @@ from vllm.v1.worker.gpu.model_states.interface import ModelSpecificAttnMetadata
 from vllm.v1.worker.utils import AttentionGroup
 
 from vllm_ascend.ascend_config import get_ascend_config
+from vllm_ascend.attention.utils import apply_prefill_as_decode_mask
 from vllm_ascend.distributed.kv_transfer.kv_p2p.sfa_pd_rd2h import get_prebound_copy_sfa_slots
 from vllm_ascend.distributed.kv_transfer.sparse_kv_offload.copy_sfa_topk_slots import CopySfaRequestStates
 from vllm_ascend.distributed.kv_transfer.sparse_kv_offload.request_identity import RequestIdentityRegistry
@@ -79,6 +80,11 @@ class AscendModelState(DefaultModelState):
     kvpp_runtime: "KVPPRuntime | None" = None
     kvpp_is_dummy_run: bool = False
     device_metadata: "TargetDeviceMetadata | None" = None
+    # Annotated locally because mypy (``--follow-imports skip``) may analyze
+    # earlier methods before prepare_attn() or skip upstream DefaultModelState.
+    attn_metadata: dict[str, Any]
+    block_tables: tuple[torch.Tensor, ...]
+    slot_mappings: torch.Tensor
 
     def runner_plan_launch_d2h(self, **kwargs) -> None:
         """Runner-assigned hook: plan and launch the delayed D2H batch."""
@@ -459,6 +465,14 @@ class AscendModelState(DefaultModelState):
             return prepare_engram_graph_inputs(num_tokens)
         return {}
 
+    def _check_finegrained_tp_idle_graph_step(self, cudagraph_mode: CUDAGraphMode) -> None:
+        if (
+            ring_state_update_skipped()
+            and cudagraph_mode == CUDAGraphMode.NONE
+            and get_ascend_config().finegrained_tp_config.requires_graph(self.vllm_config)
+        ):
+            raise RuntimeError("Fine-grained projection / MLP TP require every DP rank on a captured graph.")
+
     def prepare_attn(
         self,
         input_batch: AscendInputBatch,
@@ -472,6 +486,7 @@ class AscendModelState(DefaultModelState):
         model_specific_attn_metadata: ModelSpecificAttnMetadata | None = None,
     ) -> dict[str, Any]:
         """Override prepare_attn method because `build_attn_metadata` is different from vllm."""
+        self._check_finegrained_tp_idle_graph_step(cudagraph_mode)
         # vLLM #50945 adds this contract; Ascend still disables DBO.
         assert ubatch_idx == 0, "DBO is not supported on Ascend"
         # Legacy callers (and pre-D2H unit fixtures) build this state via
@@ -593,7 +608,9 @@ class AscendModelState(DefaultModelState):
                     stable_prefixes.np[:num_real_reqs] = manager.d2h_stable_prefixes_cpu[active_slots]
                 pool_generations.copy_to_gpu(num_reqs)
                 stable_prefixes.copy_to_gpu(num_reqs)
-        is_prefilling = torch.from_numpy(input_batch.is_prefilling_np)
+        is_prefilling = torch.from_numpy(
+            apply_prefill_as_decode_mask(input_batch.is_prefilling_np, input_batch.prefill_runs_as_decode_np)
+        )
         # Varlen graphs capture one-token dummy requests but may replay wider
         # verification rows. Preserve the descriptor's promised bound for C2
         # compressor launch grids and attention/indexer tiling.

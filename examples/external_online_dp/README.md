@@ -90,7 +90,6 @@ An example combining PCP and PP on a node with 8 NPUs:
 
 ```bash
 cd examples/external_online_dp
-export VLLM_USE_V2_MODEL_RUNNER=1
 python launch_online_dp.py \
     --dp-size 2 --tp-size 1 --pcp-size 2 --pp-size 2 \
     --dp-address x.x.x.x --vllm-start-port 9000

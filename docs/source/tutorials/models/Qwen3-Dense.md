@@ -58,6 +58,8 @@ These are the recommended numbers of cards, which can be adjusted according to t
 
 ### 4.1 Docker Image Installation
 
+{% include "getting_started/installation/ascend_docker_runtime.inc.md" %}
+
 You can use the official all-in-one Docker image for Qwen3 Dense models.
 
 **Docker Pull:**
@@ -78,42 +80,19 @@ Start the docker image on each node.
     export IMAGE=quay.io/ascend/vllm-ascend:{{ vllm_ascend_version }}-a3
 
     docker run --rm \
+        -e ASCEND_VISIBLE_DEVICES=0-15 \
         --name vllm-ascend-env \
         --shm-size=1g \
         --net=host \
-        --device /dev/davinci0 \
-        --device /dev/davinci1 \
-        --device /dev/davinci2 \
-        --device /dev/davinci3 \
-        --device /dev/davinci4 \
-        --device /dev/davinci5 \
-        --device /dev/davinci6 \
-        --device /dev/davinci7 \
-        --device /dev/davinci8 \
-        --device /dev/davinci9 \
-        --device /dev/davinci10 \
-        --device /dev/davinci11 \
-        --device /dev/davinci12 \
-        --device /dev/davinci13 \
-        --device /dev/davinci14 \
-        --device /dev/davinci15 \
-        --device /dev/davinci_manager \
-        --device /dev/devmm_svm \
-        --device /dev/hisi_hdc \
-        -v /usr/local/dcmi:/usr/local/dcmi \
         -v /usr/local/Ascend/driver/tools/hccn_tool:/usr/local/Ascend/driver/tools/hccn_tool \
-        -v /usr/local/bin/npu-smi:/usr/local/bin/npu-smi \
-        -v /usr/local/Ascend/driver/lib64/:/usr/local/Ascend/driver/lib64/ \
-        -v /usr/local/Ascend/driver/version.info:/usr/local/Ascend/driver/version.info \
-        -v /etc/ascend_install.info:/etc/ascend_install.info \
         -v /root/.cache:/root/.cache \
         -it $IMAGE bash
     ```
 
     !!! note
 
-        Atlas A3 inference products have 8 NPUs with dual-die design (16 chips total: `/dev/davinci[0-15]`).
-        If you are on a shared machine, map only the chips you need (e.g., `/dev/davinci[0-7]` for NPU 0-3).
+        Atlas A3 inference products have 8 NPUs with a dual-die design, so `ASCEND_VISIBLE_DEVICES=0-15` selects all 16 DIE devices.
+        If you are on a shared machine, select only the devices you need, for example `ASCEND_VISIBLE_DEVICES=0-7` for NPU 0-3.
 
 === "Atlas A2 inference products"
 
@@ -122,26 +101,11 @@ Start the docker image on each node.
     export IMAGE=quay.io/ascend/vllm-ascend:{{ vllm_ascend_version }}
 
     docker run --rm \
+        -e ASCEND_VISIBLE_DEVICES=0-7 \
         --name vllm-ascend-env \
         --shm-size=1g \
         --net=host \
-        --device /dev/davinci0 \
-        --device /dev/davinci1 \
-        --device /dev/davinci2 \
-        --device /dev/davinci3 \
-        --device /dev/davinci4 \
-        --device /dev/davinci5 \
-        --device /dev/davinci6 \
-        --device /dev/davinci7 \
-        --device /dev/davinci_manager \
-        --device /dev/devmm_svm \
-        --device /dev/hisi_hdc \
-        -v /usr/local/dcmi:/usr/local/dcmi \
         -v /usr/local/Ascend/driver/tools/hccn_tool:/usr/local/Ascend/driver/tools/hccn_tool \
-        -v /usr/local/bin/npu-smi:/usr/local/bin/npu-smi \
-        -v /usr/local/Ascend/driver/lib64/:/usr/local/Ascend/driver/lib64/ \
-        -v /usr/local/Ascend/driver/version.info:/usr/local/Ascend/driver/version.info \
-        -v /etc/ascend_install.info:/etc/ascend_install.info \
         -v /root/.cache:/root/.cache \
         -it $IMAGE bash
     ```
@@ -154,24 +118,9 @@ Start the docker image on each node.
     export IMAGE=quay.io/ascend/vllm-ascend:{{ vllm_ascend_version }}-310p
 
     docker run --rm \
-    --name vllm-ascend \
+    -e ASCEND_VISIBLE_DEVICES=0-7 \
+    --name vllm-ascend-env \
     --shm-size=10g \
-    --device /dev/davinci0 \
-    --device /dev/davinci1 \
-    --device /dev/davinci2 \
-    --device /dev/davinci3 \
-    --device /dev/davinci4 \
-    --device /dev/davinci5 \
-    --device /dev/davinci6 \
-    --device /dev/davinci7 \
-    --device /dev/davinci_manager \
-    --device /dev/devmm_svm \
-    --device /dev/hisi_hdc \
-    -v /usr/local/dcmi:/usr/local/dcmi \
-    -v /usr/local/bin/npu-smi:/usr/local/bin/npu-smi \
-    -v /usr/local/Ascend/driver/lib64/:/usr/local/Ascend/driver/lib64/ \
-    -v /usr/local/Ascend/driver/version.info:/usr/local/Ascend/driver/version.info \
-    -v /etc/ascend_install.info:/etc/ascend_install.info \
     -v /root/.cache:/root/.cache \
     -p 8080:8080 \
     -it $IMAGE bash
@@ -183,8 +132,8 @@ Installation Verification:
 After starting the container, run the following command to verify the installation:
 
 ```bash
-# The A2/A3 tabs name the container vllm-ascend-env; the Atlas 300I Duo tab names it vllm-ascend.
-docker ps | grep vllm-ascend
+# The A2/A3 and Atlas 300I Duo tabs name the container vllm-ascend-env.
+docker ps | grep vllm-ascend-env
 ```
 
 Expected result: The container is listed with status Up. You can also verify the vllm-ascend version inside the container:
@@ -450,7 +399,7 @@ models = [
 ais_bench --models vllm_api_general_chat --datasets aime2025_gen_0_shot_chat_prompt --debug
 ```
 
-> The --models parameter value corresponds to the abbr field in the configuration file above. Adjust max_out_len, batch_size, and dataset tasks based on your scenario.
+> The `--models` parameter value corresponds to the config file name (for example, `vllm_api_general_chat` for `vllm_api_general_chat.py`). Adjust `max_out_len`, `batch_size`, and dataset tasks based on your scenario.
 
 ## 8 Performance Evaluation
 
@@ -524,7 +473,7 @@ vllm bench serve \
     --served-model-name qwen3 \
     --port <port> \
     --dataset-name random \
-    --random-input 200 \
+    --random-input-len 200 \
     --num-prompts 200 \
     --request-rate 1 \
     --save-result \

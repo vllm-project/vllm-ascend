@@ -105,6 +105,13 @@ from vllm_ascend.distributed.kv_transfer.kv_p2p.sfa_pd_rd2h.protocol import (
     BATCH_KV_TRANSFER_PARAMS,
 )
 
+try:
+    # Imported as a package module (tests).
+    from examples.disaggregated_prefill_v1.sse_frame_parser import SSEFrameParser
+except ImportError:
+    # Run as a standalone script: the script's own directory is on sys.path.
+    from sse_frame_parser import SSEFrameParser
+
 logger = init_logger(__name__)
 
 # Add uvloop for faster event loop if available
@@ -218,6 +225,7 @@ class ProxyState:
             self.metaserver_params.pop(parent_request_id, None)
             self.metaserver_ready_events.pop(parent_request_id, None)
             self.metaserver_dispatch_tasks.pop(parent_request_id, None)
+            self.req_to_prefiller.pop(parent_request_id, None)
 
     def select_prefiller(self, token_count):  # Changed to synchronous
         # No lock needed - entire function is atomic
@@ -421,12 +429,12 @@ async def send_request_to_service(
                 result_future.set_result(response.json()["kv_transfer_params"])
             return
         except (httpx.RequestError, httpx.HTTPStatusError) as e:
-            logger.warning("Attempt %s failed for %s: %s", attempt, endpoint, e)
+            logger.warning("Attempt %s failed for %s (request_id=%s): %s", attempt, endpoint, request_id, e)
             last_exc = e
             if attempt < max_retries:
                 await asyncio.sleep(base_delay * (2 ** (attempt - 1)))
             else:
-                logger.error("All %s attempts failed for %s.", max_retries, endpoint)
+                logger.error("All %s attempts failed for %s (request_id=%s).", max_retries, endpoint, request_id)
                 raise last_exc
 
 
@@ -514,6 +522,10 @@ async def _handle_completions(api: str, request: Request):
         # Record request info for recompute
         stream_flag = bool(req_data.get("stream", False))
         chat_flag = "messages" in req_data
+        # A streaming frame may carry several tokens (--stream-interval > 1),
+        # while the non-streaming count comes from usage.completion_tokens, so
+        # the unit is spelled out in the log field name.
+        completion_count = "completion_frames" if stream_flag else "completion_tokens"
         if "prompt" in req_data:
             origin_prompt = req_data["prompt"]
         elif chat_flag:
@@ -531,10 +543,14 @@ async def _handle_completions(api: str, request: Request):
             retry_count = 0
             retry = True
             completion_tokens = 0
+            frame_parser = SSEFrameParser()
             # Only one await per chunk, minimal logic in loop
             try:
                 while retry:
                     retry = False
+                    # Each decoder attempt emits a self-contained stream, so the
+                    # frame buffer must be reset at every attempt boundary.
+                    frame_parser = SSEFrameParser()
                     async for chunk in stream_service_response_with_retry(
                         decoder.client,
                         api,
@@ -543,72 +559,99 @@ async def _handle_completions(api: str, request: Request):
                         max_retries=global_args.max_retries,
                         base_delay=global_args.retry_delay,
                     ):
-                        try:
-                            chunk_str = chunk.decode("utf-8").strip()
-                        except UnicodeDecodeError:
-                            logger.debug("Skipping chunk: %s", chunk)
-                            yield chunk
+                        # The decode backend speaks SSE, but the network does
+                        # not respect frame boundaries: one frame can arrive
+                        # split across two chunks, and two frames can be
+                        # coalesced into one chunk. Reassemble frames before
+                        # decoding them, so no frame is dropped.
+                        frames = frame_parser.feed(chunk)
+                        if not frames:
+                            # No complete frame yet; forward the raw bytes so
+                            # the client still sees them, and wait for the
+                            # rest of the frame.
+                            if chunk:
+                                yield chunk
                             continue
-                        if not chunk_str:
-                            continue
-                        if chunk_str.startswith("data: "):
-                            chunk_str = chunk_str[len("data: ") :]
-                        try:
-                            chunk_json = json.loads(chunk_str)
-                        except json.JSONDecodeError:
-                            # if chunk is [done], skip it.
-                            logger.debug("Skipping chunk: %s", chunk_str)
-                            yield chunk
-                            continue
-                        choices = chunk_json.get("choices", [])
-                        if not choices:
-                            yield chunk
-                            continue
+                        for frame in frames:
+                            chunk_json = frame.payload
+                            choices = chunk_json.get("choices", [])
+                            if not choices:
+                                yield chunk
+                                continue
 
-                        choice = choices[0]
-                        delta = choice.get("delta") or {}
-                        message = choice.get("message") or {}
-                        content = delta.get("content") or message.get("content") or choice.get("text") or ""
-                        generated_token += content
+                            choice = choices[0]
+                            delta = choice.get("delta") or {}
+                            message = choice.get("message") or {}
+                            content = delta.get("content") or message.get("content") or choice.get("text") or ""
+                            generated_token += content
 
-                        stop_reason = choice.get("stop_reason")
-                        usage = chunk_json.get("usage", {})
-                        completion_tokens = (
-                            (completion_tokens + 1)
-                            if stream_flag
-                            else (completion_tokens + usage.get("completion_tokens"))
-                        )
-                        if stop_reason == "recomputed":
-                            retry = True
-                            retry_count += 1
-                            if chat_flag:
-                                messages[0]["content"] = (
-                                    origin_prompt
-                                    + ([{"type": "text", "text": generated_token}] if generated_token else [])
-                                    if isinstance(origin_prompt, list)
-                                    else (origin_prompt or "") + generated_token
+                            stop_reason = choice.get("stop_reason")
+                            usage = chunk_json.get("usage", {})
+                            completion_tokens = (
+                                (completion_tokens + 1)
+                                if stream_flag
+                                else (completion_tokens + usage.get("completion_tokens"))
+                            )
+                            if stop_reason == "recomputed":
+                                retry = True
+                                retry_count += 1
+                                previous_max_tokens = req_data.get("max_tokens", origin_max_tokens)
+                                if chat_flag:
+                                    messages[0]["content"] = (
+                                        origin_prompt
+                                        + ([{"type": "text", "text": generated_token}] if generated_token else [])
+                                        if isinstance(origin_prompt, list)
+                                        else (origin_prompt or "") + generated_token
+                                    )
+                                else:
+                                    req_data["prompt"] = origin_prompt + generated_token
+                                req_data["max_tokens"] = origin_max_tokens - completion_tokens + retry_count
+                                # The parent request id, unlike the pull-mode proxy, is
+                                # stable across a layerwise recompute round, so the
+                                # prefiller named below is the one that just failed.
+                                logger.info(
+                                    "[PD-RECOMPUTE] request goes back to P: request_id=%s, prefiller=%s, "
+                                    "retry_count=%d, generated_chars=%d, %s=%d, max_tokens=%s->%s",
+                                    request_id,
+                                    proxy_state.req_to_prefiller.get(request_id, "-"),
+                                    retry_count,
+                                    len(generated_token),
+                                    completion_count,
+                                    completion_tokens,
+                                    previous_max_tokens,
+                                    req_data["max_tokens"],
                                 )
-                            else:
-                                req_data["prompt"] = origin_prompt + generated_token
-                            req_data["max_tokens"] = origin_max_tokens - completion_tokens + retry_count
+                                break
+                            if retry_count > 0 and not stream_flag:
+                                if chat_flag:
+                                    choice["message"]["content"] = generated_token
+                                else:
+                                    choice["text"] = generated_token
+                                chunk = json.dumps(chunk_json).encode("utf-8")
+                            yield chunk
+                        if retry:
                             break
-                        if retry_count > 0 and not stream_flag:
-                            if chat_flag:
-                                choice["message"]["content"] = generated_token
-                            else:
-                                choice["text"] = generated_token
-                            chunk = json.dumps(chunk_json).encode("utf-8")
-                        yield chunk
             except Exception as e:
                 logger.error(
                     "Error during streaming from decoder %s: %s the aborted request %s "
-                    "will be routing to the target prefiller when new request is ready to dispatch to it",
+                    "will be routing to the target prefiller when new request is ready to dispatch to it "
+                    "(retry_count=%d, %s=%d, recomputed=%s)",
                     decoder.url,
                     e,
                     request_id,
+                    retry_count,
+                    completion_count,
+                    completion_tokens,
+                    retry_count > 0,
                 )
             finally:
                 # After streaming done, release tokens
+                logger.debug(
+                    "Release decoder=%s request_id=%s retry_count=%d",
+                    decoder.url,
+                    request_id,
+                    retry_count,
+                )
                 proxy_state.release_decoder(decoder_idx, decoder_score)
                 await proxy_state.cleanup_request_batch(request_id)
 
@@ -682,6 +725,9 @@ async def dispatch_prefill_batch(
     prefiller_idx = proxy_state.select_prefiller(prefiller_score)
     try:
         prefiller = proxy_state.prefillers[prefiller_idx]
+        # Remember which prefiller serves this attempt, so the recompute log can
+        # name it when the decoder reports stop_reason="recomputed".
+        proxy_state.req_to_prefiller[parent_request_id] = f"{prefiller.host}:{prefiller.port}"
         req_data = copy.deepcopy(req_data)
         if len(expected_request_ids) == 1:
             req_data["kv_transfer_params"] = params_by_request_id[expected_request_ids[0]]

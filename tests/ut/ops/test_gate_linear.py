@@ -167,6 +167,51 @@ class TestAscendGateLinear(TestBase):
         finally:
             torch.set_default_dtype(default_dtype)
 
+    def test_unquantized_gate_flag(self):
+        """A gate with no quantized checkpoint entry stays unquantized."""
+        gate = AscendGateLinear(
+            input_size=16,
+            output_size=4,
+            bias=False,
+            out_dtype=torch.float32,
+            prefix="test.gate",
+        )
+        self.assertTrue(gate.is_unquantized)
+
+    def test_quantized_gate_keeps_activation_dtype(self):
+        """Tier 5 must not cast activations to a quantized weight dtype.
+
+        A quantized gate stores its weight packed (uint8 for MXFP4, int8 for
+        W8A8) and its quant method quantizes the activation itself. Casting
+        the activation to the packed dtype first made npu_dynamic_mx_quant
+        fail with aclnnDynamicMxQuantV3 error 161002 (EZ1009).
+        """
+        gate = AscendGateLinear(
+            input_size=16,
+            output_size=4,
+            bias=False,
+            out_dtype=torch.float32,
+            prefix="test.gate",
+        )
+        # A quantized gate resolves to a non-unquantized method at init; a
+        # real W4A8/W8A8 scheme needs a full vllm config, so emulate the
+        # resulting state directly. MXFP4 packs two FP4 values per byte.
+        gate.is_unquantized = False
+        gate.weight.data = torch.empty(4, 8, dtype=torch.uint8, device=gate.weight.device)
+        hidden_states = torch.randn(2, 16, dtype=torch.bfloat16, device=gate.weight.device)
+        seen = {}
+
+        def _fake_quant_apply(layer, x, bias=None):
+            seen["dtype"] = x.dtype
+            return torch.zeros(x.shape[0], layer.weight.shape[0], dtype=torch.bfloat16, device=x.device)
+
+        with patch.object(gate.quant_method, "apply", side_effect=_fake_quant_apply):
+            output, output_bias = gate(hidden_states)
+
+        self.assertEqual(seen["dtype"], torch.bfloat16)
+        self.assertEqual(output.dtype, torch.float32)
+        self.assertIsNone(output_bias)
+
     def test_forward_fallback_casts_output_to_out_dtype(self):
         """Tier 5: x is cast to the weight dtype and the output to out_dtype."""
         gate = AscendGateLinear(

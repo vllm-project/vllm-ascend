@@ -30,7 +30,9 @@
 | FengLin Zhao | [@lcfenglinwan](https://github.com/lcfenglinwan) | 2026/11 |
 | JianPing He | [@winson-00178005](https://github.com/winson-00178005) | 2026/11 |
 | XinYue Zhang | [@zhangxinyuehfad](https://github.com/zhangxinyuehfad) | 2026/11 |
-| ShyRa1n | [@ShyRa1n](https://github.com/ShyRa1n) | 2026/11 |
+| HongYu Shi | [@ShyRa1n](https://github.com/ShyRa1n) | 2026/11 |
+| FuWei Tian | [@freyfwt](https://github.com/freyfwt) | 2026/11 |
+| YanJia Zeng | [@Angazenn](https://github.com/Angazenn) | 2026/11 |
 
 ## Emeritus Committers
 
@@ -45,7 +47,7 @@
 
 Every release of vLLM Ascend would not have been possible without the following contributors:
 
-Updated on 2026-11-18:
+Updated on 2026/11/18:
 
 | Number | Contributor | Date | Commit ID |
 |:------:|:-----------:|:-----:|:---------:|

@@ -32,7 +32,11 @@ def test_indexer_views_split_scheduler_blocks_into_kernel_pages(
         kv_cache_groups=[KVCacheGroupSpec(layer_names=[name], kv_cache_spec=spec)],
     )
     group = SimpleNamespace(
-        kv_cache_spec=spec, kv_cache_group_id=0, layer_names=[name], backend=AscendMiniMaxM3IndexerBackend
+        kernel_block_size=None,
+        kv_cache_spec=spec,
+        kv_cache_group_id=0,
+        layer_names=[name],
+        backend=AscendMiniMaxM3IndexerBackend,
     )
     key = torch.arange(2 * scheduler_block_size * 128).to(torch.bfloat16)
     raw = [key.view(torch.uint8)]

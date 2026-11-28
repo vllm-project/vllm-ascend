@@ -31,22 +31,24 @@ def get_head_sharded_state_shape(vllm_config, upstream_get_shape):
 
 
 class HeadParallelColumnLinear(ColumnParallelLinear):
-    def __init__(self, input_size: int, output_size: int, **kwargs) -> None:
-        self.pcp_group = get_pcp_group()
-        self.tp_group = get_tp_group()
-        super().__init__(
-            input_size,
-            output_size,
-            tp_rank=get_head_parallel_rank(),
-            tp_size=self.tp_group.world_size * self.pcp_group.world_size,
-            **kwargs,
-        )
+    def __init__(self, input_size: int, output_size: int, *, tp_group=None, **kwargs) -> None:
+        if tp_group is None:
+            self.tp_group = get_tp_group()
+            self.pcp_group = get_pcp_group()
+            rank = get_head_parallel_rank()
+            size = self.tp_group.world_size * self.pcp_group.world_size
+        else:
+            self.tp_group = tp_group
+            self.pcp_group = None
+            rank = tp_group.rank_in_group
+            size = tp_group.world_size
+        super().__init__(input_size, output_size, tp_rank=rank, tp_size=size, **kwargs)
 
     def forward(self, input_):
         bias = self.bias if not self.skip_bias_add else None
         output = self.quant_method.apply(self, input_, bias)
         if self.gather_output:
-            if self.pcp_group.world_size > 1:
+            if self.pcp_group is not None and self.pcp_group.world_size > 1:
                 output = self.pcp_group.all_gather(output, dim=-1)
             if self.tp_group.world_size > 1:
                 output = self.tp_group.all_gather(output, dim=-1)
@@ -56,25 +58,38 @@ class HeadParallelColumnLinear(ColumnParallelLinear):
 
 
 class HeadParallelMergedColumnLinear(MergedColumnParallelLinear, HeadParallelColumnLinear):
-    def __init__(self, input_size: int, output_sizes: list[int], *, padding_size: int = 0, **kwargs) -> None:
-        # #66784 moves padding ownership from the Kimi wrapper to the merged
-        # layer. Consume it here rather than forwarding it to ColumnParallelLinear.
-        if not vllm_version_is("0.33.0"):
-            self.padding_size = padding_size
+    def __init__(
+        self, input_size: int, output_sizes: list[int], *, padding_size: int = 0, tp_group=None, **kwargs
+    ) -> None:
+        # #66784 moves padding ownership to the merged layer, but this class
+        # bypasses MergedColumnParallelLinear.__init__ (see below), so it must
+        # append and zero the padding rows on every supported vLLM revision.
+        # v0.34.0's upstream wrapper consumes the keyword before super() and
+        # only stashes it on the instance, so recover the budget from there.
+        padding_size = padding_size or getattr(self, "padding_size", 0)
+        self.padding_size = padding_size
         self.output_sizes = output_sizes.copy()
         self.shard_ids = tuple(range(len(output_sizes)))
-        if padding_size and not vllm_version_is("0.33.0"):
-            parallel_size = get_tp_group().world_size * get_pcp_group().world_size
+        if padding_size:
+            parallel_size = (
+                tp_group.world_size if tp_group is not None else get_tp_group().world_size * get_pcp_group().world_size
+            )
             self.output_sizes.append(padding_size * parallel_size)
         # Keep the merged checkpoint loaders, but allocate with explicit ranks.
-        HeadParallelColumnLinear.__init__(self, input_size, sum(self.output_sizes), **kwargs)
+        HeadParallelColumnLinear.__init__(self, input_size, sum(self.output_sizes), tp_group=tp_group, **kwargs)
         # vLLM #63752: custom allocation bypasses the stacked initializer.
         self.loaded_shard_ids: dict[str, set[str | int]] = {}
-        if not vllm_version_is("0.33.0"):
-            for name in self.padding_fill_params():
+        if padding_size:
+            # Padding lives in the last ``padding_size`` rows of each rank.
+            # v0.34.0's upstream wrapper re-applies the load-completion
+            # attribute after super() returns, so only the mainline lane
+            # tracks the loaders here; zeroing stays idempotent on both.
+            track_loaders = not vllm_version_is("0.34.0")
+            for name in ["weight"] + (["bias"] if self.bias is not None else []):
                 param = getattr(self, name)
-                self._zero_output_padding(param)
-                set_weight_attrs(param, {"weight_loader_numel": param[:-padding_size].numel()})
+                param.data[-padding_size:].zero_()
+                if track_loaders:
+                    set_weight_attrs(param, {"weight_loader_numel": param[:-padding_size].numel()})
 
 
 class HeadParallelRowLinear(RowParallelLinear):

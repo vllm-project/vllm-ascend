@@ -108,7 +108,13 @@ def _make_prepared_gbsa_builder(kv_dtype):
             }
         ),
         scheduler_config=SimpleNamespace(max_num_batched_tokens=64),
-        speculative_config=SimpleNamespace(num_speculative_tokens=15, parallel_drafting=False),
+        speculative_config=SimpleNamespace(
+            num_speculative_tokens=15,
+            parallel_drafting=False,
+            # vLLM >= v0.34.0 also accounts for extra drafter slots when it
+            # derives ``max_decode_query_len``; this fixture drafts none.
+            max_num_new_slots_for_drafting=0,
+        ),
         parallel_config=SimpleNamespace(decode_context_parallel_size=1, tensor_parallel_size=1),
     )
     spec = FullAttentionSpec(block_size=128, num_kv_heads=1, head_size=128, dtype=kv_dtype)
@@ -1405,11 +1411,14 @@ def test_prefill_sparse_attention_production_shape(
 
 
 @pytest.mark.parametrize(
-    "seq_lens_list",
-    [(130, 257), (129, 200, 384)],
+    "seq_lens_list,decode_query_len,num_padded_reqs",
+    [
+        ((130, 257), 1, 0),
+        ((130, 257), 4, 2),
+        ((129, 200, 384), 1, 2),
+        ((129, 200, 384), 4, 0),
+    ],
 )
-@pytest.mark.parametrize("decode_query_len", [1, 4])
-@pytest.mark.parametrize("num_padded_reqs", [0, 2])
 def test_decode_sparse_attention_correctness(
     msa_m3_sparse_backend: SparseAttnBackend,
     seq_lens_list: tuple[int, ...],

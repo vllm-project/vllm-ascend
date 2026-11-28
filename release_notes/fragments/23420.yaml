@@ -1,0 +1,5 @@
+# Release note fragment for PR 23420.
+pr: 23420
+entries:
+  - category: bugfix
+    text: Fixed runtime_guard dump_kv OOM by copying KV blocks to host one-by-one instead of device-side list gather, and count auto_max_times once a dump directory is created even if D2H later fails.

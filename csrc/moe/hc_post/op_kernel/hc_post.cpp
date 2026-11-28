@@ -17,13 +17,15 @@
 #if defined(__DAV_C310__)
   #include "hc_post_float32.h"
   #include "hc_post_bfloat16.h"
+#else
+  #include "hc_post_d_split.h"
 #endif
-#include "hc_post_d_split.h"
 
 using namespace AscendC;
-using namespace HcPost;
 #if defined(__DAV_C310__)
     using namespace HcPostRegBase;
+#else
+    using namespace HcPost;
 #endif
 
 #define HC_POST_FLOAT 0
@@ -50,6 +52,12 @@ extern "C" __global__ __aicore__ void hc_post(GM_ADDR x, GM_ADDR residual, GM_AD
     #else
         GET_TILING_DATA_WITH_STRUCT(HcPostTilingData, tilingData, tiling);
         const HcPostTilingData *__restrict hcPostTilingData = &tilingData;
+        if (tilingData.hcParam == 4) {
+            HcPostKernelDSplit<DTYPE_X, DTYPE_POST, 4> op;
+            op.Init(x, residual, post, comb, y, workspace, hcPostTilingData, &pipe);
+            op.Process();
+            return;
+        }
         HcPostKernelDSplit<DTYPE_X, DTYPE_POST> op;
         op.Init(x, residual, post, comb, y, workspace, hcPostTilingData, &pipe);
         op.Process();

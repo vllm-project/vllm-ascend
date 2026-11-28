@@ -16,7 +16,6 @@ from vllm_ascend.core.kv_cache_interface import (
 from vllm_ascend.models.deepseek_v41.cache_config import (
     STATE_RING_ROWS,
     get_deepseek_v41_kv_cache_config,
-    get_deepseek_v41_pool_bytes_per_block,
     group_cache_specs,
     make_cache_groups,
 )
@@ -51,8 +50,6 @@ def build_v41_cache_specs(config: Any, vllm_config: Any, prefix: str = "model"):
             dtype=torch.bfloat16,
             tokens_per_state=role.compress_ratio,
             model_version="deepseek_v41",
-            # Both supported vLLM lanes (#57169) omit MLA `storage_block_size`.
-            **{},
         )
         specs[f"{attn_prefix}.indexer.k_cache"] = AscendMLAAttentionSpec(
             block_size=block_size,
@@ -61,8 +58,6 @@ def build_v41_cache_specs(config: Any, vllm_config: Any, prefix: str = "model"):
             dtype=torch.int8,
             tokens_per_state=role.compress_ratio,
             model_version="deepseek_v41",
-            # Both supported vLLM lanes (#57169) omit MLA `storage_block_size`.
-            **{},
             scale_dim=1,
             scale_dtype=torch.float16,
         )
@@ -305,11 +300,7 @@ def make_cache_config(num_blocks, *, block_size=128, head_size=512, index_size=1
             model_version="deepseek_v41",
         )
     groups = make_cache_groups(group_cache_specs(specs))
-    return get_deepseek_v41_kv_cache_config(
-        runtime,
-        groups,
-        num_blocks * get_deepseek_v41_pool_bytes_per_block(groups),
-    )
+    return get_deepseek_v41_kv_cache_config(runtime, groups, num_blocks=num_blocks)
 
 
 def allocate_cache_views(config, device="cpu"):

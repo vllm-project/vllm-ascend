@@ -844,6 +844,7 @@ def test_async_workspace_refreshes_layer_and_clears_target_after_last(monkeypatc
     consumed_event.record.side_effect = lambda _stream=None: call_order.append("ack")
     pending_result = SimpleNamespace(
         layer_idx=layer_idx,
+        new_physical_to_logical_map=torch.tensor([1, 0]),
         transfer_metadata=object(),
         consumed_event=consumed_event,
     )
@@ -854,6 +855,8 @@ def test_async_workspace_refreshes_layer_and_clears_target_after_last(monkeypatc
         model=SimpleNamespace(num_moe_layers=4),
         model_name="model",
         _last_committed_mean_ratios=np.full(4, np.nan),
+        _placement_export_map=torch.zeros((4, 2), dtype=torch.int64),
+        _on_placement_layer_committed=lambda: call_order.append("mark_committed"),
     )
     refresh = MagicMock(side_effect=lambda *_args: call_order.append("refresh"))
     monkeypatch.setattr(patch_eplb, "refresh_model_routing_tables", refresh)
@@ -874,8 +877,9 @@ def test_async_workspace_refreshes_layer_and_clears_target_after_last(monkeypatc
     assert result == "moved"
     refresh.assert_called_once_with(model_state, layer_idx)
     assert model_state._last_committed_mean_ratios[layer_idx] == 1.2
+    assert model_state._placement_export_map[layer_idx].tolist() == [1, 0]
     log_info.assert_not_called()
-    assert call_order == ["move", "refresh", "ack"]
+    assert call_order == ["move", "refresh", "mark_committed", "ack"]
     assert hasattr(model_state.communicator, patch_eplb._EXPLICIT_TRANSFER_TARGET_ATTR) == (not is_last_layer)
 
 

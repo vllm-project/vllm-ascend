@@ -323,6 +323,16 @@ class _FakeKVCacheConfig:
         self.kv_cache_groups = kv_cache_groups or []
 
 
+@dataclass
+class _FakeKVCacheTensor:
+    size: int
+    layers: list[str]
+    layer_stride: int
+    block_stride: int
+    offset: int = 0
+    host_resident: bool = False
+
+
 _kv_cache_utils_mod.KVCacheBlock = _FakeKVCacheBlock  # type: ignore[attr-defined]
 _kv_cache_utils_mod.BlockHashList = list  # type: ignore[attr-defined]
 
@@ -441,6 +451,7 @@ _kv_interface_mod.HiddenStateCacheSpec = type("HiddenStateCacheSpec", (_FakeKVCa
 _kv_interface_mod.UniformTypeKVCacheSpecs = _FakeUniformTypeKVCacheSpecs  # type: ignore[attr-defined]
 _kv_interface_mod.KVCacheGroupSpec = _FakeKVCacheGroupSpec  # type: ignore[attr-defined]
 _kv_interface_mod.KVCacheConfig = _FakeKVCacheConfig  # type: ignore[attr-defined]
+_kv_interface_mod.KVCacheTensor = _FakeKVCacheTensor  # type: ignore[attr-defined]
 
 
 class _FakeKVCacheSpecRegistry:
@@ -600,7 +611,7 @@ if "vllm_ascend.utils" not in sys.modules or not hasattr(sys.modules["vllm_ascen
     sys.modules["vllm_ascend.utils"] = _ascend_utils
 
 # NOTE: vllm_ascend.{ascend_config, attention_fence} and their helpers
-# (get_ascend_config, AttentionComputeStartGate, ...) are intentionally NOT
+# (get_ascend_config, AttentionLoadGate, ...) are intentionally NOT
 # mocked here. Doing so by mutating these real modules leaks into every other
 # UT in the same pytest session (breaking test_ascend_config / test_platform,
 # which collect after ascend_store and bind the polluted symbols at import).

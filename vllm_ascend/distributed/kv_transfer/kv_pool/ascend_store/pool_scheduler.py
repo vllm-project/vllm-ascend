@@ -5,6 +5,8 @@ from typing import Any
 from vllm.config import VllmConfig
 from vllm.distributed.kv_transfer.kv_connector.v1.base import KVConnectorMetadata
 from vllm.logger import logger
+from vllm.utils.math_utils import cdiv
+from vllm.v1.attention.backends.utils import NULL_BLOCK_ID
 from vllm.v1.core.block_pool import BlockPool
 from vllm.v1.core.kv_cache_manager import KVCacheBlocks, KVCacheManager
 from vllm.v1.core.sched.output import NewRequestData, SchedulerOutput
@@ -14,6 +16,7 @@ from vllm.v1.kv_cache_interface import (
     RSWASpec,
     SlidingWindowSpec,
     UniformTypeKVCacheSpecs,
+    get_mamba_prefill_checkpoint_position,
 )
 from vllm.v1.outputs import KVConnectorOutput
 from vllm.v1.request import Request
@@ -22,14 +25,17 @@ from vllm_ascend.distributed.kv_transfer.kv_pool.ascend_store.backend import (
     resolve_backend,
 )
 from vllm_ascend.distributed.kv_transfer.kv_pool.ascend_store.coordinator import AscendStoreCoordinator
+from vllm_ascend.distributed.kv_transfer.kv_pool.ascend_store.hisparse.layout import has_hisparse_cache_layout
 from vllm_ascend.distributed.kv_transfer.kv_pool.ascend_store.in_flight_save_blocks import InFlightSaveBlockTracker
 from vllm_ascend.distributed.kv_transfer.kv_pool.ascend_store.lookup_key import LookupKeyClient
 from vllm_ascend.distributed.kv_transfer.kv_pool.ascend_store.metadata import (
     AscendConnectorMetadata,
     AscendStoreKVConnectorWorkerMetadata,
+    BoundaryPut,
     LoadSpec,
     ReqMeta,
     RequestTracker,
+    StoreLookupResult,
     infer_cache_transfer_granularity,
     infer_cacheable_group_ids,
     infer_group_block_sizes,
@@ -77,7 +83,7 @@ class BaseKVPoolScheduler(ABC):
             else [0]
         )
         self.kv_cache_group_families = infer_group_cache_families(kv_cache_groups, self.compress_ratios, self.hf_config)
-        self.num_speculative_blocks_by_group = self._infer_mamba_groups()
+        self.num_mamba_speculative_blocks_by_group = self._infer_mamba_groups()
         self.kv_role = vllm_config.kv_transfer_config.kv_role
         self.enable_lookup = extra_config.get("enable_lookup", self.kv_role != "kv_consumer")
         self.load_async = vllm_config.kv_transfer_config.kv_connector_extra_config.get("load_async", False)
@@ -96,6 +102,8 @@ class BaseKVPoolScheduler(ABC):
         speculative_config = getattr(vllm_config, "speculative_config", None)
         use_eagle_fn = getattr(speculative_config, "use_eagle", None)
         self.use_eagle = use_eagle_fn() is True if callable(use_eagle_fn) else False
+        use_eagle_block_drop_fn = getattr(speculative_config, "use_eagle_block_drop", None)
+        self.use_eagle_block_drop = use_eagle_block_drop_fn() is True if callable(use_eagle_block_drop_fn) else False
         self.original_block_size = infer_group_block_sizes(vllm_config.cache_config.block_size, kv_cache_groups)
         self.cacheable_group_ids = infer_cacheable_group_ids(kv_cache_groups)
         self.swa_group_ids = {
@@ -113,25 +121,27 @@ class BaseKVPoolScheduler(ABC):
                 )
             )
         }
-        cacheable_block_sizes = [self.original_block_size[i] for i in self.cacheable_group_ids]
         self.grouped_block_size = [block_size * self.dcp_size for block_size in self.original_block_size]
-        requested_hash_block_size = vllm_config.cache_config.prefix_match_unit
-        if not isinstance(requested_hash_block_size, int):
-            requested_hash_block_size = None
-        self.hash_block_size = (
-            requested_hash_block_size if requested_hash_block_size is not None else min(cacheable_block_sizes)
-        ) * self.dcp_size
+        assert kv_cache_config is not None, "AscendStore requires Core's resolved KV cache configuration"
+        self.hash_block_size = kv_cache_config.hash_block_size
         for group_id in self.cacheable_group_ids:
             group_block_size = self.grouped_block_size[group_id]
             assert group_block_size % self.hash_block_size == 0, "block_size must be divisible by hash_block_size"
         self._block_size = self.grouped_block_size[0]
         self.lcm_block_size = math.lcm(*(self.grouped_block_size[i] for i in self.cacheable_group_ids))
+        # Layerwise and HiSparse external transfers use complete pages.
+        self.enable_partial_hash_hits = (
+            not use_layerwise
+            and not has_hisparse_cache_layout(kv_cache_config)
+            and kv_cache_config.cache_hit_alignment_tokens < self.lcm_block_size
+        )
         self.cache_transfer_granularity = infer_cache_transfer_granularity(
             self.grouped_block_size, self.lcm_block_size, self.cacheable_group_ids
         )
         self.cache_coordinator = self._build_cache_coordinator()
         # request_id -> full_token_ids
         self._request_trackers: dict[str, RequestTracker] = {}
+        self._finished_partial_tail_metas: dict[str, ReqMeta] = {}
         self._preempted_req_ids: set[str] = set()
         # Whether to discard partial chunks
         self._discard_partial_chunks = vllm_config.kv_transfer_config.get_from_extra_config(
@@ -214,6 +224,7 @@ class BaseKVPoolScheduler(ABC):
             group_cache_families=self.kv_cache_group_families,
             use_eagle=self.use_eagle,
             retention_interval=self.retention_interval,
+            enable_partial_hash_hits=self.enable_partial_hash_hits,
         )
 
     def _floor_to_cache_transfer_granularity(self, token_len: int) -> int:
@@ -224,7 +235,7 @@ class BaseKVPoolScheduler(ABC):
         if self.kv_cache_config is None:
             return {}
 
-        num_speculative_blocks_by_group: dict[int, int] = {}
+        num_mamba_speculative_blocks_by_group: dict[int, int] = {}
         for group_id, kv_cache_group in enumerate(self.kv_cache_config.kv_cache_groups):
             kv_cache_spec = kv_cache_group.kv_cache_spec
             if isinstance(kv_cache_spec, UniformTypeKVCacheSpecs):
@@ -236,8 +247,8 @@ class BaseKVPoolScheduler(ABC):
                     "AscendStore hybrid linear-attention support currently requires mamba_cache_mode='align'."
                 )
             if self.use_hybrid:
-                num_speculative_blocks_by_group[group_id] = kv_cache_spec.num_speculative_blocks
-        return num_speculative_blocks_by_group
+                num_mamba_speculative_blocks_by_group[group_id] = kv_cache_spec.num_speculative_blocks
+        return num_mamba_speculative_blocks_by_group
 
     def get_num_new_matched_tokens(
         self,
@@ -262,12 +273,17 @@ class BaseKVPoolScheduler(ABC):
         if not self.enable_lookup:
             return 0, False
 
-        num_external_hit_tokens = self._lookup_external_hit_tokens(request, num_computed_tokens)
-        if not num_external_hit_tokens:
+        # Core passes the candidate load start and owns local-tail arbitration:
+        # it drops a local sub-block tail only if the remote hit strictly
+        # extends it.
+
+        lookup_result = self._lookup_external_hit_tokens(request, num_computed_tokens)
+        if lookup_result is None or not lookup_result.hit_length:
             return 0, False
+        num_external_hit_tokens = lookup_result.hit_length
 
         store_skip_tokens = num_external_hit_tokens
-        if self.use_eagle:
+        if self.use_eagle and not self.enable_partial_hash_hits:
             # Keep the draft model's recomputation zone intact: the
             # generation-point hidden states must be freshly computed, and the
             # local prefix-cache path already drops its trailing block
@@ -317,6 +333,7 @@ class BaseKVPoolScheduler(ABC):
             kvpool_cached_tokens=num_external_hit_tokens,
             can_load=process_hit_without_alloc,
             kvpool_store_skip_tokens=store_skip_tokens,
+            tail_key_boundaries=lookup_result.tail_key_boundaries,
         )
         logger.debug(
             "KV pool load spec created req=%s vllm_cached=%d kvpool_cached=%d "
@@ -344,8 +361,17 @@ class BaseKVPoolScheduler(ABC):
         return None
 
     @abstractmethod
-    def _lookup_external_hit_tokens(self, request: "Request", num_computed_tokens: int) -> int | None:
+    def _lookup_external_hit_tokens(self, request: "Request", num_computed_tokens: int) -> StoreLookupResult | None:
         """Return the external cache hit using the selected transfer mode."""
+
+    def register_finished_partial_tail(
+        self,
+        request: Request,
+        block_ids: tuple[list[int], ...],
+        partial_tail_offloads: list[tuple[int, int, int]],
+    ) -> bool:
+        """Decline finish-time tails unless the transfer mode supports them."""
+        return False
 
     def update_state_after_alloc(self, request: "Request", blocks: "KVCacheBlocks", num_external_tokens: int):
         """
@@ -432,6 +458,7 @@ class BaseKVPoolScheduler(ABC):
             kv_cache_group_families=self.kv_cache_group_families,
             save_partial_block=self.layerwise_offload,
             hash_block_size=self.hash_block_size,
+            enable_partial_hash_hits=self.enable_partial_hash_hits,
         )
 
     def _process_new_request(
@@ -440,13 +467,11 @@ class BaseKVPoolScheduler(ABC):
         scheduler_output: SchedulerOutput,
         force_skip_save: bool,
     ) -> ReqMeta | None:
-        if self.vllm_config.use_v2_model_runner:
-            # MRV2 resumes through scheduled_new_reqs with a full block table.
-            # Clear the marker so the next RUNNING delta extends this table instead
-            # of rebuilding the tracker from the delta and resetting save progress.
-            # MRV1 resumes through cached requests and consumes the marker in
-            # _process_preempted_cached_request.
-            self._preempted_req_ids.discard(request.req_id)
+        # Model Runner V2 resumes through scheduled_new_reqs with a full block
+        # table. Clear the marker so the next RUNNING delta extends this table
+        # instead of rebuilding the tracker from the delta and resetting save
+        # progress.
+        self._preempted_req_ids.discard(request.req_id)
         load_spec = self.load_specs.pop(request.req_id, None)
         num_tokens_to_compute = request.num_computed_tokens + scheduler_output.num_scheduled_tokens[request.req_id]
         request_tuple = self._unfinished_requests.get(request.req_id)
@@ -468,7 +493,7 @@ class BaseKVPoolScheduler(ABC):
             prefill_end_tokens=len(prefill_tokens),
             block_gvas=(previous_tracker.block_gvas.copy() if previous_tracker else []),
             gva_block_offset=(previous_tracker.gva_block_offset if previous_tracker else 0),
-            num_speculative_blocks_by_group=self.num_speculative_blocks_by_group,
+            num_mamba_speculative_blocks_by_group=self.num_mamba_speculative_blocks_by_group,
             block_sizes=self.grouped_block_size,
         )
         self._request_trackers[request.req_id] = request_tracker
@@ -510,7 +535,7 @@ class BaseKVPoolScheduler(ABC):
             prefill_end_tokens=len(request_real.all_token_ids),
             block_gvas=(previous_tracker.block_gvas.copy() if previous_tracker else []),
             gva_block_offset=(previous_tracker.gva_block_offset if previous_tracker else 0),
-            num_speculative_blocks_by_group=self.num_speculative_blocks_by_group,
+            num_mamba_speculative_blocks_by_group=self.num_mamba_speculative_blocks_by_group,
             block_sizes=self.grouped_block_size,
         )
         self._request_trackers[req_id] = request_tracker
@@ -561,13 +586,16 @@ class BaseKVPoolScheduler(ABC):
         # A consumer skips Prefill writes, including KV received over PD.
         # Its first Decode save may restore missing Prefill ancestors in the pool.
         skip_save = force_skip_save and not (is_decoding and self.save_decode_cache)
-        return self._build_req_meta(
+        meta = self._build_req_meta(
             request_tracker,
             request.block_hashes,
             load_spec,
             request.prompt_token_ids,
             skip_save,
         )
+        if meta is not None:
+            meta.computed_prefix_tokens = num_current_tokens
+        return meta
 
     def _sync_swa_block_ids(self, tracker: RequestTracker) -> None:
         """Use the current request table rather than retained SWA block IDs."""
@@ -603,7 +631,7 @@ class BaseKVPoolScheduler(ABC):
             prefill_end_tokens=len(request.prompt_token_ids),
             block_gvas=(previous_tracker.block_gvas.copy() if previous_tracker else []),
             gva_block_offset=(previous_tracker.gva_block_offset if previous_tracker else 0),
-            num_speculative_blocks_by_group=self.num_speculative_blocks_by_group,
+            num_mamba_speculative_blocks_by_group=self.num_mamba_speculative_blocks_by_group,
             block_sizes=self.grouped_block_size,
         )
         self._request_trackers[request_id] = request_tracker
@@ -628,7 +656,13 @@ class BaseKVPoolScheduler(ABC):
         """
         force_skip_save = self.kv_role == "kv_consumer"
 
+        cancelled_load_req_ids = set()
         for finished_req_id in scheduler_output.finished_req_ids:
+            load_spec = self.load_specs.pop(finished_req_id, None)
+            if load_spec is not None and load_spec.can_load and finished_req_id in self._async_loading_req_ids:
+                # Core is waiting for receive completion once it hands us the
+                # destination pages. A spec still present here was never sent.
+                cancelled_load_req_ids.add(finished_req_id)
             self._request_trackers.pop(finished_req_id, None)
             self._unfinished_requests.pop(finished_req_id, None)
             self._preempted_req_ids.discard(finished_req_id)
@@ -642,12 +676,12 @@ class BaseKVPoolScheduler(ABC):
         meta = AscendConnectorMetadata(
             scheduler_output.preempted_req_ids,
             self._async_loading_req_ids.copy(),
+            cancelled_load_req_ids=cancelled_load_req_ids,
         )
 
         for request in scheduler_output.scheduled_new_reqs:
             req_meta = self._process_new_request(request, scheduler_output, force_skip_save)
             if req_meta is not None:
-                self.retain_blocks_for_save(req_meta)
                 meta.add_request(req_meta)
 
         cached_reqs = scheduler_output.scheduled_cached_reqs
@@ -662,6 +696,7 @@ class BaseKVPoolScheduler(ABC):
                     and not self.tp_mismatch
                     and not self.layerwise_offload
                     and not self.save_decode_cache
+                    and not self.enable_partial_hash_hits
                 ):
                     continue
                 if req_id in self._preempted_req_ids:
@@ -685,7 +720,6 @@ class BaseKVPoolScheduler(ABC):
                         force_skip_save,
                     )
                 if req_meta is not None:
-                    self.retain_blocks_for_save(req_meta)
                     meta.add_request(req_meta)
 
         if self._unfinished_requests:
@@ -708,10 +742,72 @@ class BaseKVPoolScheduler(ABC):
                 if request_id in unscheduled_request_ids:
                     req_meta = self._process_async_load_request(request_id, request, block_ids)
                     if req_meta is not None:
-                        self.retain_blocks_for_save(req_meta)
                         meta.add_request(req_meta)
 
+        # Layerwise transfer uses the request tracker's block tables. Only
+        # bulk transfer can consume and pin Core's standalone checkpoints.
+        if self.use_layerwise:
+            return meta
+
+        state = getattr(scheduler_output, "kv_connector_block_state", None)
+        if state is not None and state.boundary_state_offloads and self.can_put:
+            self._handle_boundary_state_offloads(state.boundary_state_offloads, meta)
+        self._apply_current_save_block_ids(meta, scheduler_output)
+        # Finish-time sources were pinned before request cleanup and do not
+        # require a current block table.
+        for req_meta in self._finished_partial_tail_metas.values():
+            meta.add_request(req_meta)
+        self._finished_partial_tail_metas.clear()
+        for req_meta in meta.requests:
+            self.retain_blocks_for_save(req_meta)
         return meta
+
+    def _handle_boundary_state_offloads(
+        self, offloads: dict[str, list[tuple[int, int, int]]], meta: AscendConnectorMetadata
+    ) -> None:
+        """Attach Core's exact checkpoint sources, creating boundary-only jobs as needed."""
+        coord = self.cache_coordinator
+        assert coord is not None
+        save_metas = {req.req_id: req for req in meta.requests if req.can_save}
+        for req_id, entries in offloads.items():
+            tracker = self._request_trackers.get(req_id)
+            request = self._unfinished_requests.get(req_id)
+            if tracker is None or request is None or not self.can_put:
+                continue
+            accepted = [
+                BoundaryPut(group, block, boundary)
+                for group, block, boundary in entries
+                if group in coord.mamba_group_ids
+                and block > 0
+                and boundary <= (tracker.prefill_end_tokens or tracker.num_prompt_tokens or 0)
+            ]
+            if not accepted:
+                continue
+            req_meta = save_metas.get(req_id)
+            if req_meta is None:
+                req_meta = ReqMeta(
+                    req_id=req_id,
+                    token_len_chunk=0,
+                    can_save=True,
+                    block_hashes=list(request[0].block_hashes),
+                    num_prompt_tokens=tracker.num_prompt_tokens,
+                    completed_token_len=tracker.token_len,
+                )
+                meta.add_request(req_meta)
+                save_metas[req_id] = req_meta
+            req_meta.boundary_puts = accepted
+
+    def _apply_current_save_block_ids(self, meta: AscendConnectorMetadata, output: SchedulerOutput) -> None:
+        """Replace tracker mirrors with Core's current tables for save jobs."""
+        save_metas = [req for req in meta.requests if req.can_save]
+        if not save_metas:
+            return
+        state = output.kv_connector_block_state
+        assert state is not None, "Current block tables are required for AscendStore jobs"
+        for req_meta in save_metas:
+            block_ids = state.get_block_ids(req_meta.req_id)
+            assert block_ids is not None, f"Missing Core save block table: {req_meta.req_id}"
+            req_meta.block_ids_by_group = [list(group) for group in block_ids]
 
     def retain_blocks_for_save(self, req_meta: ReqMeta) -> None:
         """Retain in-flight Mamba blocks according to the transfer mode. It is only used in Blockwise."""
@@ -789,13 +885,25 @@ class KVPoolScheduler(BaseKVPoolScheduler):
         kv_cache_config: KVCacheConfig | None = None,
     ) -> None:
         super().__init__(vllm_config, use_layerwise, kv_cache_config)
+        self._failed_external_load_req_ids: set[str] = set()
         self._in_flight_save_blocks = InFlightSaveBlockTracker(vllm_config.parallel_config.world_size)
 
     def update_connector_output(self, connector_output: KVConnectorOutput) -> None:
+        if connector_output.failed_recving and has_hisparse_cache_layout(self.kv_cache_config):
+            for request_id in self._async_loading_req_ids & connector_output.failed_recving:
+                request_and_blocks = self._unfinished_requests.get(request_id)
+                if request_and_blocks is not None and not request_and_blocks[0].is_finished():
+                    self._failed_external_load_req_ids.add(request_id)
         super().update_connector_output(connector_output)
         meta = connector_output.kv_connector_worker_meta
         if isinstance(meta, AscendStoreKVConnectorWorkerMetadata) and self._block_pool is not None:
             self._in_flight_save_blocks.complete(meta.completed_events, self._block_pool)
+
+    def request_finished_all_groups(
+        self, request: Request, block_ids: tuple[list[int], ...]
+    ) -> tuple[bool, dict[str, Any] | None]:
+        self._failed_external_load_req_ids.discard(request.request_id)
+        return super().request_finished_all_groups(request, block_ids)
 
     def has_pending_push_work(self) -> bool:
         return self._in_flight_save_blocks.has_pending_work()
@@ -813,11 +921,140 @@ class KVPoolScheduler(BaseKVPoolScheduler):
 
     def retain_blocks_for_save(self, req_meta: ReqMeta) -> None:
         """Keep Mamba source blocks alive until bulk save completes."""
-        self._in_flight_save_blocks.retain(req_meta, self.num_speculative_blocks_by_group, self._block_pool)
+        if req_meta.can_save and req_meta.event_id is None and self.cache_coordinator is not None:
+            if tail := self._partial_tail_non_mamba_puts(req_meta):
+                req_meta.boundary_puts = [*tail, *(req_meta.boundary_puts or [])]
+        self._in_flight_save_blocks.retain(
+            req_meta,
+            self._block_pool,
+        )
 
-    def _lookup_external_hit_tokens(self, request: Request, num_computed_tokens: int) -> int | None:
+    def _partial_tail_non_mamba_puts(self, req_meta: ReqMeta) -> list[BoundaryPut]:
+        """Locate the non-Mamba blocks a partial-tail save publishes.
+
+        A later request resumes at the prompt's Mamba checkpoint (``boundary``)
+        only if both pieces of KV are stored:
+
+        - Mamba groups: the state at ``boundary``, handed off by Core as a
+          boundary put of its own, so Mamba groups are not listed here.
+        - Other groups: the KV from the last LCM-aligned normal save up to
+          ``boundary`` plus the group's EAGLE proof margin (``proof_end``).
+          Each block is keyed by the hash at its end, clipped to ``proof_end``.
+
+        Groups whose proof is not computed yet are omitted. For example, with
+        LCM 16, blocks of 4 tokens, and a checkpoint at 44, the full-attention
+        blocks are 8-10, keyed at 36, 40 and 44.
+
+        A Mamba state handed off at any other position, i.e. a shared-prefix
+        junction (``--enable-mamba-shared-prefix-checkpoint``), adds no puts here.
+        """
+        coord = self.cache_coordinator
+        assert coord is not None
+        mamba_tails = [
+            put.num_tokens
+            for put in req_meta.boundary_puts or []
+            if put.group_id in coord.mamba_group_ids and put.num_tokens % self.grouped_block_size[put.group_id]
+        ]
+        # The tail is due on the save that first covers the prompt, or when Mamba
+        # hands off its checkpoint state.
+        if not mamba_tails and not req_meta.publish_partial_tail:
+            return []
+        prompt_tokens = req_meta.num_prompt_tokens
+        completed = req_meta.completed_token_len
+        assert prompt_tokens is not None and completed is not None
+        hash_block_size = coord.hash_block_size
+        # Core drops the Mamba checkpoint whenever EAGLE block drop is on,
+        # whichever groups carry the eagle flag.
+        boundary = get_mamba_prefill_checkpoint_position(prompt_tokens, hash_block_size, coord.use_eagle)
+        # Any other sub-block Mamba hand-off is a shared-prefix junction. Its
+        # attention KV, EAGLE proof included, ends on an attention block end no
+        # later than this checkpoint's proof, so normal and prompt-tail saves
+        # store it.
+        if not req_meta.publish_partial_tail and boundary not in mamba_tails:
+            return []
+        num_hashes = len(req_meta.block_hashes)
+        if boundary == 0 or boundary // hash_block_size > num_hashes:
+            return []
+        start = boundary // coord.lcm_block_size * coord.lcm_block_size
+        puts: list[BoundaryPut] = []
+        # Ascend keeps original group IDs; exclude non-cacheable groups here
+        # rather than renumbering the block tables as Mooncake Store does.
+        for group_id in self.cacheable_group_ids:
+            if group_id in coord.mamba_group_ids:
+                continue
+            proof_end = boundary + coord.eagle_proof_margin_by_group.get(group_id, 0)
+            if proof_end > completed or proof_end // hash_block_size > num_hashes:
+                continue
+            block_size = self.grouped_block_size[group_id]
+            group_blocks = req_meta.block_ids_by_group[group_id]
+            for block_idx in range(start // block_size, cdiv(proof_end, block_size)):
+                if block_idx >= len(group_blocks):
+                    break
+                block_id = group_blocks[block_idx]
+                if block_id == NULL_BLOCK_ID:
+                    continue
+                num_tokens = min((block_idx + 1) * block_size, proof_end)
+                puts.append(BoundaryPut(group_id, block_id, num_tokens))
+        return puts
+
+    def register_finished_partial_tail(
+        self,
+        request: Request,
+        block_ids: tuple[list[int], ...],
+        partial_tail_offloads: list[tuple[int, int, int]],
+    ) -> bool:
+        """Queue and pin a finish-time tail for the next connector step."""
+        if not self.can_put or not partial_tail_offloads:
+            return False
+        tracker = self._request_trackers.get(request.request_id)
+        if tracker is None or not any(block_ids):
+            return False
+        boundaries = {boundary for _, _, boundary in partial_tail_offloads}
+        if len(boundaries) != 1:
+            raise ValueError("Partial-tail offloads for one request must share a boundary")
+        boundary_tokens = next(iter(boundaries))
+        assert tracker.prefill_end_tokens is not None
+        if boundary_tokens > tracker.prefill_end_tokens:
+            return False
+
+        coord = self.cache_coordinator
+        assert coord is not None
+        mamba_puts: list[BoundaryPut] = []
+        for group_id, block_id, boundary in partial_tail_offloads:
+            # Ascend retains Core's group IDs instead of remapping Store groups.
+            if group_id not in coord.mamba_group_ids:
+                return False
+            if block_id == NULL_BLOCK_ID:
+                return False
+            mamba_puts.append(BoundaryPut(group_id, block_id, boundary))
+        req_meta = ReqMeta(
+            req_id=request.request_id,
+            token_len_chunk=0,
+            can_save=True,
+            block_ids_by_group=[list(group) for group in block_ids],
+            block_hashes=list(request.block_hashes),
+            num_prompt_tokens=request.num_prompt_tokens,
+            completed_token_len=request.num_computed_tokens,
+            boundary_puts=mamba_puts,
+        )
+        req_meta.boundary_puts = [*self._partial_tail_non_mamba_puts(req_meta), *mamba_puts]
+        assert request.request_id not in self._finished_partial_tail_metas
+        # This job has no normal save range. Pin only its exact boundary sources.
+        self._in_flight_save_blocks.retain(req_meta, self._block_pool)
+        self._finished_partial_tail_metas[request.request_id] = req_meta
+        # The store job owns exact block refs, so request cleanup need not wait.
+        return False
+
+    def _lookup_external_hit_tokens(self, request: Request, num_computed_tokens: int) -> StoreLookupResult | None:
+        # Core may reschedule the request with zero computed tokens after an
+        # import failure. A key can still be visible to lookup while GET fails.
+        if request.request_id in self._failed_external_load_req_ids:
+            return None
         prompt_token_len = len(request.prompt_token_ids)
-        if len(self.cacheable_group_ids) != len(self.original_block_size):
+        if self.enable_partial_hash_hits:
+            # Preserve the prompt end so the worker can reserve the final token for recomputation.
+            token_len = prompt_token_len
+        elif len(self.cacheable_group_ids) != len(self.original_block_size):
             # Private compressor state is rebuilt from a whole token page.
             token_len = self._floor_to_cache_transfer_granularity(max(prompt_token_len - 1, 0))
         else:

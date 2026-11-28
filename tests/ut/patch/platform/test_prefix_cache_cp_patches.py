@@ -977,18 +977,12 @@ def test_kimi_k3_gqa_mixed_groups_use_expected_physical_layout(monkeypatch) -> N
     page_size = 488448
     expected_num_blocks = 100
     available_memory = page_size * 29 * expected_num_blocks
-    monkeypatch.setattr(
-        "vllm_ascend.core.kv_cache_config_builder.may_override_num_blocks",
-        lambda _config, num_blocks: num_blocks,
-    )
 
-    num_blocks, tensors = _get_kv_cache_config_deepseek_v4_main(
-        SimpleNamespace(),
-        groups,
-        available_memory,
-    )
+    vllm_config = SimpleNamespace(cache_config=SimpleNamespace(prefix_cache_retention_interval=None))
+    planned = _get_kv_cache_config_deepseek_v4_main(vllm_config, groups, num_blocks=expected_num_blocks)
+    tensors = planned.kv_cache_tensors
 
-    assert num_blocks == expected_num_blocks
+    assert planned.num_blocks == expected_num_blocks
     assert len(tensors) == 4
     assert [len(tensor.layers) for tensor in tensors] == [29, 23, 23, 23]
     assert [tensor.layers for tensor in tensors] == [group.layer_names for group in groups]
@@ -1086,16 +1080,16 @@ def test_deepseek_v4_main_restores_ascend_shared_tuple_planner(monkeypatch) -> N
         attention_config=SimpleNamespace(hisparse_config=None),
     )
 
-    planner = MagicMock(return_value=(7, [planned_tensor]))
+    planned_config = KVCacheConfig(
+        num_blocks=7, kv_cache_tensors=[planned_tensor], kv_cache_groups=kv_cache_config.kv_cache_groups
+    )
+    planner = MagicMock(return_value=planned_config)
     monkeypatch.setattr(kv_cache_config_builder, "_get_kv_cache_config_deepseek_v4_main", planner)
 
-    result = get_ascend_kv_cache_config_from_groups(
-        vllm_config,
-        kv_cache_config.kv_cache_groups,
-        available_memory=1 << 30,
-    )
+    result = get_ascend_kv_cache_config_from_groups(vllm_config, kv_cache_config.kv_cache_groups, num_blocks=7)
 
-    planner.assert_called_once_with(vllm_config, kv_cache_config.kv_cache_groups, 1 << 30)
+    planner.assert_called_once_with(vllm_config, kv_cache_config.kv_cache_groups, 7)
+    assert result is planned_config
     assert result.num_blocks == 7
     assert result.kv_cache_tensors == [planned_tensor]
 
@@ -1133,18 +1127,14 @@ def test_deepseek_v4_main_planner_uses_shared_backing_geometry(monkeypatch) -> N
     )
     expected_num_blocks = 7
     available_memory = page_size * expected_num_blocks
-    monkeypatch.setattr(
-        "vllm_ascend.core.kv_cache_config_builder.may_override_num_blocks",
-        lambda _config, num_blocks: num_blocks,
-    )
 
-    num_blocks, tensors = _get_kv_cache_config_deepseek_v4_main(
-        SimpleNamespace(),
-        groups,
-        available_memory,
-    )
+    vllm_config = SimpleNamespace(cache_config=SimpleNamespace(prefix_cache_retention_interval=4096))
+    planned = _get_kv_cache_config_deepseek_v4_main(vllm_config, groups, num_blocks=expected_num_blocks)
+    tensors = planned.kv_cache_tensors
 
-    assert num_blocks == expected_num_blocks
+    assert planned.num_blocks == expected_num_blocks
+    assert planned.prefix_cache_retention_interval == 4096
+    assert planned.kv_cache_groups == groups
     assert [tensor.layers for tensor in tensors] == [["c4_attn"], ["c128_attn"]]
     assert {tensor.size for tensor in tensors} == {available_memory}
     for tensor in tensors:
@@ -1206,9 +1196,7 @@ def test_deepseek_v4_main_rank_replan_preserves_num_blocks() -> None:
 
     expected_num_blocks = 7
     replanned_config = get_ascend_kv_cache_config_from_groups(
-        vllm_config,
-        kv_cache_groups,
-        expected_num_blocks * ascend_bytes_per_block,
+        vllm_config, kv_cache_groups, num_blocks=expected_num_blocks
     )
 
     assert replanned_config.num_blocks == expected_num_blocks
@@ -1723,7 +1711,7 @@ def test_native_draft_physical_pool_cannot_overwrite_target_or_state(dcp, layout
     assert bytes_per_block == target.page_size_bytes + draft.page_size_bytes
     assert _pool_bytes_per_block_from_builder(AscendKVCacheConfigBuilder(), config, groups) == bytes_per_block
     budget = 11 * bytes_per_block + bytes_per_block // 2
-    planned = get_ascend_kv_cache_config_from_groups(config, groups, budget)
+    planned = get_ascend_kv_cache_config_from_groups(config, groups, num_blocks=11)
     expected_blocks = 11 if num_blocks_override is None else num_blocks_override
     assert planned.num_blocks == expected_blocks
     assert planned.kv_cache_groups is groups
@@ -1740,5 +1728,5 @@ def test_native_draft_physical_pool_cannot_overwrite_target_or_state(dcp, layout
     assert not backing[: expected_blocks * target.page_size_bytes].any()
     assert backing[draft_start:draft_end].eq(91).all()
     # Rank re-planning must retain exactly the agreed block count.
-    replanned = get_ascend_kv_cache_config_from_groups(config, groups, 7 * bytes_per_block)
+    replanned = get_ascend_kv_cache_config_from_groups(config, groups, num_blocks=7)
     assert replanned.num_blocks == (7 if num_blocks_override is None else num_blocks_override)

@@ -26,9 +26,6 @@ asynchronous worker, and rearrangement lifecycle. Ascend adds the STAIR policy
 (the default policy on Ascend), the HIXL and Gloo movement adapters, and the
 `load_collection_phase` extension.
 
-The legacy vLLM Ascend dynamic, recording, and static EPLB modes belonged to
-Model Runner V1 and have been removed.
-
 ### Constraints and Limitations
 
 #### Models
@@ -42,7 +39,7 @@ traffic before production deployment.
 
 !!!IMPORTANT
 
-    A2 does not support redundant experts. On A2, `num_redundant_experts` must be set to `0` in both runners. Examples in this page that use a non-zero `num_redundant_experts` apply only to hardware that supports redundant experts, such as A3 or 950PR&950DT Products.
+    A2 does not support redundant experts. On A2, `num_redundant_experts` must be set to `0`. Examples in this page that use a non-zero `num_redundant_experts` apply only to hardware that supports redundant experts, such as A3 or 950PR&950DT Products.
 
 #### Weight Formats
 
@@ -126,9 +123,9 @@ above deviate from them, and when to do the same:
   increase rearrangement frequency and trade stability for faster response.
 
 These fields may also be passed together as JSON through `--eplb-config`.
-They must not be placed in `--additional-config` for MRv2: the only MRv2 EPLB
-fields under `additional_config.eplb_config` are `load_collection_phase` and
-`stair_config`; any other field is rejected at startup.
+Keep upstream fields in `--eplb-config`; Ascend EPLB fields under
+`additional_config.eplb_config` are `load_collection_phase`,
+`expert_placement_path`, and `stair_config`.
 
 Ascend extends the upstream `policy` field without adding a second selector.
 For example, use `--eplb-config.policy default` to run the upstream policy;
@@ -195,15 +192,24 @@ vllm serve Qwen/Qwen3-30B-A3B \
   --additional-config '{"eplb_config":{"load_collection_phase":"prefill"}}'
 ```
 
+#### Placement Export
+
+Set `eplb_config.expert_placement_path` (for example,
+`--additional-config '{"eplb_config":{"expert_placement_path":"/tmp/expert_placement.json"}}'`)
+to atomically export the best committed expert placement on global rank 0's
+host. Before the first rearrangement, EPLB records the initial placement's
+observed per-step peak-to-mean rank-load ratio without writing to disk; before
+each subsequent rearrangement, global rank 0 updates the file only when the
+active committed placement achieves a strictly lower observed peak-to-mean
+ratio (requiring at least two rearrangement intervals in calibration runs).
+Pipeline parallelism and speculative MoE drafts with EPLB enabled are supported.
+
 #### MRv2 Constraints
 
 MRv2 supports asynchronous EPLB only and normalizes `use_async=false` to
 asynchronous movement. It rejects:
 
 - elastic expert parallelism,
-- legacy `dynamic_eplb`, recording/static-map fields, and the `DYNAMIC_EPLB`
-  and `EXPERT_MAP_RECORD` environment variables, all of which belonged to the
-  removed Model Runner V1 EPLB implementation,
 - communicators other than Gloo and HIXL,
 - weight offload and prefetch: enabling EPLB with `cpu_offload_gb > 0` or
   `offload_group_size > 0` raises a configuration error.
@@ -227,7 +233,6 @@ under ideal load balance.
 
 - Enable it through `additional_config`: `--additional-config '{"enable_force_eplb": true}'`.
 - It requires expert parallelism and a MoE model; `num_logical_experts` must be divisible by the expert-parallel size.
-- It cannot be combined with `eplb_config.dynamic_eplb`.
 - See [`enable_force_eplb`](../configuration/additional_config.md) for the full parameter reference.
 
 ## Tuning Suggestions
@@ -272,7 +277,7 @@ rebalances a layer only when the hysteresis gates above fire, so lowering
 
 2. Hardware Requirements:
     - Ensure that all NPUs have identical memory capacity and compute capabilities.
-    - Network bandwidth must support expert redistribution traffic (≥ 10 Gbps recommended).
+    - Network bandwidth must support expert redistribution traffic (≥ 10 Gbit/s recommended).
     - shm needs to be mounted for container.
 
 3. Monitoring & Validation:

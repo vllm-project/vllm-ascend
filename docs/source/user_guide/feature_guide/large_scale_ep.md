@@ -366,7 +366,7 @@ models = [
         type=VLLMCustomAPIChatStream,
         abbr='vllm-api-stream-chat',
         path="vllm-ascend/DeepSeek-R1-W8A8",
-        model="dsr1",
+        model="deepseek_r1",
         request_rate = 28,
         retry = 2,
         host_ip = "192.0.0.1", # Proxy service host IP
@@ -423,7 +423,7 @@ In the PD separation scenario, we provide an optimized configuration.
 2. Take '--kv-transfer-config' as follows:
 
     ```shell
-    --kv-transfer-config
+    --kv-transfer-config \
         '{"kv_connector": "MooncakeConnectorV1",
           "kv_buffer_device": "npu",
           "kv_role": "kv_consumer",

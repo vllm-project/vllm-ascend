@@ -27,7 +27,6 @@ from vllm_ascend.core.kv_cache_interface import (
     AscendIndexerKPoolTailSpec,
     AscendMLAAttentionSpec,
     get_kv_cache_compression_ratio,
-    get_storage_block_size,
     is_prefix_cacheable,
     register_ascend_kv_cache_specs,
 )
@@ -88,7 +87,7 @@ def test_tail_uses_one_full_precision_page(capacity):
     )
     assert spec.page_size_bytes == 2 * capacity * 128 * 4
     assert spec.block_size == spec.compress_ratio == 4
-    assert spec.num_states == spec.get_num_kernel_states(4) == get_storage_block_size(spec) == capacity
+    assert spec.num_states == spec.get_num_kernel_states(4) == capacity
     assert not spec.dcp_sharded
     assert spec.uses_slot_mapping
     kernel_block_size = select_common_block_size(4, [AscendIndexerKPoolTailBackend], [spec])
@@ -223,10 +222,12 @@ def test_invalid_pool_geometry_is_rejected(ratio):
 
 
 @pytest.mark.parametrize("storage_block_size", [8, 24, 144, 1536, 2048])
-def test_indexer_metadata_addresses_complete_storage_pages(storage_block_size):
+@pytest.mark.parametrize("split_kernel_pages", [False, True])
+def test_indexer_metadata_addresses_complete_storage_pages(storage_block_size, split_kernel_pages):
     pool_size = 16
     logical_size = storage_block_size * pool_size
-    split = logical_size // 128
+    kernel_block_size = 128 if split_kernel_pages else logical_size
+    split = logical_size // kernel_block_size
     config = SimpleNamespace(
         cache_config=SimpleNamespace(block_size=logical_size),
         scheduler_config=SimpleNamespace(max_num_batched_tokens=4, max_num_seqs=1),
@@ -244,8 +245,10 @@ def test_indexer_metadata_addresses_complete_storage_pages(storage_block_size):
         tokens_per_state=pool_size,
         model_version="glm5_next",
     )
+    # Match the copied spec supplied by AttentionGroup.create_metadata_builders().
+    kernel_spec = spec.copy_with_new_block_size(kernel_block_size)
     builders = [
-        AscendIndexerKPoolMetadataBuilder(spec, ["layer.indexer.k_cache"], config, torch.device("cpu"))
+        AscendIndexerKPoolMetadataBuilder(kernel_spec, ["layer.indexer.k_cache"], config, torch.device("cpu"))
         for _ in range(2)
     ]
     pages = torch.tensor([[7, 2, -1]], dtype=torch.int32)
@@ -267,10 +270,8 @@ def test_indexer_metadata_addresses_complete_storage_pages(storage_block_size):
         block_table_tensor=expanded,
     )
     first, draft = [builder.build(0, common) for builder in builders]
-    # Kernel-granularity blocks: the metadata reports the natural kernel rows
-    # (128 tokens / pool ratio) and passes the common expanded table through
-    # as a view, so both builders observe the same persistent buffer.
-    assert first.block_size == 128 // pool_size
+    # Metadata uses the selected kernel rows and preserves the mapped table.
+    assert first.block_size == kernel_block_size // pool_size
     torch.testing.assert_close(first.block_table, expanded)
     assert first.slot_mapping.shape == (4,)
     assert first.seq_lens.shape == (1,)
@@ -316,7 +317,7 @@ def test_model_cache_layers_publish_source_compatible_specs(dtype, lookahead):
     assert len(indexer.kv_cache) == len(state.kv_cache) == 2
     assert isinstance(indexer_spec, AscendMLAAttentionSpec)
     assert indexer_spec.block_size == 256
-    assert get_storage_block_size(indexer_spec) == 16
+    assert indexer_spec.num_states == 16
     assert get_kv_cache_compression_ratio(indexer_spec) == 16
     assert indexer_spec.model_version == "glm5_next"
     assert indexer_spec.indexes_kv_by_block_stride
@@ -531,15 +532,16 @@ def test_pcp_kpool_metadata_writes_global_token_order(keypool_kernels, capture, 
 
 
 @pytest.mark.parametrize(
-    "rank,query_len,num_requests,graph_padding,short_seq_lens",
+    "rank,query_len,num_requests,graph_padding,short_seq_lens,short_prefill",
     [
-        pytest.param(0, 1, 3, False, False, id="single-token-decode"),
-        pytest.param(1, 1, 1, True, False, id="padded-empty-rank"),
-        pytest.param(1, 6, 3, True, True, id="verification-short-seq-lens"),
+        pytest.param(0, 1, 3, False, False, False, id="single-token-decode"),
+        pytest.param(1, 1, 1, True, False, False, id="padded-empty-rank"),
+        pytest.param(1, 6, 3, True, True, False, id="verification-short-seq-lens"),
+        pytest.param(1, 1, 1, True, True, True, id="cached-one-token-prefill"),
     ],
 )
 def test_pcp_decode_kpool_and_tail_route_global_write_metadata(
-    keypool_kernels, rank, query_len, num_requests, graph_padding, short_seq_lens
+    keypool_kernels, rank, query_len, num_requests, graph_padding, short_seq_lens, short_prefill
 ):
     """Route global write metadata and local queries; cache kernels are mocked."""
     global_reqs = 4 if graph_padding else num_requests
@@ -592,8 +594,9 @@ def test_pcp_decode_kpool_and_tail_route_global_write_metadata(
             query_start_loc_np=global_query.numpy(),
             seq_lens=global_seq_lens[:num_requests] if short_seq_lens else global_seq_lens,
             positions=global_positions,
-            is_prefilling_np=np.zeros(num_requests, dtype=np.bool_),
-            has_prefill=False,
+            is_prefilling_np=np.full(num_requests, short_prefill, dtype=np.bool_),
+            prefill_runs_as_decode_np=np.ones(num_requests, dtype=np.bool_) if short_prefill else None,
+            has_prefill=short_prefill,
         ),
         global_block_tables=(global_tables,),
         global_slot_mappings=global_slots[None],

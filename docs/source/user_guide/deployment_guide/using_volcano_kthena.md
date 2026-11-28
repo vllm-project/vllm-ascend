@@ -41,6 +41,12 @@ This section uses the `deepseek-ai/DeepSeek-V2-Lite` example, but you can swap i
 
 - Kthena installed. Please follow the [Kthena installation guide](https://kthena.volcano.sh/docs/getting-started/installation).
 
+- A namespace for the example resources. The manifests below use `dev`, create it if it does not exist:
+
+    ```bash
+    kubectl create namespace dev
+    ```
+
 ### 2.2 Deploy Prefill–Decode Disaggregated DeepSeek-V2-Lite on Kubernetes
 
 A concrete example is provided in Kthena as [prefill-decode-disaggregation.yaml](https://github.com/volcano-sh/kthena/blob/main/examples/model-serving/prefill-decode-disaggregation.yaml).
@@ -54,7 +60,9 @@ kubectl apply -f https://raw.githubusercontent.com/volcano-sh/kthena/refs/heads/
 or
 
 ```bash
-cat << EOF | kubectl apply -f -
+# The delimiter is quoted so that $(POD_NAME) and $(NAMESPACE) are kept as-is
+# and expanded by Kubernetes instead of being treated as shell command substitution.
+cat << 'EOF' | kubectl apply -f -
 apiVersion: workload.serving.volcano.sh/v1alpha1
 kind: ModelServing
 metadata:
@@ -88,6 +96,17 @@ spec:
                 image: ghcr.io/volcano-sh/runtime:latest
                 ports:
                   - containerPort: 8100
+                env:
+                  # The runtime agent registers itself with --pod <pod-name>.<namespace>,
+                  # so both values have to be injected through the Downward API.
+                  - name: POD_NAME
+                    valueFrom:
+                      fieldRef:
+                        fieldPath: metadata.name
+                  - name: NAMESPACE
+                    valueFrom:
+                      fieldRef:
+                        fieldPath: metadata.namespace
                 args:
                   - --port
                   - "8100"
@@ -123,19 +142,26 @@ spec:
                       fieldRef:
                         fieldPath: metadata.annotations['huawei.com/AscendReal']
                 args:
+                  # Model path inside the container, populated by the init container
                   - "/mnt/cache/deepseek-ai/DeepSeek-V2-Lite/"
+                  # Model name exposed through the OpenAI-compatible API
                   - "--served-model-name"
                   - "deepseek-ai/DeepSeekV2"
+                  # Tensor parallelism, i.e. each layer is sharded across 2 NPUs
                   - "--tensor-parallel-size"
                   - "2"
+                  # Fraction of NPU memory reserved for model weights and KV cache
                   - "--gpu-memory-utilization"
                   - "0.8"
+                  # Maximum context length (prompt + generated tokens)
                   - "--max-model-len"
                   - "8192"
+                  # Maximum number of tokens processed in a single iteration
                   - "--max-num-batched-tokens"
                   - "8192"
                   - "--trust-remote-code"
                   - "--enforce-eager"
+                  # PD disaggregation: the prefill role produces KV cache (kv_producer)
                   - "--kv-transfer-config"
                   - '{"kv_connector":"MooncakeConnectorV1","kv_buffer_device":"npu","kv_role":"kv_producer","kv_parallel_size":1,"kv_port":"20001","kv_rank":0,"kv_connector_extra_config":{"prefill":{"dp_size":2,"tp_size":2},"decode":{"dp_size":2,"tp_size":2}}}'
                 imagePullPolicy: Always
@@ -225,20 +251,28 @@ spec:
                       fieldRef:
                         fieldPath: metadata.annotations['huawei.com/AscendReal']
                 args:
+                  # Model path inside the container, populated by the init container
                   - "/mnt/cache/deepseek-ai/DeepSeek-V2-Lite/"
+                  # Model name exposed through the OpenAI-compatible API
                   - "--served-model-name"
                   - "deepseek-ai/DeepSeekV2"
+                  # Tensor parallelism, i.e. each layer is sharded across 2 NPUs
                   - "--tensor-parallel-size"
                   - "2"
+                  # Fraction of NPU memory reserved for model weights and KV cache
                   - "--gpu-memory-utilization"
                   - "0.8"
+                  # Maximum context length (prompt + generated tokens)
                   - "--max-model-len"
                   - "8192"
+                  # Maximum number of tokens processed in a single iteration
                   - "--max-num-batched-tokens"
                   - "16384"
                   - "--trust-remote-code"
+                  # Disable prefix caching so that most memory is left for the received KV cache
                   - "--no-enable-prefix-caching"
                   - "--enforce-eager"
+                  # PD disaggregation: the decode role consumes KV cache (kv_consumer)
                   - "--kv-transfer-config"
                   - '{"kv_connector":"MooncakeConnectorV1","kv_buffer_device":"npu","kv_role":"kv_consumer","kv_parallel_size":1,"kv_port":"20002","kv_rank":1,"kv_connector_extra_config":{"prefill":{"dp_size":2,"tp_size":2},"decode":{"dp_size":2,"tp_size":2}}}'
                 imagePullPolicy: Always
@@ -290,6 +324,32 @@ spec:
 EOF
 ```
 
+The key vLLM-Ascend launch arguments are summarized below.
+
+| Argument | Value in this example | Description |
+| --- | --- | --- |
+| `--served-model-name` | `deepseek-ai/DeepSeekV2` | Model name exposed by the OpenAI-compatible API. It must match `spec.model` of `ModelServer` and `spec.modelName` of `ModelRoute`. |
+| `--tensor-parallel-size` | `2` | Tensor parallelism degree, i.e. every layer is sharded across 2 NPUs. It must match `tp_size` in `kv_connector_extra_config`. |
+| `--gpu-memory-utilization` | `0.8` | Fraction of NPU memory reserved for model weights and KV cache. |
+| `--max-model-len` | `8192` | Maximum context length, counting both input and generated tokens. |
+| `--max-num-batched-tokens` | `8192` (prefill) / `16384` (decode) | Upper bound of tokens processed in one iteration. A larger value improves throughput but consumes more memory. |
+| `--enforce-eager` | - | Disables graph capture, which reduces memory usage at the cost of some performance. |
+| `--trust-remote-code` | - | Allows loading the custom modeling code shipped with the model. |
+| `--no-enable-prefix-caching` | decode only | Disables prefix caching on the decode side so that more memory is available for the received KV cache. |
+| `--kv-transfer-config` | JSON string | KV cache transfer configuration, see the table below. |
+
+The fields of `--kv-transfer-config` are:
+
+| Field | Value in this example | Description |
+| --- | --- | --- |
+| `kv_connector` | `MooncakeConnectorV1` | Connector implementation provided by vLLM-Ascend. In Kthena the `mooncake` and `nixl` router types share the same implementation, so either works; this example uses `mooncake` to mirror the name configured here. |
+| `kv_buffer_device` | `npu` | Device on which the KV cache buffers are allocated (`npu` for Ascend). |
+| `kv_role` | `kv_producer` (prefill) / `kv_consumer` (decode) | Role in a PD pair: the prefill instance produces and sends KV cache, while the decode instance consumes it. |
+| `kv_rank` | `0` (prefill) / `1` (decode) | Rank identifying each instance of the PD group, so that both sides can be distinguished. |
+| `kv_parallel_size` | `1` | Number of KV-transfer instances started per role; `1` because each role runs a single instance here. |
+| `kv_port` | `20001` (prefill) / `20002` (decode) | Port used for the KV cache transfer handshake. It must be reachable between the prefill and decode Pods and be unique for each role. |
+| `kv_connector_extra_config` | `prefill`/`decode` with `dp_size` and `tp_size` | Topology of both sides known to the connector. It must match the actual data-parallel and tensor-parallel settings of the deployment. |
+
 You should see Pods such as:
 
 - `deepseek-v2-lite-0-prefill-0-0`
@@ -323,7 +383,10 @@ metadata:
   namespace: dev
 spec:
   kvConnector:
-    type: nixl
+    # In Kthena the `mooncake` and `nixl` router types share the same
+    # implementation; `mooncake` is used here to mirror the `MooncakeConnectorV1`
+    # configured on the vLLM-Ascend side above.
+    type: mooncake
   workloadSelector:
     matchLabels:
       modelserving.volcano.sh/name: deepseek-v2-lite

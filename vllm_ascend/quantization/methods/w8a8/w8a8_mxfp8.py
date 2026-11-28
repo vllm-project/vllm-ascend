@@ -26,7 +26,6 @@ from vllm.model_executor.layers.fused_moe.activation import MoEActivation
 from vllm.model_executor.layers.linear import RowParallelLinear
 from vllm.utils.math_utils import cdiv
 
-from vllm_ascend.ascend_config import get_ascend_config
 from vllm_ascend.ascend_forward_context import _EXTRA_CTX, use_cann_megamoe
 from vllm_ascend.device.hardware_profile import WeightFormat
 from vllm_ascend.ops.fused_moe.dataclass.fused_experts import MoEWeights, build_fused_experts_input
@@ -36,6 +35,7 @@ from vllm_ascend.ops.fused_moe.routed_experts import AscendRoutedExperts  # noqa
 from vllm_ascend.quantization.nz import mxfp8_nz
 from vllm_ascend.quantization.utils import DynamicMXQuantScaleAlg, get_dynamic_mx_quant_scale_alg
 from vllm_ascend.utils import (
+    ASCEND_QUANTIZATION_METHOD,
     FP8_METHOD,
     _should_trans_nz,
     dispose_tensor,
@@ -290,7 +290,9 @@ class AscendW8A8MXFP8DynamicLinearMethod(AscendLinearScheme):
         if not hasattr(layer, "_mxfp8_weight_buf"):
             # First call: allocate the persistent transformed buffers.
             layer._mxfp8_weight_buf = transposed_weight
-            if not getattr(layer, "_fused_preprocess_managed", False):
+            fused_preprocess_managed = getattr(layer, "_fused_preprocess_managed", False)
+            skip_weight_nz_conversion = getattr(layer, "skip_weight_nz_conversion", False)
+            if not fused_preprocess_managed and not skip_weight_nz_conversion:
                 layer._mxfp8_weight_buf = maybe_trans_nz(layer._mxfp8_weight_buf, **mxfp8_nz().cast_kwargs())
             layer._mxfp8_scale_buf = target_scale.contiguous()
         else:
@@ -375,9 +377,7 @@ class AscendW8A8MXFP8DynamicFusedMoEMethod(AscendMoEScheme):
         vllm_config = get_current_vllm_config()
         quant_description = getattr(vllm_config.quant_config, "quant_description", None) or {}
         self.group_size = quant_description.get("group_size", 32)
-        ascend_config = get_ascend_config()
-        self.dynamic_eplb = False if vllm_config.use_v2_model_runner else ascend_config.eplb_config.dynamic_eplb
-        self.use_expert_weight_list = self.dynamic_eplb or vllm_config.parallel_config.enable_eplb
+        self.use_expert_weight_list = vllm_config.parallel_config.enable_eplb is True
         self._dynamic_mx_quant_scale_alg = get_dynamic_mx_quant_scale_alg(vllm_config)
 
     def supports_fused_activation(self, activation: MoEActivation) -> bool:
@@ -435,7 +435,6 @@ class AscendW8A8MXFP8DynamicFusedMoEMethod(AscendMoEScheme):
                 topk_ids=topk_ids,
                 layer=layer,
                 quant_type=self.quant_type,
-                dynamic_eplb=self.dynamic_eplb,
                 expert_map=layer.ascend_expert_map,
                 global_redundant_expert_num=layer.global_redundant_expert_num,
                 mc2_mask=layer.ascend_mc2_mask,
@@ -829,13 +828,16 @@ class AscendW8A8MXFP8DynamicFusedMoEMethod(AscendMoEScheme):
         )[0]
 
 
+@register_scheme("W8A8_MXFP8", "ds_linear")
 @register_scheme(FP8_METHOD, "ds_linear")
 class AscendW8A8MXFP8DSDynamicLinearMethod(AscendW8A8MXFP8DynamicLinearMethod):
-    """Linear method for DS original W8A8 mxfp(blocksize: 128 * 128) quantization.
+    """DeepSeek V4 MXFP8 linear method for official FP8 and ModelSlim checkpoints.
 
-    Checkpoint block scales are expanded to the per-output, per-32 layout
-    consumed by ``npu_quant_matmul``. Both the original 128x128 export and
-    newer 32x32 DeepSeek V4.1 exports are supported.
+    Official FP8 checkpoints store one float block scale per ``weight_block_size``
+    tile. Those scales are expanded to the per-output, per-32 layout consumed by
+    ``npu_quant_matmul``. ModelSlim ``W8A8_MXFP8`` checkpoints already store uint8
+    per-group scales, so they keep the shared MXFP8 parameter layout. ``wo_a`` is
+    additionally stored as grouped ND for DSA.
     """
 
     model_dtype = None
@@ -849,15 +851,19 @@ class AscendW8A8MXFP8DSDynamicLinearMethod(AscendW8A8MXFP8DynamicLinearMethod):
     )
     supports_weight_switch = True
 
-    def __init__(self, weight_block_size):
+    def __init__(self, weight_block_size: list[int] | None = None):
         super().__init__()
-        self.block_size = weight_block_size[0]
-        hf_config = get_current_vllm_config().model_config.hf_config
-        self.o_lora_rank = hf_config.o_lora_rank
+        vllm_config = get_current_vllm_config()
+        quant_config = getattr(vllm_config, "quant_config", None)
+        self.quant_method = quant_config.get_name() if quant_config is not None else None
+        self.block_size = self.group_size if weight_block_size is None else weight_block_size[0]
+        self.o_lora_rank = vllm_config.model_config.hf_config.o_lora_rank
 
     def get_pergroup_param(
         self, input_size: int, output_size: int, params_dtype: torch.dtype, layer_type: str | None = None
     ) -> dict[str, Any]:
+        if self.quant_method == ASCEND_QUANTIZATION_METHOD:
+            return super().get_pergroup_param(input_size, output_size, params_dtype, layer_type)
         params_dict = {}
         params_dict["weight_scale"] = torch.empty(
             output_size // self.block_size, input_size // self.block_size, dtype=torch.float32
@@ -867,6 +873,9 @@ class AscendW8A8MXFP8DSDynamicLinearMethod(AscendW8A8MXFP8DynamicLinearMethod):
         return params_dict
 
     def process_weights_after_loading(self, layer):
+        if self.quant_method == ASCEND_QUANTIZATION_METHOD:
+            self._process_modelslim_weights(layer)
+            return
         if layer.weight_scale.data.dtype == torch.float8_e8m0fnu:
             layer.weight_scale.data = layer.weight_scale.data.view(torch.uint8)
         else:
@@ -904,3 +913,27 @@ class AscendW8A8MXFP8DSDynamicLinearMethod(AscendW8A8MXFP8DynamicLinearMethod):
             # dimension, which requires contiguous HCCL inputs.
             layer.weight.data = layer.weight.data.contiguous()
             layer.weight_scale.data = layer.weight_scale.data.contiguous()
+
+    def _process_modelslim_weights(self, layer):
+        wo_a_3d = getattr(layer, "prefix", "").endswith("wo_a") and getattr(layer, "o_lora_rank", 0) > 0
+        if not wo_a_3d:
+            super().process_weights_after_loading(layer)
+            return
+        if getattr(layer, "_mxfp8_transformed", False):
+            return
+
+        n_dim, k_dim = layer.weight_scale.data.shape
+        if layer.weight_scale.data.shape[-1] % 2 != 0:
+            reshaped_scale = F.pad(layer.weight_scale.data, (0, 1), mode="constant", value=0)
+            reshaped_scale = reshaped_scale.reshape(n_dim, k_dim // 2 + 1, 2)
+        else:
+            reshaped_scale = layer.weight_scale.data.reshape(n_dim, k_dim // 2, 2)
+
+        n_local_groups = layer.weight.data.shape[0] // layer.o_lora_rank
+        layer.weight.data = (
+            layer.weight.data.reshape(n_local_groups, layer.o_lora_rank, -1).transpose(1, 2).contiguous()
+        )
+        layer.weight_scale.data = (
+            reshaped_scale.reshape(n_local_groups, layer.o_lora_rank, -1, 2).transpose(1, 2).contiguous()
+        )
+        layer._mxfp8_transformed = True

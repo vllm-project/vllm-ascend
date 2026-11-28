@@ -15,8 +15,10 @@ from tests.ut.model_executor.warmup.helpers import (
     make_mock_vllm_config,
     make_registry,
 )
+from vllm_ascend.device.hardware import AscendDeviceType
+from vllm_ascend.device.hardware_profile import get_hardware_profile
 from vllm_ascend.ops.triton import rms_norm
-from vllm_ascend.ops.triton.dcp import dcp_warmup
+from vllm_ascend.ops.triton.dcp import dcp_a2a, dcp_warmup
 from vllm_ascend.ops.triton.dcp.dcp_jit import DcpJitKernel
 
 # The package __init__ re-exports the function of the same name, so resolve
@@ -212,6 +214,55 @@ def _dcp_warmup_keys(registry):
 
 
 @pytest.mark.parametrize(
+    "device_type,dtype,route,expected_mode",
+    [
+        (AscendDeviceType.A3, torch.bfloat16, "head_scatter", 0),
+        (AscendDeviceType.A5, torch.bfloat16, "head_scatter", 1),
+        (AscendDeviceType.A5, torch.float16, "", None),
+        (AscendDeviceType.A3, torch.bfloat16, "rank_tiled_static", None),
+        (AscendDeviceType.A5, torch.bfloat16, "rank_tiled", None),
+    ],
+)
+@pytest.mark.parametrize("tokens", [1, 33])
+def test_runtime_combine_matches_registered_warmup(device_type, dtype, route, expected_mode, tokens, monkeypatch):
+    monkeypatch.setattr(dcp_a2a, "get_current_hardware_profile", lambda: get_hardware_profile(device_type))
+    monkeypatch.setattr(dcp_a2a, "get_ascend_device_type", lambda: device_type)
+    monkeypatch.setattr(dcp_a2a, "is_950", lambda: device_type == AscendDeviceType.A5)
+    monkeypatch.setattr(dcp_a2a, "_A3_STATIC_SIGNATURES", frozenset())
+    monkeypatch.setattr(dcp_a2a, "_UNWARMED_LOGGED", set())
+    heads, dim, scatter_size, pcp_size = 12, 512, 4, 2
+    ranks = scatter_size * pcp_size
+    registry = _register_dcp_warmup(
+        dtype=dtype,
+        local_heads=heads,
+        head_dim=dim,
+        scatter_size=scatter_size,
+        pcp_size=pcp_size,
+        max_tokens=33,
+        from_stats=False,
+        mla=True,
+        decode_buckets=[tokens],
+    )
+    recv = dcp_warmup._Tensor(dtype, shape=(ranks, heads, tokens, dim + 4))
+    output = dcp_warmup._Tensor(dtype, shape=(tokens, heads, dim))
+    local, lse = (
+        dcp_warmup._output_and_lse(dtype, tokens, heads, dim, "token_major")
+        if route.startswith("rank_tiled")
+        else (None, None)
+    )
+    launch = MagicMock()
+    dcp_a2a._launch_fused_dcp_lse_combine(recv, output, dim, 1, False, local, lse, 24, launch)
+    launch.assert_called_once()
+    kernel, grid, *args = launch.call_args.args
+    suffix = f"_{route}" if route else ""
+    assert kernel is getattr(dcp_a2a, f"_fused_dcp_lse_combine{suffix}_kernel")
+    assert launch.call_args.kwargs.get("MODE") == expected_mode
+    registered = _dcp_warmup_keys(registry)
+    owner = next(owner for owner in registered if owner.kernel is kernel)
+    assert owner.key_from_launch(*args, **launch.call_args.kwargs) in registered[owner]
+
+
+@pytest.mark.parametrize(
     "dtype,local_heads,head_dim,scatter_size,pcp_size,from_stats,mla,max_tokens",
     [
         (torch.bfloat16, 8, 512, 8, 1, True, False, 4097),
@@ -282,7 +333,12 @@ def test_registration_is_scoped_deduplicated_and_allocates_nothing():
         with registry.activate():
             dcp_warmup.register_dcp_warmup(**kwargs)
             dcp_warmup.register_dcp_warmup(**kwargs)
-    assert len(registry) == 8
+    expected = {owner.kernel for owner in dcp_warmup._DCP_KERNELS} - {
+        dcp_a2a._fused_dcp_lse_combine_kernel,
+        dcp_a2a._fused_dcp_lse_combine_rank_tiled_kernel,
+        dcp_a2a._fused_dcp_lse_combine_rank_tiled_static_kernel,
+    }
+    assert {owner.kernel for owner in registry._registrations} == expected
     assert all(len(registrations) == 1 for registrations in registry._registrations.values())
     for original, keys in _dcp_warmup_keys(registry).items():
         kernel = MagicMock()
@@ -322,7 +378,8 @@ def test_merge_rank_stride_is_runtime_and_offset_alignment_is_covered():
     assert "lse_stride_rank" in do_not_specialize
 
 
-def test_dcp_target_and_draft_owners_register_before_compilation():
+@pytest.mark.parametrize("a3", [False, True])
+def test_dcp_target_and_draft_owners_register_before_compilation(a3):
     from vllm_ascend.attention.context_parallel.mla_cp import AscendMlaDCPImpl
     from vllm_ascend.attention.context_parallel.sfa_cp import AscendSFADCPImpl
 
@@ -337,6 +394,7 @@ def test_dcp_target_and_draft_owners_register_before_compilation():
         impl.local_num_heads = impl.num_heads = 12
         impl.kv_lora_rank = 512
     target.enable_sparse_sfa_turboquant = False
+    draft.use_a3_mla_sink = a3
     worker.vllm_config.compilation_config.static_forward_context = {
         "target": SimpleNamespace(impl=target),
         "same_target_layout": SimpleNamespace(impl=target),
@@ -363,3 +421,4 @@ def test_dcp_target_and_draft_owners_register_before_compilation():
         (torch.float16, True, False),
     ]
     assert all(case["scatter_size"] == 4 and case["pcp_size"] == 2 for case in registered)
+    assert [case["masked_output"] for case in registered] == [False, a3]
