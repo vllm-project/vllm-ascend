@@ -108,7 +108,11 @@ class AscendDSparkSpeculator(TargetEmbedCleanupMixin, LmheadTPDraftSamplingMixin
             context_kv_only=getattr(self, "context_kv_only", False),
         )
         if hasattr(model, "post_process"):
-            model.post_process(self.vllm_config)
+            model.post_process(
+                self.vllm_config,
+                target_embed_owner=self._target_embed_owner_for_alignment(target_model),
+                target_pp_group=self._target_pp_group,
+            )
         if hasattr(model, "configure_target_aux_hidden_capture"):
             model.configure_target_aux_hidden_capture(target_model)
 

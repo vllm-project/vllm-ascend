@@ -234,8 +234,14 @@ class Glm5DSparkForCausalLM(AscendQwen3DSparkForCausalLM):
         # it does not make this checkpoint's full-attention layers causal.
         return [False] * len(self.model.layers)
 
-    def post_process(self, vllm_config: VllmConfig) -> None:
-        align_draft_weights(self, self.model.context_proj, vllm_config)
+    def post_process(self, vllm_config: VllmConfig, *, target_embed_owner=None, target_pp_group=None) -> None:
+        align_draft_weights(
+            self,
+            self.model.context_proj,
+            vllm_config,
+            target_embed_owner=target_embed_owner,
+            target_pp_group=target_pp_group,
+        )
 
     def load_weights(self, weights: Iterable[tuple[str, torch.Tensor]]) -> set[str]:
         normalized = []
