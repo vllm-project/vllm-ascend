@@ -21,7 +21,6 @@ from vllm_ascend.core.kv_cache_interface import (
     AscendMLAAttentionSpec,
     AscendSlidingWindowMLASpec,
     declared_kwarg,
-    may_override_num_blocks,
 )
 from vllm_ascend.device.hardware_profile import (
     HardwareCapability,

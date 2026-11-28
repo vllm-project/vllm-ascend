@@ -103,7 +103,9 @@ def test_scheduler_conversion_retains_resident_draft_in_shared_block_group():
     if vllm_version_is("0.34.0"):
         with pytest.MonkeyPatch.context() as monkeypatch:
             monkeypatch.setattr(
-                kv_cache_config_builder.DefaultKVCacheConfigBuilder, "get_kv_cache_config_from_groups", lambda *a, **k: config
+                kv_cache_config_builder.DefaultKVCacheConfigBuilder,
+                "get_kv_cache_config_from_groups",
+                lambda *a, **k: config,
             )
             monkeypatch.setattr(kv_cache_config_builder, "is_deepseek_v41_cache", lambda *a, **k: False)
             monkeypatch.setattr(kv_cache_config_builder, "_get_glm5_next_cache_layout", lambda *a, **k: None)

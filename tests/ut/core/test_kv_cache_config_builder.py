@@ -23,7 +23,7 @@ from vllm.config import KVTransferConfig
 from vllm.v1.core import kv_cache_config_builder as upstream_builder_module
 from vllm.v1.core import kv_cache_planning
 from vllm.v1.core.kv_cache_planning import DefaultKVCacheConfigBuilder
-from vllm.v1.kv_cache_interface import MambaSpec
+from vllm.v1.kv_cache_interface import MambaSpec, MLAAttentionSpec
 from vllm.v1.kv_cache_layout import KVCacheLayout
 
 from tests.ut.kvpp_utils import make_layer_cache_configs
@@ -246,9 +246,15 @@ def test_core_applies_capacity_and_converges_worker_layouts(monkeypatch, overrid
     spec = MLAAttentionSpec(
         block_size=16, num_kv_heads=1, head_size=16, dtype=torch.bfloat16, model_version="deepseek_v4"
     )
-    uniform = UniformTypeKVCacheSpecs.from_specs({"target": spec})
-    groups = [KVCacheGroupSpec(["target"], uniform)]
-    specs = {"target": uniform}
+    if vllm_version_is("0.34.0"):
+        uniform = UniformTypeKVCacheSpecs.from_specs({"target": spec})
+        groups = [KVCacheGroupSpec(["target"], uniform)]
+        specs = {"target": uniform}
+    else:
+        from vllm.v1.kv_cache_interface import KVCacheGroup
+
+        specs = make_layer_cache_configs({"target": spec})
+        groups = [KVCacheGroup.from_layers(specs)]
     monkeypatch.setattr(upstream_builder_module, "get_kv_cache_config_builder", lambda _: builder)
     if hasattr(kv_cache_planning, "get_kv_cache_config_builder"):
         monkeypatch.setattr(kv_cache_planning, "get_kv_cache_config_builder", lambda _: builder)

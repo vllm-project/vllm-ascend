@@ -20,7 +20,6 @@ from vllm_ascend.core.kv_cache_compat import (
     KVCacheGroupSpec,
     UniformTypeKVCacheSpecs,
 )
-from vllm_ascend.core.kv_cache_interface import may_override_num_blocks
 
 from . import SLOT_BYTES, TURBOQUANT_CACHE_DTYPE
 

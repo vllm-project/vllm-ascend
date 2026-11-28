@@ -1281,9 +1281,7 @@ def test_deepseek_v4_main_rank_replan_preserves_num_blocks() -> None:
     if vllm_version_is("0.34.0"):
         ascend_bytes_per_block = AscendKVCacheConfigBuilder()._get_pool_bytes_per_block(vllm_config, kv_cache_groups)
         upstream_bytes_per_block = planning._pool_bytes_per_block(vllm_config, kv_cache_groups)
-        replanned_config = get_ascend_kv_cache_config_from_groups(
-            vllm_config, kv_cache_groups, expected_num_blocks
-        )
+        replanned_config = get_ascend_kv_cache_config_from_groups(vllm_config, kv_cache_groups, expected_num_blocks)
     else:
         builder = AscendKVCacheConfigBuilder()
         native_groups = _native_groups_from_layouts(kv_cache_groups)

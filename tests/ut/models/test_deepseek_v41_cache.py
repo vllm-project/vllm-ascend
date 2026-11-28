@@ -44,7 +44,7 @@ from vllm_ascend.attention.dsa_v41 import (
     scatter_cache_sk,
 )
 from vllm_ascend.core.kv_cache_compat import CircularBufferSpec, get_group_layer_layouts
-from vllm_ascend.core.kv_cache_config_builder import AscendKVCacheConfigBuilder, get_ascend_kv_cache_config_from_groups
+from vllm_ascend.core.kv_cache_config_builder import AscendKVCacheConfigBuilder
 from vllm_ascend.core.kv_cache_interface import (
     AscendMLAAttentionSpec,
     AscendSlidingWindowMLASpec,
