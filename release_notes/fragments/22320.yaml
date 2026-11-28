@@ -1,0 +1,4 @@
+pr: 22320
+entries:
+  - category: bugfix
+    text: Preserve intermediate BF16 rounding in Qwen4Exp shared-expert SiLU and PLE gate and residual operations. The PLE BF16 path uses additional kernel launches and temporary buffers.
