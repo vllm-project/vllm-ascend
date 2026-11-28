@@ -17,7 +17,7 @@ from __future__ import annotations
 
 import torch
 import torch.nn.functional as F
-from vllm.model_executor.layers.quantization.base_config import QuantizationConfig
+from vllm.model_executor.layers.quantization.base_config import QuantizationConfig, QuantizeMethodBase
 from vllm.model_executor.layers.vocab_parallel_embedding import (
     DEFAULT_VOCAB_PADDING_SIZE,
     UnquantizedEmbeddingMethod,
@@ -75,6 +75,7 @@ class AscendParallelLMHead310(AscendParallelLMHead):
         prefix: str = "",
         *,
         disable_tp: bool = False,
+        quant_method: QuantizeMethodBase | None = None,
     ):
         super().__init__(
             num_embeddings,
@@ -86,7 +87,8 @@ class AscendParallelLMHead310(AscendParallelLMHead):
             quant_config,
             prefix,
             disable_tp=disable_tp,  # type: ignore[call-arg]
+            quant_method=quant_method,
         )
 
-        if quant_config is None:
+        if quant_config is None and quant_method is None:
             self.quant_method = AscendUnquantizedEmbeddingMethod310()
