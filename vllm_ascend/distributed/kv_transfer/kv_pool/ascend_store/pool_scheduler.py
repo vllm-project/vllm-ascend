@@ -3,7 +3,6 @@ from abc import ABC, abstractmethod
 from typing import Any
 
 from vllm.config import VllmConfig
-from vllm.distributed.kv_transfer.kv_connector.v1.base import KVConnectorMetadata
 from vllm.logger import logger
 from vllm.utils.math_utils import cdiv
 from vllm.v1.attention.backends.utils import NULL_BLOCK_ID
@@ -647,7 +646,7 @@ class BaseKVPoolScheduler(ABC):
             hash_block_size=self.hash_block_size,
         )
 
-    def build_connector_meta(self, scheduler_output: SchedulerOutput) -> KVConnectorMetadata:
+    def build_connector_meta(self, scheduler_output: SchedulerOutput) -> AscendConnectorMetadata:
         """Attach the connector metadata to the request object.
 
         This function should NOT modify other fields in the scheduler_output
