@@ -29,7 +29,7 @@ Omitting `layerwise_trace_path` disables collection and the observer thread.
 ## Fields and stages
 
 Each task has a monotonically increasing ID within its worker trace. Enqueue
-records include request IDs, layer, groups, save owner, and data path. Timestamps
+records include request IDs, layer, groups, save owners, and data path. Timestamps
 use `monotonic_ns`; `clock_anchor` relates them to wall-clock time for correlation
 with separately collected NPU traces.
 
@@ -82,9 +82,11 @@ sampling interval. Sampling overhead must be measured with profiling on/off.
 
 ## Analysis
 
+Select the worker snapshot to analyze, including its session ID in the filename:
+
 ```bash
 python tools/kv_pool/analyze_recv_trace.py \
-  /data/traces/recv.tp0.pid123.json --output /data/traces/summary.json
+  /data/traces/recv.tp0.pid123.6a47e8c5b4824c13b8c3195b9c8b35ae.json --output /data/traces/summary.json
 ```
 
 The report includes per-task stage p50/p95/p99, positive HOL observations, affected head
