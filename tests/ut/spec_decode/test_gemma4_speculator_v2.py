@@ -25,7 +25,6 @@ from vllm.v1.worker.gpu.spec_decode.target_dependent_ar.speculator import (
 )
 
 from vllm_ascend.attention.attention_v1 import AscendAttentionState
-from vllm_ascend.utils import vllm_version_is
 from vllm_ascend.worker.v2 import spec_decode as v2_spec_decode
 from vllm_ascend.worker.v2.spec_decode.gemma4.speculator import (
     AscendGemma4Speculator,
@@ -50,8 +49,6 @@ def _speculative_config():
     config.use_dspark.return_value = False
     config.use_dflash.return_value = False
     config.use_eagle.return_value = True
-    if not vllm_version_is("0.34.0"):
-        config.speculator_config = object.__new__(v2_spec_decode.Gemma4MTPSpeculatorConfig)
     return config
 
 

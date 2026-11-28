@@ -298,7 +298,7 @@ def test_empty_align_batch_skips_gather_on_build_and_update(builder_cls, num_spe
     )
     # The upstream helper accepts empty tensors; V2 should avoid launching its
     # arithmetic/gather operations when the output is already known to be empty.
-    expected_table = ascend_gdn_attn_builder.mamba_get_block_table_tensor(table, empty, owner.kv_cache_spec, "align")
+    expected_table = owner._get_mamba_block_table(table, empty, "align")
     assert expected_table.shape == (0, num_spec + 1)
     with patch.object(
         ascend_gdn_attn_builder, "mamba_get_block_table_tensor", side_effect=AssertionError("Skip empty gather")
@@ -343,8 +343,8 @@ def test_batched_spec_group_reuses_view_with_current_table(mamba_cache_mode):
         if mamba_cache_mode == "align":
             # vLLM #58737 asserts block_table rows match seq_lens rows; the
             # unpadded batch keeps padded rows, so pass only real request rows.
-            other.mamba_aligned_state_indices = ascend_gdn_attn_builder.mamba_get_block_table_tensor(
-                table[: source.gdn_seq_lens.shape[0]], source.gdn_seq_lens, other.kv_cache_spec, "align"
+            other.mamba_aligned_state_indices = other._get_mamba_block_table(
+                table[: source.gdn_seq_lens.shape[0]], source.gdn_seq_lens, "align"
             )
         expected = reference.update_block_table(source, table)
         other.spec_state_indices_tensor.fill_(-99)
@@ -1346,7 +1346,7 @@ def test_checkpoint_offsets_follow_each_groups_reserved_page(monkeypatch):
     config.compilation_config.static_forward_context = {
         name: SimpleNamespace(_ascend_internal_checkpoint_enabled=True) for name in ("g0", "g1")
     }
-    spec = MambaSpec(
+    spec = LegacyMambaSpec(
         block_size=128,
         shapes=((1,), (1,)),
         dtypes=(torch.float32,),
