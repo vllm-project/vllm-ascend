@@ -26,6 +26,8 @@ vLLM Ascend Plugin
 ---
 *Latest News* 🔥
 
+- [2026/11] We released the new release candidate [v0.34.0rc1](https://github.com/vllm-project/vllm-ascend/releases/tag/v0.34.0rc1)! Please follow the [official guide](https://docs.vllm.ai/projects/ascend/en/v0.34.0rc1/) to start using vLLM Ascend Plugin on Ascend.
+- [2026/11] We released the new release candidate [v0.32.0rc1](https://github.com/vllm-project/vllm-ascend/releases/tag/v0.32.0rc1)! Please follow the [official guide](https://docs.vllm.ai/projects/ascend/en/v0.32.0rc1/) to start using vLLM Ascend Plugin on Ascend.
 - [2026/10] We released the new official version [v0.30.0](https://github.com/vllm-project/vllm-ascend/releases/tag/v0.30.0)! Please follow the [official guide](https://docs.vllm.ai/projects/ascend/en/v0.30.0/) to start using vLLM Ascend Plugin on Ascend.
 - [2026/08] We released the new official version [v0.23.0](https://github.com/vllm-project/vllm-ascend/releases/tag/v0.23.0)! Please follow the [official guide](https://docs.vllm.ai/projects/ascend/en/v0.23.0/) to start using vLLM Ascend Plugin on Ascend.
 - [2026/05] We released the new official version [v0.18.0](https://github.com/vllm-project/vllm-ascend/releases/tag/v0.18.0)! Please follow the [official guide](https://docs.vllm.ai/projects/ascend/en/v0.18.0/) to start using vLLM Ascend Plugin on Ascend.
@@ -84,6 +86,8 @@ Please use the following recommended versions to get started quickly:
 
 | Version    | Release type | Doc                                  |
 |------------|--------------|--------------------------------------|
+| v0.34.0rc1 | Latest release candidate | See [QuickStart](https://docs.vllm.ai/projects/ascend/en/v0.34.0rc1/getting_started/quick_start.html) and [Installation](https://docs.vllm.ai/projects/ascend/en/v0.34.0rc1/getting_started/installation.html) for more details |
+| v0.32.0rc1 | Release candidate | See [QuickStart](https://docs.vllm.ai/projects/ascend/en/v0.32.0rc1/getting_started/quick_start.html) and [Installation](https://docs.vllm.ai/projects/ascend/en/v0.32.0rc1/getting_started/installation.html) for more details |
 | v0.30.0 | Latest stable version | See [QuickStart](https://docs.vllm.ai/projects/ascend/en/v0.30.0/quick_start.html) and [Installation](https://docs.vllm.ai/projects/ascend/en/v0.30.0/installation.html) for more details |
 | v0.23.0 | Stable version | See [QuickStart](https://docs.vllm.ai/projects/ascend/en/v0.23.0/quick_start.html) and [Installation](https://docs.vllm.ai/projects/ascend/en/v0.23.0/installation.html) for more details |
 
@@ -99,10 +103,12 @@ Below are the maintained branches:
 | Branch           | Status       | Note                                 |
 |------------------|--------------|--------------------------------------|
 | main             | Maintained   | CI commitment for vLLM main branch and vLLM v0.34.0 tag |
-| releases/v0.13.0 | Maintained   | Only bug fixes are allowed, and no new release tags anymore. |
-| releases/v0.18.0 | Maintained   | CI commitment for vLLM v0.18.0 version |
-| releases/v0.23.0 | Maintained   | CI commitment for vLLM v0.23.0 version |
+| releases/v0.34.0rc | Maintained | Release candidate branch for vLLM v0.34.0. |
+| releases/v0.32.0rc | Maintained | Release candidate branch for vLLM v0.32.0. |
 | releases/v0.30.0 | Maintained   | CI commitment for vLLM v0.30.0 version |
+| releases/v0.23.0 | Maintained   | CI commitment for vLLM v0.23.0 version |
+| releases/v0.18.0 | Maintained   | CI commitment for vLLM v0.18.0 version |
+| releases/v0.13.0 | Maintained   | Only bug fixes are allowed, and no new release tags anymore. |
 | rfc/<feature-name> | Maintained   | [Feature branches](https://docs.vllm.ai/projects/ascend/en/latest/community/versioning_policy.html#feature-branches) for collaboration |
 
 Please refer to [Versioning policy](https://docs.vllm.ai/projects/ascend/en/latest/community/versioning_policy.html) for more details.
