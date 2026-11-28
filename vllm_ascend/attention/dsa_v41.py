@@ -277,13 +277,14 @@ class DeepseekV41LayerMetadata:
 
 @dataclass
 class DeepseekV41PreparedIndexer:
-    """Query-local projections and the event guarding auxiliary quantization."""
+    """Query-local projections and events guarding auxiliary stream work."""
 
     query: torch.Tensor | None
     weights: torch.Tensor
     quantized_query: torch.Tensor | None = None
     query_scale: torch.Tensor | None = None
     quantize_done: Any = None
+    weights_done: Any = None
 
 
 def compressed_slot_mapping(slot_mapping: torch.Tensor, ratio: int) -> torch.Tensor:
@@ -469,7 +470,15 @@ class AscendDSAV41Impl:
         if q is not None:
             self._apply_rotary(attn, q, cos, sin)
             # Consume local Query RoPE before compression can reuse source tables.
-            prepared_indexer = self._prepare_indexer_inputs(attn, hidden_states, qr, cos, sin)
+            # PCP has a separate compression schedule; keep its existing wait.
+            defer_weights_sync = (
+                self.role.is_kv_source
+                and self.role.compress_ratio == 2
+                and local_metadata.swa.global_metadata is None
+            )
+            prepared_indexer = self._prepare_indexer_inputs(
+                attn, hidden_states, qr, cos, sin, defer_weights_sync=defer_weights_sync
+            )
         self._prepare_compressed_cache(attn, hidden_states, cos, sin, local_metadata, global_metadata, prepared_indexer)
         return q.to(hidden_states.dtype) if q is not None else None, prepared_indexer
 
@@ -491,7 +500,7 @@ class AscendDSAV41Impl:
         else:
             self._quantize_indexer_query(attn, prepared_indexer, local_metadata)
 
-    def _prepare_indexer_inputs(self, attn, hidden_states, qr, cos, sin):
+    def _prepare_indexer_inputs(self, attn, hidden_states, qr, cos, sin, *, defer_weights_sync=False):
         if not self.role.has_long_context or not self.role.is_index_source:
             return None
         indexer = attn.indexer
@@ -515,8 +524,10 @@ class AscendDSAV41Impl:
             weights = indexer.project_weights(hidden_states)
             weights_done = aux_stream.record_event()
         indexer.apply_query_rope(query, cos, sin)
-        main_stream.wait_event(weights_done)
-        return DeepseekV41PreparedIndexer(query=query, weights=weights)
+        if not defer_weights_sync:
+            main_stream.wait_event(weights_done)
+            weights_done = None
+        return DeepseekV41PreparedIndexer(query=query, weights=weights, weights_done=weights_done)
 
     @staticmethod
     def _should_quantize_indexer(prepared, metadata):
@@ -630,6 +641,12 @@ class AscendDSAV41Impl:
             # Finish the input cast before query quantization starts on the
             # auxiliary stream, so the WKV matmul can overlap that quantization.
             self._quantize_indexer_query(attn, prepared_indexer, local_metadata)
+            # End the auxiliary weights projection before starting Compressor
+            # Cube work. Quantization follows the projection on the auxiliary
+            # stream and can still overlap the WKV matmul after this wait.
+            if prepared_indexer is not None and prepared_indexer.weights_done is not None:
+                torch.npu.current_stream().wait_event(prepared_indexer.weights_done)
+                prepared_indexer.weights_done = None
             kv = compressor.wkv(hidden_states_fp32)
             score = compressor.wgate(hidden_states_fp32)
             latent = compressor.pool_projected(kv, score, state_metadata, prev_rows=None, prev_row_indices=None)
@@ -690,8 +707,16 @@ class AscendDSAV41Impl:
             folded_cache = context[folded_name].kv_cache
             source_cache = (*source_cache, folded_cache)
         assert prepared_indexer is not None
-        if prepared_indexer.quantize_done is not None:
-            torch.npu.current_stream().wait_event(prepared_indexer.quantize_done)
+        # Query quantization is queued after weights projection on the same
+        # auxiliary stream, so its completion event also covers the weights.
+        # Fall back to the projection event when quantization was skipped.
+        indexer_ready = (
+            prepared_indexer.quantize_done
+            if prepared_indexer.quantize_done is not None
+            else prepared_indexer.weights_done
+        )
+        if indexer_ready is not None:
+            torch.npu.current_stream().wait_event(indexer_ready)
         selected, candidates = attn.indexer.select_projected(
             prepared_indexer.query,
             prepared_indexer.weights,
