@@ -18,6 +18,7 @@ from collections.abc import Iterable
 
 import torch
 import torch_npu
+from vllm import envs
 from vllm.config import get_current_vllm_config
 from vllm.distributed.utils import is_weak_contiguous
 from vllm.forward_context import get_forward_context
@@ -102,14 +103,60 @@ class AscendUnquantizedFusedMoEMethod(UnquantizedFusedMoEMethod):
     def process_weights_after_loading(self, layer):
         super(UnquantizedFusedMoEMethod, self).process_weights_after_loading(layer)
 
-        # Keep expert-aware loaders attached for later online weight updates.
+        names = ("w13_weight", "w2_weight")
+        stage = getattr(layer, "_ascend_expert_stage", None)
+        if stage is not None:
+            stage.finish()
+            self._process_expert_weights(layer, [name for name in names if name not in stage.names])
+            return
+        self._process_expert_weights(layer, names)
+        if get_ascend_config().enable_fused_mc2 and getattr(envs, "VLLM_RELOAD_MODE", None) == "direct":
+            from vllm_ascend.model_loader.weight_reload import ExpertModuleStaging
+
+            if not ExpertModuleStaging.supports(layer):
+                return
+            staged = [
+                name
+                for name in names
+                if not getattr(getattr(layer, name), "_ascend_borrow_checkpoint", False)
+                and (hasattr(getattr(layer, name), "_direct_reload_runtime") or hasattr(layer, name + "_list"))
+            ]
+            if staged:
+                layer._ascend_expert_stage = ExpertModuleStaging(layer, staged)
+
+    def _process_expert_weights(self, layer, names):
+        if not names:
+            return
         enable_fused_mc2 = get_ascend_config().enable_fused_mc2
+        fused_direct = enable_fused_mc2 and getattr(envs, "VLLM_RELOAD_MODE", None) == "direct"
+        if fused_direct:
+            from vllm.model_executor.utils import retire_parameter
+
+            from vllm_ascend.model_loader.weight_reload import (
+                init_expert_views,
+                refill_expert_list,
+                refill_expert_planes,
+                refill_nz_weight,
+            )
+
+        use_megamoe = enable_fused_mc2 and use_cann_megamoe(get_current_vllm_config())
+        megamoe_mxfp_only = use_megamoe and get_current_hardware_profile().supports(
+            HardwareCapability.CANN_MEGAMOE_MXFP
+        )
+        needs_fresh_storage = enable_fused_mc2 and not (fused_direct and megamoe_mxfp_only)
         # TODO: Revisit how this check is structured. For example, decide whether to
         # reuse storage in the same place that chooses the expert weight format.
-        for name in ("w13_weight", "w2_weight"):
+        pending = []
+        for name in names:
             weight = getattr(layer, name)
+            if fused_direct and getattr(weight, "_ascend_borrow_checkpoint", False):
+                refill_expert_planes(weight)
+                continue
+            pending.append(name)
             transposed = self._maybe_pad_weight(weight.data).transpose(1, 2).contiguous()
-            if weight.shape != transposed.shape and (enable_fused_mc2 or _should_trans_nz(transposed)):
+            # The BF16 fallback on MXFP-only MegaMoE follows the ordinary
+            # format policy and can keep the ND allocation in direct mode.
+            if weight.shape != transposed.shape and (needs_fresh_storage or _should_trans_nz(transposed)):
                 # NZ packing reads the NPU storage's base shape. Reusing the
                 # pre-transpose storage here would pack a rectangular matrix
                 # with its old dimensions.
@@ -117,36 +164,47 @@ class AscendUnquantizedFusedMoEMethod(UnquantizedFusedMoEMethod):
             else:
                 # Preserve the storage used by captured graphs across direct reloads.
                 replace_parameter(layer, name, transposed)
+            # Drop the local reference before the next transpose or NZ conversion.
+            del transposed
 
-        # TODO: Current dispatch_ffn_combine/mega_moe fusion operator ONLY supports NZ format.
-        # Therefore, we must cast weights to NZ when fusion is enabled.
-        # Once the underlying dispatch_ffn_combine/mega_moe operator is updated to support
-        # ND format (or other formats), remove this specific 'if' check and the forced
-        # npu_format_cast. At that point, the operator should be able to handle weights
-        # in their native format without explicit casting here.
-        if enable_fused_mc2:
-            use_megamoe = use_cann_megamoe(get_current_vllm_config())
-            if not use_megamoe:
-                layer.w13_weight.data = torch_npu.npu_format_cast(layer.w13_weight.data, ACL_FORMAT_FRACTAL_NZ)
-                layer.w2_weight.data = torch_npu.npu_format_cast(layer.w2_weight.data, ACL_FORMAT_FRACTAL_NZ)
-            if use_megamoe:
-                if use_megamoe and get_current_hardware_profile().supports(HardwareCapability.CANN_MEGAMOE_MXFP):
-                    logger.warning_once(
-                        "Unquantized MoE weights are not supported by the A5 mega moe "
-                        "(FUSED_MC2) operator. Falling back to the original MoE "
-                        "computation for this layer."
-                    )
-                    layer.w13_weight.data = maybe_trans_nz(layer.w13_weight.data)
-                    layer.w2_weight.data = maybe_trans_nz(layer.w2_weight.data)
+        if not pending:
+            return
+
+        if megamoe_mxfp_only:
+            logger.warning_once(
+                "Unquantized MoE weights are not supported by the A5 mega moe "
+                "(FUSED_MC2) operator. Falling back to the original MoE "
+                "computation for this layer."
+            )
+        if not enable_fused_mc2 or megamoe_mxfp_only:
+            for name in pending:
+                if fused_direct:
+                    refill_nz_weight(layer, name, force=False)
                 else:
-                    layer.w13_weight_list = [weight.clone() for weight in layer.w13_weight.data.unbind(dim=0)]
-                    layer.w2_weight_list = [weight.clone() for weight in layer.w2_weight.data.unbind(dim=0)]
-                    del layer.w13_weight
-                    del layer.w2_weight
-                    torch.npu.empty_cache()
-        else:
-            layer.w13_weight.data = maybe_trans_nz(layer.w13_weight.data)
-            layer.w2_weight.data = maybe_trans_nz(layer.w2_weight.data)
+                    weight = getattr(layer, name)
+                    weight.data = maybe_trans_nz(weight.data)
+            return
+
+        if not use_megamoe:
+            # dispatch_ffn_combine requires NZ weights regardless of the NZ policy.
+            for name in pending:
+                if fused_direct:
+                    refill_nz_weight(layer, name, borrow_checkpoint=True)
+                else:
+                    weight = getattr(layer, name)
+                    weight.data = torch_npu.npu_format_cast(weight.data, ACL_FORMAT_FRACTAL_NZ)
+            return
+
+        for name in pending:
+            list_name = f"{name}_list"
+            if fused_direct:
+                if not init_expert_views(layer, name):
+                    refill_expert_list(layer, list_name, getattr(layer, name).data.unbind(dim=0))
+                retire_parameter(layer, name)
+            else:
+                setattr(layer, list_name, [weight.clone() for weight in getattr(layer, name).data.unbind(dim=0)])
+                delattr(layer, name)
+        torch.npu.empty_cache()
 
     def apply(
         self,

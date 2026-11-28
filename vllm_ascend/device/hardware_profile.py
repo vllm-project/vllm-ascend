@@ -74,6 +74,8 @@ class HardwareCapability(Enum):
     CANN_MEGAMOE = auto()
     # Allow A5 MegaMoe's MXFP-only path and its A5-specific calling conventions.
     CANN_MEGAMOE_MXFP = auto()
+    # Reuse aligned BF16 expert planes across independent checkpoint and runtime descriptors.
+    EXPERT_RELOAD_STORAGE_ALIAS = auto()
     # Fuse the shared expert into the MegaMoe operator (enable_fused_mc2=3).
     # The capability states that the platform can run the shared expert inside
     # the operator; which weight/scale family that payload uses is a property of
@@ -461,6 +463,7 @@ _HARDWARE_PROFILES: Mapping[AscendDeviceType, HardwareProfile] = MappingProxyTyp
             native_weight_formats=_INT4_WEIGHT_FORMATS,
             capabilities=_A3_CAPABILITIES
             | {
+                HardwareCapability.EXPERT_RELOAD_STORAGE_ALIAS,
                 HardwareCapability.CANN_MEGAMOE,
                 HardwareCapability.CANN_MEGAMOE_SHARED_EXPERT_FUSION,
                 HardwareCapability.FLASH_ATTN_NPU_3,
@@ -514,6 +517,7 @@ _HARDWARE_PROFILES: Mapping[AscendDeviceType, HardwareProfile] = MappingProxyTyp
             native_weight_formats=_FP8_WEIGHT_FORMATS,
             capabilities=frozenset(
                 {
+                    HardwareCapability.EXPERT_RELOAD_STORAGE_ALIAS,
                     HardwareCapability.AUTO_ENABLE_CUSTOM_OPS,
                     HardwareCapability.SCATTER_ND_CACHE_STORE,
                     HardwareCapability.SCATTER_ND_FP8_CACHE_STORE,

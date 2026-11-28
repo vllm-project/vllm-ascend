@@ -1319,15 +1319,30 @@ def _validate_eplb_config(vllm_config: VllmConfig) -> None:
 
 
 def _validate_direct_reload_config(vllm_config: VllmConfig, ascend_config: AscendConfig) -> None:
+    model_config = vllm_config.model_config
     if (
-        getattr(envs_vllm, "VLLM_RELOAD_MODE", None) == "direct"
-        and ascend_config.enable_fused_mc2
-        and vllm_config.model_config is not None
-        and vllm_config.model_config.is_moe
+        getattr(envs_vllm, "VLLM_RELOAD_MODE", None) != "direct"
+        or not ascend_config.enable_fused_mc2
+        or model_config is None
+        or not model_config.is_moe
+    ):
+        return
+    if (
+        model_config.quantization is not None
+        or model_config.dtype != torch.bfloat16
+        or vllm_config.parallel_config.enable_eplb
+        or vllm_config.speculative_config is not None
+        or ascend_config.megamoe_shared_expert_fusion
     ):
         raise ValueError(
-            "Direct weight reload does not support fused MC2 or MegaMoE. "
+            "Direct reload with fused MC2 or MegaMoE requires unquantized BF16, static expert placement, "
+            "no speculative decoding, and a separate shared expert. "
             "Set enable_fused_mc2=0 or use VLLM_RELOAD_MODE=layerwise."
+        )
+    if ascend_config.weight_nz_mode:
+        raise ValueError(
+            "Direct reload with fused experts requires weight_nz_mode=0 for ordinary weights. "
+            "Set weight_nz_mode=0 or enable rl_config.enabled."
         )
 
 
