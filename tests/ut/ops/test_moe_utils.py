@@ -105,6 +105,10 @@ class TestMegaMoeLoading(unittest.TestCase):
 
 
 class TestMegaMoeQuantSettings(unittest.TestCase):
+    def test_unsupported_quant_type_reports_bf16_support(self):
+        with self.assertRaisesRegex(RuntimeError, r"BF16 \(none quant\)"):
+            _get_cann_mega_moe_quant_settings(QuantType.W8A8FP)
+
     def test_mxfp8_uses_e4m3_dispatch_and_weights(self):
         self.assertEqual(_get_cann_mega_moe_quant_settings(QuantType.W8A8MXFP), (4, 24, 24))
 
