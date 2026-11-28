@@ -109,7 +109,7 @@ QWEN_FA3_TARGETS = frozenset(
         "Qwen3_5MoeForConditionalGeneration",
     }
 )
-_V2_EPLB_CONFIG_FIELDS = frozenset({"load_collection_phase", "expert_placement_path", "stair_config"})
+_V2_EPLB_CONFIG_FIELDS = frozenset({"load_collection_phase", "mode", "expert_placement_path", "stair_config"})
 _V2_STAIR_CONFIG_FIELDS = frozenset(StairConfig.__dataclass_fields__)
 
 _DEVICE_VISIBILITY_ENV_VAR = "ASCEND_RT_VISIBLE_DEVICES"
@@ -1294,6 +1294,11 @@ def _validate_eplb_config(vllm_config: VllmConfig) -> None:
         additional_config = dict(additional_config)
         additional_config["eplb_config"] = eplb_config
         vllm_config.additional_config = additional_config
+    mode = eplb_config.get("mode", "dynamic")
+    if mode not in ("dynamic", "static"):
+        raise ValueError("additional_config.eplb_config.mode must be 'dynamic' or 'static'.")
+    if mode != "dynamic" and not vllm_config.parallel_config.enable_eplb and not is_draft_config_context():
+        raise ValueError("additional_config.eplb_config.mode='static' requires --enable-eplb.")
     load_collection_phase = eplb_config.get("load_collection_phase", "all")
     # Disabled drafts inherit this target-only setting but never collect
     # EPLB load. Keep target validation strict and preserve other checks.
@@ -1314,6 +1319,8 @@ def _validate_eplb_config(vllm_config: VllmConfig) -> None:
             raise ValueError("additional_config.eplb_config.expert_placement_path must point to a .json file.")
         if not vllm_config.parallel_config.enable_eplb and not is_draft_config_context():
             raise ValueError("additional_config.eplb_config.expert_placement_path requires --enable-eplb.")
+    if mode == "static" and vllm_config.parallel_config.enable_eplb and expert_placement_path is None:
+        raise ValueError("Static EPLB requires additional_config.eplb_config.expert_placement_path.")
     if vllm_config.parallel_config.enable_eplb:
         upstream_eplb_config = vllm_config.parallel_config.eplb_config
         if upstream_eplb_config.communicator not in (None, "torch_gloo", "hixl"):

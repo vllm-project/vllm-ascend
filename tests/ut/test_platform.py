@@ -634,6 +634,56 @@ class TestNPUPlatform(TestBase):
             mock_warning.call_args.args[0],
         )
 
+    def test_validate_eplb_static_config(self):
+        config = self.mock_vllm_config()
+        config.parallel_config.enable_eplb = True
+        config.parallel_config.pipeline_parallel_size = 2
+        config.additional_config = {
+            "eplb_config": {
+                "mode": "static",
+                "load_collection_phase": "decode",
+                "expert_placement_path": "deployment.json",
+            }
+        }
+        _validate_eplb_config(config)
+        self.assertEqual(config.additional_config["eplb_config"]["expert_placement_path"], "deployment.json")
+
+        # Dynamic mode also accepts expert_placement_path (for placement export).
+        config.additional_config = {"eplb_config": {"mode": "dynamic", "expert_placement_path": "deployment.json"}}
+        _validate_eplb_config(config)
+
+    def test_validate_eplb_static_rejects_incomplete_or_unsupported_config(self):
+        for failure in ("disabled", "missing_path", "bad_mode", "bad_json"):
+            with self.subTest(failure=failure):
+                config = self.mock_vllm_config()
+                config.parallel_config.enable_eplb = True
+                config.parallel_config.pipeline_parallel_size = 1
+                fields: dict[str, str] = {"mode": "static", "expert_placement_path": "deployment.json"}
+                config.additional_config = {"eplb_config": fields}
+                if failure == "disabled":
+                    config.parallel_config.enable_eplb = False
+                elif failure == "missing_path":
+                    fields.pop("expert_placement_path")
+                elif failure == "bad_mode":
+                    fields["mode"] = "auto"
+                elif failure == "bad_json":
+                    fields["expert_placement_path"] = "/tmp/.json"
+                with self.assertRaises(ValueError):
+                    _validate_eplb_config(config)
+
+    def test_validate_eplb_static_accepts_speculative_config(self):
+        config = self.mock_vllm_config()
+        config.parallel_config.enable_eplb = True
+        config.parallel_config.pipeline_parallel_size = 1
+        config.speculative_config = SimpleNamespace()
+        config.additional_config = {
+            "eplb_config": {
+                "mode": "static",
+                "expert_placement_path": "deployment.json",
+            }
+        }
+        _validate_eplb_config(config)
+
     def test_validate_eplb_config_rejects_weight_offload(self):
         for cpu_gb, group_size in ((1, 0), (0, 2)):
             with self.subTest(cpu_gb=cpu_gb, group_size=group_size):

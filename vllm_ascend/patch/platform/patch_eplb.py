@@ -21,6 +21,9 @@ from vllm.distributed.eplb import eplb_communicator as _eplb_communicator
 from vllm.distributed.eplb import eplb_state as _eplb_state
 from vllm.logger import logger
 from vllm.model_executor.layers.fused_moe import routed_experts as _routed_experts
+from vllm.model_executor.model_loader import base_loader as _base_loader
+from vllm.model_executor.model_loader import default_loader as _default_loader
+from vllm.model_executor.model_loader import ep_weight_filter as _ep_weight_filter
 from vllm.utils.gpu_sync_debug import gpu_sync_allowed
 from vllm.utils.torch_utils import PIN_MEMORY
 
@@ -35,6 +38,10 @@ from vllm_ascend.distributed.eplb.eplb_state import (
     refresh_model_routing_tables,
 )
 from vllm_ascend.distributed.eplb.explicit_transfer import stage_explicit_layer_transfer
+from vllm_ascend.distributed.eplb.placement import (
+    ACTIVE_STATIC_CONTROLLER,
+    ACTIVE_STATIC_LOAD,
+)
 from vllm_ascend.distributed.eplb.policy import PreparedLoadStats
 
 _PATCH_MARKER = "_vllm_ascend_eplb_patch"
@@ -420,6 +427,21 @@ def _patch_initial_expert_layout() -> None:
         _build_distributed_initial_expert_map
     )
     routed_experts = _routed_experts.RoutedExperts
+
+    original_build = routed_experts.build_expert_params_mapping
+    if not getattr(original_build, _PATCH_MARKER, False):
+        build_signature = signature(original_build)
+
+        @wraps(original_build)
+        def _build_expert_params_mapping(*args, **kwargs):
+            if ACTIVE_STATIC_LOAD.get() is not None:
+                bound = build_signature.bind(*args, **kwargs)
+                bound.arguments["num_redundant_experts"] = 0
+                return original_build(*bound.args, **bound.kwargs)
+            return original_build(*args, **kwargs)
+
+        setattr(_build_expert_params_mapping, _PATCH_MARKER, True)
+        routed_experts.build_expert_params_mapping = staticmethod(_build_expert_params_mapping)
 
     original_get = routed_experts.get_expert_mapping
     if not getattr(original_get, _PATCH_MARKER, False):
@@ -897,6 +919,50 @@ def _wrap_move_to_workspace(original_move):
     return _move_to_workspace
 
 
+def _patch_static_weight_loading() -> None:
+    loader_cls = _base_loader.BaseModelLoader
+    original_create_model = loader_cls.create_model
+    if not getattr(original_create_model, _PATCH_MARKER, False):
+
+        @wraps(original_create_model)
+        def _create_model(self, vllm_config, model_config, prefix=""):
+            model = original_create_model(self, vllm_config, model_config, prefix=prefix)
+            controller = ACTIVE_STATIC_CONTROLLER.get()
+            if controller is not None:
+                controller.bind_model_for_static_load(model, vllm_config, model_config)
+            return model
+
+        setattr(_create_model, _PATCH_MARKER, True)
+        loader_cls.create_model = _create_model  # type: ignore[method-assign]
+
+    original_load_model = loader_cls.load_model
+    if not getattr(original_load_model, _PATCH_MARKER, False):
+
+        @wraps(original_load_model)
+        def _load_model(self, vllm_config, model_config, prefix=""):
+            try:
+                return original_load_model(self, vllm_config, model_config, prefix=prefix)
+            finally:
+                ACTIVE_STATIC_LOAD.set(None)
+
+        setattr(_load_model, _PATCH_MARKER, True)
+        loader_cls.load_model = _load_model  # type: ignore[method-assign]
+
+    original_compute = _ep_weight_filter.compute_eplb_local_expert_ids
+    if not getattr(original_compute, _PATCH_MARKER, False):
+
+        @wraps(original_compute)
+        def _compute_eplb_local_expert_ids(num_experts, num_redundant_experts, ep_size, ep_rank):
+            static_load = ACTIVE_STATIC_LOAD.get()
+            if static_load is not None:
+                return static_load[1]
+            return original_compute(num_experts, num_redundant_experts, ep_size, ep_rank)
+
+        setattr(_compute_eplb_local_expert_ids, _PATCH_MARKER, True)
+        _ep_weight_filter.compute_eplb_local_expert_ids = _compute_eplb_local_expert_ids
+        _default_loader.compute_eplb_local_expert_ids = _compute_eplb_local_expert_ids
+
+
 def _patch_async_move_to_workspace() -> None:
     original_move = _eplb_state._move_to_workspace
     if not getattr(original_move, _PATCH_MARKER, False):
@@ -911,3 +977,4 @@ _patch_communicator_factory()
 _patch_explicit_transfer_execution()
 _patch_changed_layer_transfer()
 _patch_async_move_to_workspace()
+_patch_static_weight_loading()

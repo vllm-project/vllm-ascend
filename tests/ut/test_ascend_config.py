@@ -331,6 +331,33 @@ class TestAscendConfig(TestBase):
     def test_eplb_load_collection_phase_defaults_to_all(self):
         self.assertEqual(EplbConfig().load_collection_phase, "all")
 
+    def test_eplb_static_configuration(self):
+        self.assertEqual(EplbConfig().mode, "dynamic")
+        self.assertEqual(
+            EplbConfig(expert_placement_path="  /tmp/deployment.json  ").expert_placement_path,
+            "/tmp/deployment.json",
+        )
+        self.assertEqual(
+            EplbConfig(
+                mode="static",
+                expert_placement_path="deployment.json",
+                load_collection_phase="decode",
+            ).load_collection_phase,
+            "decode",
+        )
+        invalid_cases: tuple[dict[str, Any], ...] = (
+            {"mode": "static"},
+            {"mode": "auto"},
+            {"expert_placement_path": ""},
+            {"expert_placement_path": "   "},
+            {"expert_placement_path": ".json"},
+            {"expert_placement_path": "/tmp/.json"},
+            {"expert_placement_path": "/tmp/placement.txt"},
+        )
+        for kwargs in invalid_cases:
+            with self.subTest(kwargs=kwargs), self.assertRaises(ValueError):
+                EplbConfig(**kwargs)
+
     def test_eplb_load_collection_phase_validation(self):
         self.assertEqual(
             EplbConfig(load_collection_phase="prefill").load_collection_phase,

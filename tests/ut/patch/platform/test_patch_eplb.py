@@ -977,3 +977,75 @@ def test_async_workspace_refresh_failure_keeps_target_and_defers_ack(monkeypatch
 
     assert getattr(communicator, patch_eplb._EXPLICIT_TRANSFER_TARGET_ATTR) is target
     consumed_event.record.assert_not_called()
+
+
+def test_static_weight_loading_patches_filter_mapping_and_loader():
+    from vllm.model_executor.layers.fused_moe.routed_experts import RoutedExperts
+    from vllm.model_executor.model_loader import base_loader, default_loader, ep_weight_filter
+
+    from vllm_ascend.distributed.eplb.placement import (
+        ACTIVE_STATIC_CONTROLLER,
+        ACTIVE_STATIC_LOAD,
+    )
+
+    patch_eplb._patch_initial_expert_layout()
+    patch_eplb._patch_static_weight_loading()
+
+    routed = RoutedExperts.__new__(RoutedExperts)
+    torch.nn.Module.__init__(routed)
+    routed.moe_config = SimpleNamespace(ep_size=2, num_experts=6, num_logical_experts=4, is_act_and_mul=True)
+    routed.expert_map_manager = SimpleNamespace(num_fused_shared_experts=0)
+    routed.ckpt_gate_proj_name = "gate_proj"
+    routed.ckpt_down_proj_name = "down_proj"
+    routed.ckpt_up_proj_name = "up_proj"
+    routed.lora_base_layer_prefix = ""
+    routed.shared_expert_online_loader = None
+    wrapper = torch.nn.Module()
+    wrapper.experts = routed
+
+    token = ACTIVE_STATIC_LOAD.set((True, {0, 1, 3}))
+    try:
+        assert default_loader.compute_eplb_local_expert_ids(4, 2, 2, 0) == {0, 1, 3}
+        assert ep_weight_filter.compute_eplb_local_expert_ids(4, 2, 2, 1) == {0, 1, 3}
+        gate_entries = [eid for _, _, eid, shard in routed.get_expert_mapping() if shard == "w1"]
+        assert gate_entries == [0, 1, 2, 3]
+        make_entries = [
+            eid
+            for _, _, eid, shard in RoutedExperts.make_expert_params_mapping(
+                wrapper, "gate_proj", "down_proj", "up_proj", num_experts=4, num_redundant_experts=2
+            )
+            if shard == "w1"
+        ]
+        assert make_entries == [0, 1, 2, 3]
+    finally:
+        ACTIVE_STATIC_LOAD.reset(token)
+
+    class _DummyLoader(base_loader.BaseModelLoader):
+        def download_model(self, model_config):
+            return None
+
+        def load_weights(self, model, model_config):
+            assert ACTIVE_STATIC_LOAD.get() == (True, {0, 1})
+
+    controller = MagicMock()
+    controller.bind_model_for_static_load.side_effect = lambda *_: ACTIVE_STATIC_LOAD.set((True, {0, 1}))
+    ctrl_token = ACTIVE_STATIC_CONTROLLER.set(controller)
+    try:
+        with (
+            patch.object(base_loader, "initialize_model", return_value=torch.nn.Linear(2, 2)),
+            patch.object(base_loader, "process_weights_after_loading"),
+            patch.object(base_loader, "log_online_quantization"),
+            patch.object(base_loader, "log_model_inspection"),
+        ):
+            loader = _DummyLoader(SimpleNamespace(device="cpu"))
+            vllm_cfg = SimpleNamespace(
+                device_config=SimpleNamespace(device="cpu"),
+                load_config=SimpleNamespace(device="cpu", load_format="safetensors"),
+                quant_config=None,
+            )
+            model_cfg = SimpleNamespace(dtype=torch.float32, quantization=None)
+            loader.load_model(vllm_cfg, model_cfg)
+        controller.bind_model_for_static_load.assert_called_once()
+        assert ACTIVE_STATIC_LOAD.get() is None
+    finally:
+        ACTIVE_STATIC_CONTROLLER.reset(ctrl_token)

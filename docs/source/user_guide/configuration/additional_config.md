@@ -148,7 +148,7 @@ Both warmups run on a background thread during weight loading. The worker waits 
 
 **eplb_config**
 
-Accepts `load_collection_phase`, `expert_placement_path`, and `stair_config`.
+Accepts `load_collection_phase`, `mode`, `expert_placement_path`, and `stair_config`.
 Configure upstream EPLB through `--enable-eplb` and `--eplb-config`. Ascend uses the STAIR policy by
 default and moves expert weights asynchronously over HIXL when it is available
 on every EPLB rank, falling back to Gloo CPU staging otherwise. Select
@@ -160,7 +160,8 @@ for the advanced STAIR fields and their defaults.
 | Name | Type | Default | Description |
 | ---- | ---- | ------- | ----------- |
 | `load_collection_phase` | str | `"all"` | Select `"all"`, `"prefill"`, or `"decode"` load submission. Only effective with the STAIR policy; a value other than `"all"` requires `--enable-eplb`. Any batch containing a prefill request is classified entirely as prefill. |
-| `expert_placement_path` | str | `None` | JSON file path on global rank 0's host where committed expert placements are atomically exported whenever a rearranged layout achieves a new lowest observed whole-model peak-to-mean rank-load ratio before the next rearrangement. Requires `--enable-eplb`, elastic EP disabled, and one EP group per PP stage covering all worker ranks. |
+| `mode` | str | `"dynamic"` | Select `"dynamic"` or `"static"`. `"dynamic"` runs runtime load collection and asynchronous expert rearrangement; `"static"` loads expert weights directly according to a `version: 1` placement snapshot from `expert_placement_path` without expert rearrangement, skipping runtime load recording unless `log_balancedness=true` (requires `--enable-eplb` and `expert_placement_path`). |
+| `expert_placement_path` | str | `None` | JSON file path on global rank 0's host for expert placement snapshots. When `mode="dynamic"`, committed placements are atomically exported whenever a rearranged layout achieves a new lowest observed whole-model peak-to-mean rank-load ratio before the next rearrangement (requires one EP group per PP stage covering all worker ranks). When `mode="static"`, required input snapshot path. Requires `--enable-eplb` and elastic EP disabled. |
 | `stair_config` | dict | `{}` | Advanced STAIR policy tuning. See the [EPLB tuning suggestions table](../feature_guide/expert_parallelism_load_balancer.md#tuning-suggestions) for all fields, defaults, and ranges. |
 
 <span id="scheduler_config"></span>**scheduler_config**

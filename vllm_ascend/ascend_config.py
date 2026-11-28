@@ -284,6 +284,7 @@ class EplbConfig:
     # Restricts which batch phase contributes to the upstream EPLB expert-load
     # window; any prefill request marks the batch as prefill.
     load_collection_phase: str = "all"
+    mode: Literal["dynamic", "static"] = "dynamic"
     stair_config: StairConfig = dataclasses.field(default_factory=StairConfig)
     expert_placement_path: str | None = None
 
@@ -298,6 +299,12 @@ class EplbConfig:
                 raise ValueError("eplb_config.expert_placement_path must point to a .json file")
             self.expert_placement_path = normalized
 
+        return self
+
+    @model_validator(mode="after")
+    def _validate_mode(self):
+        if self.mode == "static" and self.expert_placement_path is None:
+            raise ValueError("Static EPLB requires eplb_config.expert_placement_path")
         return self
 
 

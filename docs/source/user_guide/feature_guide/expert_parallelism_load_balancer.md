@@ -124,12 +124,44 @@ above deviate from them, and when to do the same:
 
 These fields may also be passed together as JSON through `--eplb-config`.
 Keep upstream fields in `--eplb-config`; Ascend EPLB fields under
-`additional_config.eplb_config` are `load_collection_phase`,
+`additional_config.eplb_config` are `load_collection_phase`, `mode`,
 `expert_placement_path`, and `stair_config`.
 
 Ascend extends the upstream `policy` field without adding a second selector.
 For example, use `--eplb-config.policy default` to run the upstream policy;
 omit it or set it to `stair` to run STAIR.
+
+### Static Deployment Import
+
+`eplb_config.mode="static"` loads expert weights directly into the physical
+slots specified by a `version: 1` placement snapshot JSON during checkpoint
+loading, then keeps fixed expert-replica routing without EPLB communicators,
+staging buffers, or weight migration. Runtime load recording is skipped by
+default and only runs on scheduled logging steps when `log_balancedness=true`
+is enabled in `--eplb-config`. `--enable-eplb` is still required because it
+controls the router and expert slot allocation.
+
+```bash
+vllm serve Qwen/Qwen3-30B-A3B \
+  --tensor-parallel-size 8 \
+  --enable-expert-parallel \
+  --enable-eplb \
+  --eplb-config '{"num_redundant_experts":16}' \
+  --additional-config '{"eplb_config":{"mode":"static","expert_placement_path":"/data/eplb/placement.json"}}'
+```
+
+Constraints:
+
+- `expert_placement_path` is required and must point to a `.json` placement
+  snapshot with `version: 1`, `ep_size`, `target` (`num_logical_experts`,
+  `num_redundant_experts`, `physical_to_logical_map`), and optional `draft`.
+- Global rank 0 reads the file, broadcasts it across PP and EP groups, and
+  every rank validates `ep_size`, logical/redundant expert counts, and whole-model
+  MoE layer counts (slicing layers per PP stage when `pipeline_parallel_size > 1`)
+  before loading checkpoint weights.
+- A registered MoE draft that enables EPLB is loaded from the `draft` entry of
+  the same snapshot.
+- `load_collection_phase` may remain set and is ignored in `static` mode.
 
 #### MRv2 Communicator Selection
 
