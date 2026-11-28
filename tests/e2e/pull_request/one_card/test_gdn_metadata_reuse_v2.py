@@ -15,7 +15,7 @@ from vllm.v1.worker.utils import AttentionGroup
 from vllm_ascend.attention.gdn_attn_builder import AscendGDNAttentionBackend, AscendGDNHostMetadataBackend
 from vllm_ascend.ops.triton.mamba.cached_decode import materialize_cached_gdn_decode
 from vllm_ascend.ops.triton.mamba.graph_state import GDNGraphStateUpdater
-from vllm_ascend.utils import adapt_patch
+from vllm_ascend.utils import adapt_patch, vllm_version_is
 from vllm_ascend.worker.v2.model_states.mamba_hybrid import AscendMambaHybridModelState
 
 
@@ -120,7 +120,8 @@ def test_aligned_state_indices_aclgraph_replay(num_groups, max_reqs, num_reqs, s
 def test_gdn_shared_metadata_aclgraph_reads_updated_group_states(backend, mode):
     torch.npu.set_device(0)
     graph_reqs, width = 4, 4
-    spec = MambaSpec(block_size=16, shapes=((1,), (1,)), dtypes=(torch.float32,), num_speculative_blocks=3)
+    legacy_spec_fields = {"num_speculative_blocks": 3} if vllm_version_is("0.34.0") else {}
+    spec = MambaSpec(block_size=16, shapes=((1,), (1,)), dtypes=(torch.float32,), **legacy_spec_fields)
     config = SimpleNamespace(
         num_speculative_tokens=3,
         additional_config=None,
@@ -129,9 +130,15 @@ def test_gdn_shared_metadata_aclgraph_reads_updated_group_states(backend, mode):
             hf_text_config=SimpleNamespace(model_type="qwen3_5", linear_attn_config={"num_heads": 8}),
             get_num_attention_heads=lambda _parallel_config: 8,
         ),
-        cache_config=SimpleNamespace(mamba_cache_mode=mode),
+        cache_config=SimpleNamespace(
+            mamba_cache_mode=mode,
+            enable_prefix_caching=mode == "align",
+            use_replayssm=False,
+        ),
         compilation_config=SimpleNamespace(
-            cudagraph_mode=CUDAGraphMode.FULL_DECODE_ONLY, max_cudagraph_capture_size=None
+            cudagraph_mode=CUDAGraphMode.FULL_DECODE_ONLY,
+            max_cudagraph_capture_size=None,
+            static_forward_context={},
         ),
         scheduler_config=SimpleNamespace(max_num_seqs=16, max_num_batched_tokens=1024),
         parallel_config=SimpleNamespace(prefill_context_parallel_size=1, decode_context_parallel_size=1),
@@ -143,6 +150,7 @@ def test_gdn_shared_metadata_aclgraph_reads_updated_group_states(backend, mode):
             use_eagle_block_drop=lambda: False,
         ),
         num_hash_lookahead_tokens=0,
+        use_replayssm_trackers=False,
     )
     builders = [backend.get_builder_cls()(spec, [f"layer{i}"], config, torch.device("npu")) for i in range(24)]
     table = torch.arange(graph_reqs * (width + 2), dtype=torch.int32, device="npu").view(graph_reqs, width + 2)
@@ -152,7 +160,8 @@ def test_gdn_shared_metadata_aclgraph_reads_updated_group_states(backend, mode):
         [AttentionGroup(backend, [f"layer{i}"], spec, i, metadata_builders=[builder])]
         for i, builder in enumerate(builders)
     ]
-    state = SimpleNamespace(vllm_config=config, max_model_len=1024, _align_mode=False)
+    # The test supplies the per-group tables directly instead of gathering them from a live runner.
+    state = SimpleNamespace(vllm_config=config, max_model_len=1024, mamba_prefix_caching=False)
     slot_mappings = torch.empty((len(groups), graph_reqs * width), dtype=torch.int64, device="npu")
     kv_config = SimpleNamespace(kv_cache_groups=[SimpleNamespace(kv_cache_spec=spec)] * len(groups))
 
