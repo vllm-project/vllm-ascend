@@ -281,7 +281,13 @@ def test_capture_budget_graph_npu(token_budget, max_frames_per_batch, expected_m
     assert graph_meta.graph is fake_graph
     assert graph_meta.input_buffers is capture_values
     assert isinstance(graph_meta.output_buffer, torch.Tensor)
-    weak_ref.assert_called_once_with(model.encoder_cudagraph_forward.return_value)
+    weak_ref.assert_not_called()
+    assert model.encoder_cudagraph_forward.call_count == 2
+    assert graph_meta.output_buffer is not model.encoder_cudagraph_forward.return_value
+    assert (
+        mgr._shared_output_buffers[("default", ())].untyped_storage().data_ptr()
+        == graph_meta.output_buffer.untyped_storage().data_ptr()
+    )
 
 
 @pytest.mark.skipif(

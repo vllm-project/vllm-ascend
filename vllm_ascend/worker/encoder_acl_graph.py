@@ -34,6 +34,8 @@ from vllm_ascend.utils import weak_ref_tensors
 _ENCODER_SUPPORTS_CAPTURE_AXES = (
     "axis_keys" in inspect.signature(EncoderCudaGraphManager._capture_budget_graph).parameters
 )
+# The verified vLLM commit and v0.34.0 predate cumulative-buffer padding.
+_ENCODER_SUPPORTS_PADDING_LOGIC = hasattr(EncoderCudaGraphManager, "_get_padding_logic")
 
 CaptureAxisKeys = tuple[Hashable, ...]
 EncoderGraphKey = tuple[str, int] | tuple[str, int, CaptureAxisKeys]
@@ -363,6 +365,26 @@ class EncoderAclGraphManager(EncoderCudaGraphManager):
         )
 
         values = capture_inputs.values
+        # The base capture loop visits budgets largest-first.
+        share_key = (path, axis_keys)
+        shared = self._shared_input_buffers.get(share_key)
+        if shared is None:
+            self._shared_input_buffers[share_key] = values
+        else:
+            values = self._share_prefix_compatible(values, shared)
+            self._shared_input_keys.setdefault(share_key, set()).update(
+                key for key, buf in values.items() if buf is not capture_inputs.values[key]
+            )
+
+        # Probe eagerly: recording FIA tasks here would pollute the handles
+        # belonging to the actual graph capture below.
+        with torch.inference_mode():
+            output = self.model.encoder_cudagraph_forward(dict(values), path=path)
+            shared_out = self._shared_output_buffers.get(share_key)
+            if shared_out is None or output.shape[0] > shared_out.shape[0]:
+                shared_out = torch.empty_like(output)
+                self._shared_output_buffers[share_key] = shared_out
+            output_buffer = shared_out[: output.shape[0]]
 
         graph = torch.npu.NPUGraph()
         with (
@@ -370,7 +392,8 @@ class EncoderAclGraphManager(EncoderCudaGraphManager):
             torch.inference_mode(),
             torch.npu.graph(graph, self.graph_pool),
         ):
-            output = weak_ref_tensors(self.model.encoder_cudagraph_forward(dict(values), path=path))
+            output = self.model.encoder_cudagraph_forward(dict(values), path=path)
+            output_buffer.copy_(output)
 
         graph_meta = BudgetGraphMetadata(
             token_budget=token_budget,
@@ -378,7 +401,9 @@ class EncoderAclGraphManager(EncoderCudaGraphManager):
             max_frames_per_batch=max_frames_per_batch,
             graph=graph,
             input_buffers=values,
-            output_buffer=output,
+            # Unlike graph-pool intermediates, this allocation lives outside
+            # the graph pool and must remain strongly referenced (see #16794).
+            output_buffer=output_buffer,
             **({"axis_keys": axis_keys} if _ENCODER_SUPPORTS_CAPTURE_AXES else {}),
         )
         graph_set = self._get_graph_set(path)
@@ -406,16 +431,34 @@ class EncoderAclGraphManager(EncoderCudaGraphManager):
             graph_meta.max_frames_per_batch,
             path,
         )
-        buffer_items = graph_meta.input_buffers.items()
+        # Check replay capacity before copying buffers.
+        if any(
+            src is not None and src.ndim > 0 and src.shape[0] > buf.shape[0]
+            for key, buf in graph_meta.input_buffers.items()
+            for src in (replay.values.get(key),)
+        ):
+            self.graph_misses += num_items
+            with torch.inference_mode():
+                return self.model.encoder_eager_forward(mm_kwargs, path=path)
 
-        for key, buf in buffer_items:
+        shared_keys = self._shared_input_keys.get((path, axis_keys), ())
+        for key, buf in graph_meta.input_buffers.items():
             src = replay.values.get(key)
             if src is None:
+                if key in shared_keys:
+                    raise RuntimeError(
+                        f"Encoder ACL graph buffer {key!r} is shared across token budgets; "
+                        "replay must provide its values."
+                    )
                 continue
             if src.ndim == 0:
                 buf.copy_(src)
             else:
-                padding_logic = self.config.padding_logics.get(key, self._copy_padded_buffer)
+                padding_logic = (
+                    self._get_padding_logic(self.config, key)
+                    if _ENCODER_SUPPORTS_PADDING_LOGIC
+                    else self.config.padding_logics.get(key, self._copy_padded_buffer)
+                )
                 padding_logic(buf, src)
 
         cu_seqlens = graph_meta.input_buffers.get("cu_seqlens")
