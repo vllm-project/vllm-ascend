@@ -544,6 +544,7 @@ class AscendConfig:
             "weight_nz_mode": 1,
             "enable_shared_expert_dp": false,
             "enable_sparse_sfa_c8": false,
+            "enable_sparse_sfa_fp4": false,
             "enable_sparse_li_c8": false,
             "enable_sparse_li_c4": false,
             "ascend_compilation_config": {
@@ -738,6 +739,7 @@ class AscendConfig:
     enable_sp_by_pass: bool = False
     enable_sparse_sfa_turboquant: bool = False
     enable_sparse_sfa_c8: bool = False
+    enable_sparse_sfa_fp4: bool = False
     enable_sparse_li_c8: bool = False
     enable_sparse_li_c4: bool = False
     pd_tp_ratio: int = 1
@@ -990,6 +992,13 @@ class AscendConfig:
         cache_dtype = getattr(cache_config, "cache_dtype", None)
         self.enable_sparse_sfa_turboquant = cache_dtype == "turboquant_4bit_nc" and use_sparse_sfa
         self.enable_sparse_sfa_c8 = vllm_config.cache_config.cache_dtype in ["fp8", "int8"] and use_sparse_sfa
+        self.enable_sparse_sfa_fp4 = cache_dtype == "mxfp4" and use_sparse_sfa
+        if cache_dtype == "mxfp4" and not use_sparse_sfa:
+            raise ValueError(
+                "--kv-cache-dtype mxfp4 stores the packed MXFP4 SFA main cache and requires an SFA/kpool-indexer model."
+            )
+        if self.enable_sparse_sfa_fp4 and (self.enable_sparse_sfa_c8 or self.enable_sparse_sfa_turboquant):
+            raise ValueError("enable_sparse_sfa_fp4 is mutually exclusive with the C8 and TurboQuant SFA caches.")
         self.enable_sparse_li_c8 = vllm_config.attention_config.indexer_kv_dtype in ["fp8", "int8"] and use_sparse
         self.enable_sparse_li_c4 = vllm_config.attention_config.indexer_kv_dtype == "mxfp4" and use_sparse
         if self.enable_sparse_li_c8 and self.enable_sparse_li_c4:
@@ -1065,7 +1074,9 @@ class AscendConfig:
     def uses_packed_sfa_main_cache(self) -> bool:
         """Whether SFA stores its main KV cache in one packed tensor."""
         return bool(
-            getattr(self, "enable_sparse_sfa_c8", False) or getattr(self, "enable_sparse_sfa_turboquant", False)
+            getattr(self, "enable_sparse_sfa_c8", False)
+            or getattr(self, "enable_sparse_sfa_turboquant", False)
+            or getattr(self, "enable_sparse_sfa_fp4", False)
         )
 
     def _validate_mc2_comm_alg(self, vllm_config: VllmConfig) -> None:

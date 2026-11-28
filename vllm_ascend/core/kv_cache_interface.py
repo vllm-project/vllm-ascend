@@ -228,6 +228,9 @@ class AscendMLAAttentionSpec(MLAAttentionSpec):
     # view for NoPE models); only the payload dtype becomes uint8 HIF8
     # bytes. The flag exists for group-merge uniformity checks.
     cache_sparse_sfa_hif8: bool = False
+    # Packed MXFP4 main cache: one uint8 page row per token holding the E2M1
+    # payload and its inline BF16 group scales (320 B for a 512-wide latent).
+    cache_sparse_sfa_fp4: bool = False
     store_on_host: bool = False
     # Ascend kernels consume padded pages through an explicit physical block
     # stride. vLLM main removed this field from AttentionSpec, but it remains
@@ -247,7 +250,7 @@ class AscendMLAAttentionSpec(MLAAttentionSpec):
     @property
     def uses_packed_sfa_main_cache(self) -> bool:
         """Whether the SFA main cache is stored in one packed tensor."""
-        return self.cache_sparse_sfa_c8 or self.cache_sparse_sfa_turboquant
+        return self.cache_sparse_sfa_c8 or self.cache_sparse_sfa_turboquant or self.cache_sparse_sfa_fp4
 
     @property
     def supports_single_raw_backing(self) -> bool:
@@ -258,6 +261,7 @@ class AscendMLAAttentionSpec(MLAAttentionSpec):
             and not self.indexes_kv_by_block_stride
             and not self.cache_sparse_sfa_c8
             and not self.cache_sparse_sfa_hif8
+            and not self.cache_sparse_sfa_fp4
         )
 
     @property
@@ -287,6 +291,7 @@ class AscendMLAAttentionSpec(MLAAttentionSpec):
                 spec.cache_sparse_sfa_c8,
                 spec.cache_sparse_sfa_turboquant,
                 spec.cache_sparse_sfa_hif8,
+                spec.cache_sparse_sfa_fp4,
                 spec.store_on_host,
                 spec.alignment,
                 get_kv_cache_compression_ratio(spec),
@@ -313,6 +318,7 @@ class AscendMLAAttentionSpec(MLAAttentionSpec):
             cache_sparse_sfa_c8=first_spec.cache_sparse_sfa_c8,
             cache_sparse_sfa_turboquant=first_spec.cache_sparse_sfa_turboquant,
             cache_sparse_sfa_hif8=first_spec.cache_sparse_sfa_hif8,
+            cache_sparse_sfa_fp4=first_spec.cache_sparse_sfa_fp4,
             store_on_host=first_spec.store_on_host,
             indexes_kv_by_block_stride=first_spec.indexes_kv_by_block_stride,
             # A merged mixed group must remain in the target lookup. Per-layer
