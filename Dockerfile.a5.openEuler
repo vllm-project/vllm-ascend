@@ -94,7 +94,7 @@ esac
 # ===== Install FLA =====
 ARG FLA_VERSION="26.11.0.dev20261126"
 ARG FLA_PACKAGE="flash-linear-attention-npu-a5"
-ARG FLASH_ATTN_NPU_VERSION="0.5.1.post1"
+ARG FLASH_ATTN_NPU_VERSION="0.6.0"
 RUN export PIP_EXTRA_INDEX_URL="${ASCEND_INDEX_URL}" && \
     source /usr/local/Ascend/ascend-toolkit/set_env.sh && \
     # Install memfabric_hybrid kernels

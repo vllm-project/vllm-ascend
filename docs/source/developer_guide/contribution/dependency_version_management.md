@@ -14,7 +14,7 @@ stack.
 | triton-ascend | 3.6.0.post2 | `requirements.txt`<br>`pyproject.toml` `[build-system]`<br>`.github/workflows/_selected_tests.yaml`<br>`.github/workflows/schedule_main2main.yaml` | Ascend mirror (stable) <https://repo.huaweicloud.com/ascend/repos/pypi> |
 | memfabric-hybrid / memcache-hybrid | 1.5.0.dev20261125 | `requirements.txt`<br>`pyproject.toml` `[build-system]` | Ascend mirror (nightly) <https://repo.huaweicloud.com/ascend/repos/pypi/nightly> |
 | flash-linear-attention-npu (FLA) | 26.11.0.dev20261126 | Image build —<br>`Dockerfile`<br>`Dockerfile.openEuler`<br>`Dockerfile.a3`<br>`Dockerfile.a3.openEuler`<br>`Dockerfile.a5`<br>`Dockerfile.a5.openEuler`<br>PR —<br>`.github/workflows/_selected_tests.yaml`<br>`_selected_tests_upstream.yaml`<br>`schedule_e2e_upstream_test.yaml`<br>main2main —<br>`.github/workflows/schedule_main2main.yaml` | Ascend mirror (nightly) <https://repo.huaweicloud.com/ascend/repos/pypi/nightly>; the nightly build is published as `26.11.0.dev20261126+<commit>` for both x86_64 and aarch64; pin with `==26.11.0.dev20261126` (PEP 440 ignores the local version; `===` would require the full `+<commit>` string), and pip selects the matching wheel |
-| flash_attn_npu | 0.5.0 | Image build —<br>`Dockerfile`<br>`Dockerfile.openEuler`<br>`Dockerfile.a3`<br>`Dockerfile.a3.openEuler` | PyPI <https://pypi.org/simple/> (sdist only) |
+| flash_attn_npu | 0.6.0 | Image build —<br>`Dockerfile`<br>`Dockerfile.openEuler`<br>`Dockerfile.a3`<br>`Dockerfile.a3.openEuler`<br>`Dockerfile.a5`<br>`Dockerfile.a5.openEuler` | PyPI <https://pypi.org/simple/> (sdist only) |
 | mooncake-transfer-engine-npu | 0.3.14.post1 | Image build —<br>`Dockerfile`<br>`Dockerfile.openEuler`<br>`Dockerfile.a3`<br>`Dockerfile.a3.openEuler`<br>`Dockerfile.a5`<br>`Dockerfile.a5.openEuler`<br>PR / main2main —<br>`.github/workflows/_selected_tests.yaml`<br>`.github/workflows/schedule_main2main.yaml` | Ascend mirror (nightly) <https://repo.huaweicloud.com/ascend/repos/pypi/nightly> only; `manylinux_2_35` wheels, never in `requirements.txt` |
 | cannbotdsl / cannbot-arena-net-ops | 0.6.0+g91e7c8f / 0.1.0 | Image build —<br>`Dockerfile.a5`<br>`Dockerfile.a5.openEuler` | Ascend mirror (stable) <https://repo.huaweicloud.com/ascend/repos/pypi>, aarch64 only |
 | CANN | 9.2.1 | Image build — `FROM` tag of:<br>`Dockerfile`<br>`Dockerfile.openEuler`<br>`Dockerfile.310p`<br>`Dockerfile.310p.openEuler`<br>`Dockerfile.a3`<br>`Dockerfile.a3.openEuler`<br>`Dockerfile.a5`<br>`Dockerfile.a5.openEuler`<br>PR —<br>`mkdocs.yml` | `quay.io/ascend/cann` |
@@ -70,7 +70,7 @@ file. The `-` lines use the example versions from the table; replace
 +FROM quay.io/ascend/cann:<new-version>-a3-openeuler24.03-py3.12
 ...
 -ARG FLA_VERSION="26.10.0+feature"
--ARG FLASH_ATTN_NPU_VERSION="0.5.0"
+-ARG FLASH_ATTN_NPU_VERSION="0.6.0"
 -ARG MOONCAKE_VERSION="0.3.14.post1"
 +ARG FLA_VERSION="<new-version>"
 +ARG FLASH_ATTN_NPU_VERSION="<new-version>"
@@ -87,6 +87,9 @@ file. The `-` lines use the example versions from the table; replace
 ...
 -ARG FLA_VERSION="26.10.0+feature"
 +ARG FLA_VERSION="<new-version>"
+...
+-ARG FLASH_ATTN_NPU_VERSION="0.6.0"
++ARG FLASH_ATTN_NPU_VERSION="<new-version>"
 ...
 -python3 -m pip install "mooncake-transfer-engine-npu===0.3.14.post1" && \
 +python3 -m pip install "mooncake-transfer-engine-npu===<new-version>" && \
