@@ -44,6 +44,8 @@ from vllm_ascend.ops.fused_moe.moe_comm_method import (
 )
 from vllm_ascend.ops.fused_moe.moe_utils import get_moe_num_logical_experts
 from vllm_ascend.ops.fused_moe.prepare_finalize import PrepareAndFinalizeWithAllGather
+from vllm_ascend.ops.fused_moe.router.fused_topk_router import AscendFusedTopKRouter
+from vllm_ascend.ops.fused_moe.router.grouped_topk_router import AscendGroupedTopKRouter
 from vllm_ascend.quantization.nz import NzCastSpec
 from vllm_ascend.quantization.quant_type import QuantType
 from vllm_ascend.utils import ACL_FORMAT_FRACTAL_NZ, _should_trans_nz, maybe_trans_nz
@@ -569,12 +571,25 @@ class AscendRoutedExperts(RoutedExperts):  # type: ignore[no-redef]
             sync_lora_context(self.quant_method, lora_context)
 
         num_source_tokens = hidden_states.shape[0]
+        prepare_quant_type = self.quant_type
+        if (
+            prepare_quant_type in (QuantType.W8A8, QuantType.W8A8MXFP)
+            and isinstance(moe_comm_method, AllGatherCommImpl)
+            and self.moe_config.pcp_size > 1
+            and not self.moe_config.is_sequence_parallel
+            and (
+                self.apply_router_weight_on_input
+                # Subclasses can override expert selection and read activation values.
+                or type(self.router) not in (AscendFusedTopKRouter, AscendGroupedTopKRouter)
+            )
+        ):
+            prepare_quant_type = QuantType.NONE
         prepare_output = moe_comm_method.prepare(
             hidden_states=hidden_states,
             router_logits=router_logits,
             # The SP model wrapper already shards and gathers the MoE sequence.
             replace_allreduce=self.moe_config.is_sequence_parallel,
-            quant_type=self.quant_type,
+            quant_type=prepare_quant_type,
         )
         hidden_states = prepare_output.hidden_states
         router_logits = prepare_output.router_logits

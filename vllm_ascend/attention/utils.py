@@ -30,6 +30,7 @@ from vllm.v1.kv_cache_interface import (
 )
 
 from vllm_ascend.core.kv_cache_interface import get_kv_cache_compression_ratio, supports_component_major_mla_pd
+from vllm_ascend.device.device_config import AscendDeviceType, get_ascend_device_type
 from vllm_ascend.device.hardware_profile import HardwareCapability, get_current_hardware_profile
 from vllm_ascend.device.utils import FIA_TND_LARGE_HEAD_FALLBACK_HEAD_SIZE
 from vllm_ascend.distributed.kv_transfer.kv_pool.ascend_store.attention_fence import record_attention_prefetch_start
@@ -99,6 +100,23 @@ def combine_cache_components(data: torch.Tensor, scales: torch.Tensor) -> torch.
     return torch.as_strided(data, shape, (data.stride(0), *inner), storage_offset=data.storage_offset())
 
 
+def use_component_major_mla_pd_layout(vllm_config: VllmConfig) -> bool:
+    """Preserve direct connector layouts; single-child wrappers are validated on A3 Kimi DSpark."""
+    if not supports_component_major_mla_pd(vllm_config):
+        return False
+    if getattr(vllm_config.kv_transfer_config, "kv_connector", None) != "MultiConnector":
+        return True
+    return (
+        getattr(vllm_config, "use_v2_model_runner", False)
+        and vllm_config.model_config.hf_config.model_type == "kimi_k31"
+        and vllm_config.speculative_config is not None
+        and vllm_config.speculative_config.method == "dspark"
+        and vllm_config.parallel_config.pipeline_parallel_size == 1
+        and vllm_config.parallel_config.prefill_context_parallel_size == 1
+        and get_ascend_device_type() == AscendDeviceType.A3
+    )
+
+
 def supports_strided_mla_cache(
     vllm_config: VllmConfig,
     attn_module: AttentionLayerBase | None,
@@ -120,7 +138,7 @@ def supports_strided_mla_cache(
         or getattr(kv_cache_spec, "indexes_kv_by_block_stride", False)
         or getattr(attn_module, "indexes_kv_by_block_stride", False)
         or getattr(kv_cache_spec, "cache_sparse_sfa_c8", False)
-        or not supports_component_major_mla_pd(vllm_config)
+        or not use_component_major_mla_pd_layout(vllm_config)
         or getattr(attn_module, "indexer", None) is not None
     ):
         return False

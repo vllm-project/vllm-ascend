@@ -1,0 +1,16 @@
+pr: 21675
+entries:
+  - category: feature
+    text: >-
+      Added support for DFlash2 draft checkpoints that declare `dflash_config.attention_mode="mla"`,
+      including `Kimi-K3.1-Dflash2-Preview`. Sliding-window layers must be causal and require
+      a decode context parallel size of 1. For uniform causal windows, eligible A3
+      configurations use device-side MLA tiling with flash-attn-npu 0.5.1.post1 or newer.
+      Eligible A5 configurations use FlashMLA. Other supported configurations use FIA.
+  - category: bugfix
+    text: >-
+      Fixed missing Kimi K3.1 input embeddings on the last pipeline stage when a speculative
+      draft shares the target model's embeddings.
+  - category: bugfix
+    text: >-
+      Fixed incorrect draft token selection in DFlash2 when candidate scores contain NaN.

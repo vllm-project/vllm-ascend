@@ -150,3 +150,33 @@ def test_recoverssm_real_builder_propagates_pcp_context(for_capture):
         assert replay.pcp_restore_mask.tolist() == [True, True, True, False]
         assert replay.pcp_local_idx.tolist() == [0, 0]
         assert replay.pcp_local_mask.tolist() == [True, False]
+
+
+def test_recoverssm_commit_uses_corrected_lengths_across_page_boundary():
+    def make_builder(spec, layers, config, device):
+        config.cache_config.use_kda_recoverssm = True
+        config.compilation_config.static_forward_context = {name: object() for name in layers}
+        return AscendKimiKDARecoverSSMMetadataBuilder(spec, layers, config, device)
+
+    device = torch.device("cpu")
+    builder = _make_builder(
+        device=device,
+        num_heads=32,
+        num_speculative_tokens=3,
+        builder_cls=make_builder,
+        mamba_cache_mode="align",
+        block_size=16,
+    )
+    builder.recoverssm_context = SimpleNamespace(is_bound_to=lambda layers: True)
+    common = create_common_attn_metadata(BatchSpec(seq_lens=[33, 17], query_lens=[3, 2]), 16, device)
+    common.is_prefilling.fill_(False)
+    # The optimistic second row points at page 1; the corrected count
+    # after rejection puts its last token on page 0.
+    common.seq_lens = torch.tensor([33, 16], dtype=torch.int32)
+    meta = builder.build(0, common, torch.tensor([2, 1]), torch.tensor([2, 1]))
+    align = meta.recoverssm_commit.align
+    torch.testing.assert_close(align.num_computed_tokens, torch.tensor([30, 14], dtype=torch.int32))
+    assert meta.recoverssm_commit.state_indices[:, 0].tolist() == [
+        common.block_table_tensor[0, 2].item(),
+        common.block_table_tensor[1, 0].item(),
+    ]
