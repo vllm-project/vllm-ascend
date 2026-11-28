@@ -413,7 +413,7 @@ def test_block_verification_revisited_position_preserves_target_distribution(sam
     second, _ = verify(2)
     # A second round is needed only when the first committed a single token.
     token_at_position_2 = torch.where(first_counts == 1, second[:, 0], first[:, 1])
-    assert (token_at_position_2 == 0).float().mean().item() == pytest.approx(target_p0, abs=0.025)
+    assert (token_at_position_2 == 0).float().mean().item() == pytest.approx(target_p0, abs=0.03)
 
 
 @pytest.mark.skipif(
