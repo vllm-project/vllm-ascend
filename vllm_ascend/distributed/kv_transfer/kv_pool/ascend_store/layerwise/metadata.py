@@ -175,3 +175,4 @@ class LayerLoadTask:
     layer_id: int
     load_gate: AttentionLoadGate | None = None
     compute_boundary: torch.npu.Event | None = None
+    recv_trace_id: int | None = None
