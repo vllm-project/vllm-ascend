@@ -8,6 +8,7 @@ import pytest
 import torch
 from vllm.config import CUDAGraphMode
 
+from vllm_ascend.attention.dsa_v41_indexer_shard import IndexerRowPartition
 from vllm_ascend.models.deepseek_v41 import decoder_replay_layers as replay_mod
 from vllm_ascend.models.deepseek_v41 import model as model_mod
 from vllm_ascend.models.deepseek_v41.model import DeepseekV41Model
@@ -51,7 +52,9 @@ def test_decoder_replay_with_parallel_layouts(pcp_size, prefix_caching, dp_size,
     assert model.decoder_replay_start == 1
 
 
-def test_packed_replay_compacts_sparse_lengths_with_indices(monkeypatch):
+@pytest.mark.parametrize("packed", [False, True])
+@pytest.mark.parametrize("pp_size", [1, 2])
+def test_replay_compacts_only_backend_required_buffers(monkeypatch, packed, pp_size):
     buffers = [torch.arange(6) + offset for offset in (0, 10, 20, 30)]
     model = SimpleNamespace(
         config=SimpleNamespace(kv_source_layer_ids=[2], engram_layer_ids=[1], sliding_window=2),
@@ -60,13 +63,13 @@ def test_packed_replay_compacts_sparse_lengths_with_indices(monkeypatch):
         topk_indices_buffer=buffers[0],
         candidate_indices_buffer=buffers[1],
         candidate_lengths_buffer=buffers[2],
-        topk_lengths_buffer=buffers[3],
+        topk_lengths_buffer=buffers[3] if packed else None,
         _run_replay_layers=lambda hidden, optional, positions: (hidden,),
     )
     config = SimpleNamespace(
         cache_config=SimpleNamespace(swa_bounded_replay=True),
         parallel_config=SimpleNamespace(
-            pipeline_parallel_size=1,
+            pipeline_parallel_size=pp_size,
             prefill_context_parallel_size=1,
             decode_context_parallel_size=1,
             use_ubatching=False,
@@ -81,8 +84,38 @@ def test_packed_replay_compacts_sparse_lengths_with_indices(monkeypatch):
     replay.num_actual_rows = 2
     replay.context_factory = nullcontext
     replay(torch.arange(6), None, torch.arange(6))
-    for buffer, offset in zip(buffers, (0, 10, 20, 30)):
-        assert buffer[:2].tolist() == [offset + 4, offset + 5]
+    num_buffers = 4 if packed else 3
+    assert len(replay.row_buffers) == num_buffers
+    assert len(replay.output_row_buffers) == (num_buffers if pp_size > 1 else 0)
+    for buffer, offset in zip(buffers[:num_buffers], (0, 10, 20, 30)):
+        if pp_size > 1:
+            assert buffer.tolist() == [0, 0, 0, 0, offset + 4, offset + 5]
+        else:
+            assert buffer[:2].tolist() == [offset + 4, offset + 5]
+
+
+@pytest.mark.parametrize("with_lengths", [False, True])
+def test_replay_redistributes_only_retained_candidate_rows(monkeypatch, with_lengths):
+    candidates = torch.tensor([[-1, -1], [-1, -1], [8, -1], [9, 10]], dtype=torch.int32).unsqueeze(1)
+    lengths = torch.tensor([[0], [0], [1], [2]], dtype=torch.int32)
+    shared = model_mod.DeepseekV41SharedAttentionState(None, candidates, lengths if with_lengths else None)
+    shared.candidate_partition = IndexerRowPartition((2, 2), 1)
+    contributions = iter([torch.tensor([[[4, 0]], [[0, 0]]]), torch.tensor([[1], [0]])])
+    calls = []
+
+    def all_reduce(values):
+        calls.append(values.shape)
+        return values + next(contributions)
+
+    monkeypatch.setattr(model_mod, "get_tp_group", lambda: SimpleNamespace(all_reduce=all_reduce))
+
+    shared.compact_candidates(torch.tensor([1, 3]), num_padded_rows=3)
+
+    assert candidates[:3].squeeze(1).tolist() == [[3, -1], [9, 10], [-1, -1]]
+    assert len(calls) == (2 if with_lengths else 1)
+    if with_lengths:
+        assert lengths[:3].flatten().tolist() == [1, 2, 0]
+    assert shared.candidate_partition is None
 
 
 def test_cut_layer_trim_writes_full_batch_before_replay():

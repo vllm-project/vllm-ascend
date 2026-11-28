@@ -1758,7 +1758,9 @@ def graph_manager_wrapper(model_runner):
         decode_query_lens: Mapping[int, int] | None = None,
     ):
         assert decode_query_lens is not None
-        return ModelAclGraphManager(
+        get_manager_cls = getattr(model_runner.model_state, "get_graph_manager_cls", None)
+        manager_cls = get_manager_cls() if get_manager_cls is not None else ModelAclGraphManager
+        return manager_cls(
             vllm_config,
             device,
             cudagraph_mode,
