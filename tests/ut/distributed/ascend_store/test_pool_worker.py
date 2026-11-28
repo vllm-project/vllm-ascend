@@ -68,6 +68,7 @@ from vllm_ascend.distributed.kv_transfer.kv_pool.ascend_store.layerwise.planes.g
 from vllm_ascend.distributed.kv_transfer.kv_pool.ascend_store.layerwise.pool_worker import LayerwiseKVPoolWorker
 from vllm_ascend.distributed.kv_transfer.kv_pool.ascend_store.metadata import (
     AscendConnectorMetadata,
+    AscendStoreKVConnectorWorkerMetadata,
     ChunkedTokenDatabase,
     KeyMetadata,
     LoadSpec,
@@ -75,6 +76,40 @@ from vllm_ascend.distributed.kv_transfer.kv_pool.ascend_store.metadata import (
     StoreLookupResult,
     block_hash_to_str,
 )
+from vllm_ascend.distributed.kv_transfer.kv_pool.ascend_store.pool_worker import BaseKVPoolWorker
+
+
+@pytest.mark.parametrize("parent_meta", [None, SimpleNamespace(completed_events={7: 1})])
+def test_layerwise_read_pin_acks_preserve_compatible_parent_events(parent_meta):
+    worker = LayerwiseKVPoolWorker.__new__(LayerwiseKVPoolWorker)
+    worker._scheduler_read_pin_acks = {12}
+
+    with (
+        patch.object(BaseKVPoolWorker, "build_connector_worker_meta", return_value=parent_meta),
+        patch(
+            "vllm_ascend.distributed.kv_transfer.kv_pool.ascend_store.layerwise.pool_worker.get_world_group",
+            return_value=SimpleNamespace(rank=3),
+        ),
+    ):
+        meta = worker.build_connector_worker_meta()
+
+    assert isinstance(meta, AscendStoreKVConnectorWorkerMetadata)
+    assert meta.completed_events == getattr(parent_meta, "completed_events", {})
+    assert meta.scheduler_read_pin_acks == {12: {3}}
+    assert worker._scheduler_read_pin_acks == set()
+
+
+def test_read_pin_ack_aggregate_deduplicates_ranks_and_rejects_foreign_metadata():
+    left = AscendStoreKVConnectorWorkerMetadata({7: 1}, {12: {0, 1}})
+    right = AscendStoreKVConnectorWorkerMetadata({7: 1}, {12: {1, 2}})
+
+    combined = left.aggregate(right)
+
+    assert combined.completed_events == {7: 2}
+    assert combined.scheduler_read_pin_acks == {12: {0, 1, 2}}
+    assert left.scheduler_read_pin_acks == {12: {0, 1}}
+    with pytest.raises(TypeError, match="Cannot aggregate AscendStore worker metadata"):
+        left.aggregate(SimpleNamespace(completed_events={7: 1}))
 
 
 class TestDSparkPrefixRegistration(unittest.TestCase):

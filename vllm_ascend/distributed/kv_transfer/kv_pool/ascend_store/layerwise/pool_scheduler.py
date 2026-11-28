@@ -1,12 +1,22 @@
+import ctypes
+import importlib
+import os
+import secrets
 from collections.abc import Sequence
-from typing import Any
+from dataclasses import dataclass
+from itertools import count
+from pathlib import Path
+from typing import Any, cast
 
 from vllm.config import VllmConfig
 from vllm.logger import logger
 from vllm.v1.core.kv_cache_utils import BlockHash
+from vllm.v1.core.sched.output import SchedulerOutput
 from vllm.v1.kv_cache_interface import KVCacheConfig
+from vllm.v1.outputs import KVConnectorOutput
 from vllm.v1.request import Request
 
+from vllm_ascend import envs
 from vllm_ascend.distributed.kv_transfer.kv_pool.ascend_store.backend import (
     resolve_backend,
 )
@@ -15,6 +25,8 @@ from vllm_ascend.distributed.kv_transfer.kv_pool.ascend_store.layerwise.layerwis
     get_layerwise_reuse_backing_bytes,
 )
 from vllm_ascend.distributed.kv_transfer.kv_pool.ascend_store.metadata import (
+    AscendConnectorMetadata,
+    AscendStoreKVConnectorWorkerMetadata,
     LoadSpec,
     ReqMeta,
     RequestTracker,
@@ -24,6 +36,39 @@ from vllm_ascend.distributed.kv_transfer.kv_pool.ascend_store.metadata import (
     get_sharded_mamba_group_ids,
 )
 from vllm_ascend.distributed.kv_transfer.kv_pool.ascend_store.pool_scheduler import BaseKVPoolScheduler
+
+_SCHEDULER_READ_LEASE_TTL_MS = 5 * 60 * 1000
+_scheduler_lease_identity: tuple[int, int] | None = None
+
+
+@dataclass
+class _SchedulerReadPin:
+    keys: tuple[str, ...]
+    in_flight_steps: int = 0
+    terminal: bool = False
+
+
+def _enable_metadata_lease_namespace() -> None:
+    global _scheduler_lease_identity
+    pid = os.getpid()
+    if _scheduler_lease_identity is None or _scheduler_lease_identity[0] != pid:
+        _scheduler_lease_identity = (pid, (1 << 31) + secrets.randbelow((1 << 31) - 1))
+    try:
+        package = importlib.import_module("memcache_hybrid")
+        extension = importlib.import_module("_pymmc")
+        extension_path = Path(extension.__file__).resolve()
+        if extension_path.parent != Path(package.__file__).resolve().parent:
+            raise RuntimeError("Memcache scheduler lease package and extension come from different wheels")
+        # Resolve through the loaded extension's link scope, not a separately
+        # opened .so that the extension might not actually be using.
+        capability = ctypes.CDLL(str(extension_path)).mmc_metadata_read_lease_namespace_v1
+    except (AttributeError, ImportError, OSError) as error:
+        raise RuntimeError("Loaded Memcache Hybrid lacks the scheduler read lease namespace v1") from error
+    capability.argtypes = []
+    capability.restype = ctypes.c_int
+    if capability() != 1:
+        raise RuntimeError(f"Memcache scheduler read lease namespace version mismatch in {extension_path}")
+    envs.set_memcache_metadata_lease_owner_id(_scheduler_lease_identity[1])
 
 
 class LayerwiseKVPoolScheduler(BaseKVPoolScheduler):
@@ -45,6 +90,15 @@ class LayerwiseKVPoolScheduler(BaseKVPoolScheduler):
             )
         self.use_block_key_layerwise = use_layerwise and self.layerwise_data_plane == "block_key"
         self.use_layerwise_transfer = use_layerwise and self.layerwise_data_plane == "gva"
+        self._pin_external_prefix = extra_config.get("layerwise_pin_external_prefix", False)
+        if type(self._pin_external_prefix) is not bool:
+            raise ValueError("layerwise_pin_external_prefix must be a boolean")
+        if self._pin_external_prefix:
+            if backend_name != "memcache" or not self.use_layerwise_transfer:
+                raise ValueError("Scheduler read leases require Memcache layerwise GVA")
+            if vllm_config.cache_config.enable_prefix_caching:
+                raise ValueError("Scheduler read leases require local APC disabled")
+            _enable_metadata_lease_namespace()
         self.dspark_prefix_keys: DSparkPrefixKeys | None = None
         self.dspark_draft_only_group_ids = frozenset(getattr(kv_cache_config, "dspark_draft_only_group_ids", ()))
         super().__init__(vllm_config, use_layerwise, kv_cache_config)
@@ -76,6 +130,212 @@ class LayerwiseKVPoolScheduler(BaseKVPoolScheduler):
             and len(cacheable_block_sizes) != len(self.original_block_size)
         ):
             raise ValueError("AscendStore private KV state requires Mooncake block-key or non-layerwise transfer")
+
+        if self._pin_external_prefix:
+            if not self.layerwise_offload:
+                raise ValueError("Scheduler read leases require layerwise KV offload")
+            self._pending_read_pins: dict[str, _SchedulerReadPin] = {}
+            self._active_read_pins: dict[str, _SchedulerReadPin] = {}
+            self._read_pin_references: dict[str, int] = {}
+            self._read_pin_tickets = count()
+            self._read_pin_steps: dict[int, tuple[list[_SchedulerReadPin], set[int]]] = {}
+            self._expected_worker_count = vllm_config.parallel_config.world_size
+
+    def _external_read_pin_keys(self, request: Request, spec: LoadSpec) -> tuple[str, ...]:
+        # Use the worker's initial GVA boundary and the existing physical shard
+        # key builder, including the sparse hybrid reachability mask.
+        tokens = spec.kvpool_cached_tokens if self.use_eagle else spec.pool_hit_tokens
+        masks = self.cache_coordinator.load_mask(request.block_hashes, tokens) if self.cache_coordinator else None
+        keys: dict[str, None] = {}
+        for group_id in self.cacheable_group_ids:
+            block_size = self.grouped_block_size[group_id]
+            block_count, remainder = divmod(tokens, block_size)
+            hashes = get_block_hashes(request.block_hashes, block_size, self.hash_block_size)
+            # An initial public hit cannot promise a private partial snapshot.
+            if remainder or block_count > len(hashes):
+                return ()
+            mask = masks[group_id] if masks is not None and group_id < len(masks) else None
+            needed = (idx for idx in range(block_count) if mask is None or idx >= len(mask) or mask[idx])
+            for index in needed:
+                for key in self._make_layerwise_hit_check_keys(group_id, block_hash_to_str(hashes[index])):
+                    keys[key] = None
+        return tuple(keys)
+
+    def _remove_native_read_leases(self, keys: list[str]) -> None:
+        store = getattr(self, "store_scheduler", None)
+        if not keys:
+            return
+        if store is None:
+            logger.warning("Scheduler store unavailable during read lease cleanup for %d keys", len(keys))
+            return
+        try:
+            status = store.batch_remove_lease(keys)
+        except Exception:
+            logger.exception("Scheduler read lease cleanup failed for %d keys", len(keys))
+            return
+        if status != 0:
+            logger.error("Scheduler read lease cleanup failed for %d keys, status=%s", len(keys), status)
+
+    def _reserve_external_read_pins(self, keys: tuple[str, ...]) -> _SchedulerReadPin | None:
+        store = getattr(self, "store_scheduler", None)
+        if not keys or store is None:
+            return None
+        new_keys = [key for key in keys if key not in self._read_pin_references]
+        if new_keys:
+            try:
+                results = store.batch_add_lease(new_keys, _SCHEDULER_READ_LEASE_TTL_MS)
+            except Exception:
+                # Grants may have committed before the batch reply was lost.
+                logger.exception("Scheduler read lease acquisition failed for %d keys", len(new_keys))
+                self._remove_native_read_leases(new_keys)
+                return None
+            if not isinstance(results, (list, tuple)):
+                self._remove_native_read_leases(new_keys)
+                return None
+            successes = [
+                key for key, status in zip(new_keys, results, strict=False) if type(status) is int and status == 0
+            ]
+            if len(results) != len(new_keys) or len(successes) != len(new_keys):
+                self._remove_native_read_leases(successes)
+                return None
+            # An eviction already committing may have won the race.
+            try:
+                readable = store.batch_is_readable(new_keys)
+            except Exception:
+                logger.exception("Scheduler read lease recheck failed for %d keys", len(new_keys))
+                self._remove_native_read_leases(successes)
+                return None
+            if (
+                not isinstance(readable, (list, tuple))
+                or len(readable) != len(new_keys)
+                or not all(status is True for status in readable)
+            ):
+                self._remove_native_read_leases(successes)
+                return None
+        for key in keys:
+            self._read_pin_references[key] = self._read_pin_references.get(key, 0) + 1
+        return _SchedulerReadPin(keys)
+
+    def _release_external_read_pins(self, pin: _SchedulerReadPin) -> None:
+        keys = []
+        for key in pin.keys:
+            owners = self._read_pin_references[key] - 1
+            if owners:
+                self._read_pin_references[key] = owners
+            else:
+                self._read_pin_references.pop(key)
+                keys.append(key)
+        self._remove_native_read_leases(keys)
+
+    def _finish_external_read_pins(self, request_id: str) -> None:
+        pin = self._active_read_pins.pop(request_id, None)
+        if pin is not None:
+            pin.terminal = True
+            if pin.in_flight_steps == 0:
+                self._release_external_read_pins(pin)
+
+    def get_num_new_matched_tokens(self, request: Request, num_computed_tokens: int) -> tuple[int, bool]:
+        if not getattr(self, "_pin_external_prefix", False):
+            return super().get_num_new_matched_tokens(request, num_computed_tokens)
+        # A nonzero resident prefix would prevent recomputing the whole input
+        # when pinning fails. The opt-in setup requires local APC disabled.
+        if num_computed_tokens:
+            raise RuntimeError("Scheduler read leases require an empty resident prefix")
+        prior = self._pending_read_pins.pop(request.request_id, None)
+        if prior is not None:
+            self._release_external_read_pins(prior)
+        result = super().get_num_new_matched_tokens(request, num_computed_tokens)
+        spec = self.load_specs.get(request.request_id)
+        if spec is None or not spec.can_load:
+            return result
+        pin = self._reserve_external_read_pins(self._external_read_pin_keys(request, spec))
+        if pin is None:
+            self.load_specs.pop(request.request_id, None)
+            logger.debug("Scheduler read lease unavailable for %s; computing the prefix", request.request_id)
+            return 0, False
+        self._pending_read_pins[request.request_id] = pin
+        return result
+
+    def build_connector_meta(self, scheduler_output: SchedulerOutput) -> AscendConnectorMetadata:
+        if not getattr(self, "_pin_external_prefix", False):
+            return cast(AscendConnectorMetadata, super().build_connector_meta(scheduler_output))
+        for request_id in scheduler_output.finished_req_ids | scheduler_output.preempted_req_ids:
+            self._finish_external_read_pins(request_id)
+        pending = self._pending_read_pins
+        self._pending_read_pins = {}
+        try:
+            meta = cast(AscendConnectorMetadata, super().build_connector_meta(scheduler_output))
+        except Exception:
+            for request_id, pin in pending.items():
+                self.load_specs.pop(request_id, None)
+                self._release_external_read_pins(pin)
+            raise
+        step_pins = []
+        for request in meta.requests:
+            request_id = request.req_id
+            spec = request.load_spec
+            if spec is None or not spec.can_load:
+                continue
+            if request_id in pending and not spec.layerwise_previous_step:
+                self._finish_external_read_pins(request_id)
+                self._active_read_pins[request_id] = pending.pop(request_id)
+            pin = self._active_read_pins.get(request_id)
+            if pin is not None:
+                pin.in_flight_steps += 1
+                step_pins.append(pin)
+        for request_id, pin in pending.items():
+            self.load_specs.pop(request_id, None)
+            self._release_external_read_pins(pin)
+        if step_pins:
+            ticket = next(self._read_pin_tickets)
+            meta.scheduler_read_pin_ticket = ticket
+            self._read_pin_steps[ticket] = (step_pins, set())
+        return meta
+
+    def update_connector_output(self, connector_output: KVConnectorOutput) -> None:
+        super().update_connector_output(connector_output)
+        if not getattr(self, "_pin_external_prefix", False):
+            return
+        meta = connector_output.kv_connector_worker_meta
+        if not isinstance(meta, AscendStoreKVConnectorWorkerMetadata):
+            return
+        for ticket, ranks in meta.scheduler_read_pin_acks.items():
+            step = self._read_pin_steps.get(ticket)
+            if step is None:
+                continue
+            pins, observed = step
+            observed.update(ranks)
+            if len(observed) < self._expected_worker_count:
+                continue
+            del self._read_pin_steps[ticket]
+            for pin in pins:
+                pin.in_flight_steps -= 1
+                if pin.terminal and pin.in_flight_steps == 0:
+                    self._release_external_read_pins(pin)
+
+    def _drop_external_read_pin(self, request_id: str) -> None:
+        if getattr(self, "_pin_external_prefix", False):
+            pending = self._pending_read_pins.pop(request_id, None)
+            if pending is not None:
+                self.load_specs.pop(request_id, None)
+                self._release_external_read_pins(pending)
+            self._finish_external_read_pins(request_id)
+
+    def request_finished(self, request: Request, block_ids: list[int]) -> tuple[bool, dict[str, Any] | None]:
+        self._drop_external_read_pin(request.request_id)
+        return super().request_finished(request, block_ids)
+
+    def request_finished_all_groups(
+        self, request: Request, block_ids: tuple[list[int], ...]
+    ) -> tuple[bool, dict[str, Any] | None]:
+        self._drop_external_read_pin(request.request_id)
+        return super().request_finished_all_groups(request, block_ids)
+
+    def reset_store(self) -> bool:
+        if getattr(self, "_pin_external_prefix", False) and self._read_pin_references:
+            logger.warning("AscendStore reset deferred until scheduler read leases are released")
+            return False
+        return super().reset_store()
 
     def _process_hit_without_alloc(self, store_skip_tokens: int) -> bool:
         return store_skip_tokens > 0

@@ -1,0 +1,4 @@
+pr: 23524
+entries:
+  - category: bugfix
+    text: Memcache layerwise GVA KV offload can protect external prefix hits with read leases before scheduling. With a compatible Memcache build and local prefix caching disabled, set `layerwise_pin_external_prefix` to `true` to recompute the prefix when the required blocks cannot be protected.

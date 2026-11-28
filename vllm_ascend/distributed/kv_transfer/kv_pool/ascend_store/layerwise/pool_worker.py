@@ -12,6 +12,7 @@ from vllm.config import VllmConfig
 from vllm.distributed import (
     get_pcp_group,
     get_tp_group,
+    get_world_group,
 )
 from vllm.logger import logger
 from vllm.utils.math_utils import cdiv
@@ -65,6 +66,7 @@ from vllm_ascend.distributed.kv_transfer.kv_pool.ascend_store.layerwise.metadata
 from vllm_ascend.distributed.kv_transfer.kv_pool.ascend_store.layerwise.planes import make_data_plane
 from vllm_ascend.distributed.kv_transfer.kv_pool.ascend_store.metadata import (
     AscendConnectorMetadata,
+    AscendStoreKVConnectorWorkerMetadata,
     ReqMeta,
     block_hash_to_str,
     get_block_hashes,
@@ -117,6 +119,7 @@ class LayerwiseKVPoolWorker(BaseKVPoolWorker):
         self.use_layerwise_transfer = self.layerwise_data_plane == "gva"
         self.has_shared_kv = has_shared_kv_sources(vllm_config)
         self._step_load_keys: set[str] = set()
+        self._scheduler_read_pin_acks: set[int] = set()
         # Request ID -> cache group ID -> request block index -> private pool key.
         self._snapshot_keys: dict[str, dict[int, dict[int, str]]] = {}
         super()._init_kv_transfer_config(vllm_config, extra_config, use_layerwise, kv_cache_config)
@@ -633,7 +636,23 @@ class LayerwiseKVPoolWorker(BaseKVPoolWorker):
                 logger.error("AscendStore lease cleanup returned %s; backend TTL will reclaim leases", result)
         if self.use_block_key_layerwise:
             self._release_layerwise_requests_terminal(finished_req_ids | meta.preempted_req_ids)
-        return super().get_finished(finished_req_ids, meta)
+        finished = super().get_finished(finished_req_ids, meta)
+        ticket = getattr(meta, "scheduler_read_pin_ticket", None)
+        if ticket is not None:
+            self._scheduler_read_pin_acks.add(ticket)
+        return finished
+
+    def build_connector_worker_meta(self) -> AscendStoreKVConnectorWorkerMetadata | None:
+        meta = super().build_connector_worker_meta()
+        if not getattr(self, "_scheduler_read_pin_acks", None):
+            return meta
+        if not isinstance(meta, AscendStoreKVConnectorWorkerMetadata):
+            meta = AscendStoreKVConnectorWorkerMetadata(dict(getattr(meta, "completed_events", {})))
+        rank = get_world_group().rank
+        for ticket in self._scheduler_read_pin_acks:
+            meta.scheduler_read_pin_acks.setdefault(ticket, set()).add(rank)
+        self._scheduler_read_pin_acks.clear()
+        return meta
 
     def _build_lookup_keys(
         self,

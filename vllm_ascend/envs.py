@@ -95,6 +95,11 @@ env_variables: dict[str, Callable[[], Any]] = {
 # end-env-vars-definition
 
 
+def set_memcache_metadata_lease_owner_id(owner_id: int) -> None:
+    """Pass the process-local owner ID to the Memcache SDK before client creation."""
+    os.environ["MMC_METADATA_LEASE_OWNER_ID"] = str(owner_id)
+
+
 def __getattr__(name: str):
     # lazy evaluation of environment variables
     if name in env_variables:
