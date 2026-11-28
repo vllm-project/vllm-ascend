@@ -22,9 +22,13 @@ from vllm.v1.core.kv_cache_planning import (
 )
 from vllm.v1.core.kv_cache_planning import _pool_bytes_per_block as _upstream_pool_bytes_per_block
 from vllm.v1.core.kv_cache_planning import get_kv_cache_config_from_groups as _upstream_get_kv_cache_config_from_groups
+from vllm.v1.hisparse.layout import _fill_hisparse_groups, _group_page_bytes
 from vllm.v1.kv_cache_interface import (
     FullAttentionSpec,
+    HiSparseHotSpec,
+    HiSparseResidentSpec,
     KVCacheConfig,
+    KVCacheGroupRole,
     KVCacheGroupSpec,
     KVCacheSpec,
     KVCacheSpecKind,
@@ -35,6 +39,7 @@ from vllm.v1.kv_cache_interface import (
     get_kv_cache_spec_kind,
 )
 
+from vllm_ascend.core.kv_cache_interface import AscendSFAIndexerCacheSpec
 from vllm_ascend.distributed.kv_transfer.kv_pool.ascend_store.layerwise.cache_planner import (
     get_layerwise_offload_config,
     get_spec_reuse_rules,
@@ -127,11 +132,30 @@ class AscendKVCacheConfigBuilder(DefaultKVCacheConfigBuilder):
         groups = super().get_kv_cache_groups(vllm_config, kv_cache_spec)
         if vllm_config.attention_config.hisparse_config is None:
             return groups
+        indexer_group = next((group for group in groups if group.role is KVCacheGroupRole.HISPARSE_INDEXER), None)
+        if indexer_group and vllm_config.cache_config.get_resolved_kv_cache_layout().is_block_outermost:
+            stride = _upstream_pool_bytes_per_block(vllm_config, groups)
+            if any(
+                stride % spec.page_size_bytes
+                for spec in indexer_group.kv_cache_spec.kv_cache_specs.values()
+                if isinstance(spec, AscendSFAIndexerCacheSpec)
+            ):
+                # Ascend binds Indexer blocks as whole pages within the shared slab.
+                mla_specs = {name: spec for name, spec in kv_cache_spec.items() if isinstance(spec, MLAAttentionSpec)}
+                regular_groups = [
+                    group
+                    for group in groups
+                    if group.layer_names[0] in kv_cache_spec
+                    and not isinstance(
+                        kv_cache_spec[group.layer_names[0]], (MLAAttentionSpec, HiSparseHotSpec, HiSparseResidentSpec)
+                    )
+                ]
+                groups = _fill_hisparse_groups(
+                    vllm_config, mla_specs, regular_groups, max(map(_group_page_bytes, regular_groups), default=0)
+                )
         transfer_config = vllm_config.kv_transfer_config
         if transfer_config is None or not transfer_config.has_connector("AscendStoreConnector"):
             return groups
-
-        from vllm.v1.kv_cache_interface import HiSparseResidentSpec
 
         from vllm_ascend.distributed.kv_transfer.kv_pool.ascend_store.hisparse.admission import (
             AscendStoreHiSparseResidentSpec,
