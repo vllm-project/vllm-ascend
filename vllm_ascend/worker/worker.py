@@ -1120,16 +1120,21 @@ class NPUWorker(GPUWorker):
         # may cause performance degradation at runtime.
         if get_current_hardware_profile().supports(HardwareCapability.ATB_WARMUP):
             self._warm_up_atb()
-        # Keep thread affinity after warmup and capture. Engram HOST_UVA tables
-        # are already registered here; process-wide migration must not revisit
-        # their pinned backing, which may also be shared across NUMA nodes.
-        if get_ascend_config().enable_cpu_binding:
+        # Keep thread affinity after warmup and capture. Shared Host allocations
+        # are already mapped here; avoid process-wide migration for Engram
+        # HOST_UVA tables and Mooncake sparse KV pools.
+        ascend_config = get_ascend_config()
+        if ascend_config.enable_cpu_binding:
             engram_config = getattr(self.vllm_config, "engram_config", None)
+            sparse_cfg = ascend_config.sparse_kv_offload_config
+            mooncake_host_offload = sparse_cfg.enabled and sparse_cfg.host_backend == "mooncake"
             try:
                 bind_cpus(
                     self.local_rank,
                     npu_id=current_platform.device_id_to_physical_device_id(self.local_rank),
-                    migrate_memory=not (engram_config is not None and engram_config.cpu_offload),
+                    migrate_memory=not (
+                        (engram_config is not None and engram_config.cpu_offload) or mooncake_host_offload
+                    ),
                 )
             except Exception as e:
                 logger.warning("Bind cpus failed in rank%s: %s Skip binding cpu.", self.local_rank, e)

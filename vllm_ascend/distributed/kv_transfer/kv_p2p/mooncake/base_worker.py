@@ -549,7 +549,7 @@ class MooncakeBaseConnectorWorker(MooncakeTransferAddressMixin):
             raise ValueError("MooncakeConnectorV2 does not support KV sharing with KV parallelism.")
 
         for layer_name, target_name in sorted(sharing_targets.items()):
-            if target_name not in configured_layers:
+            if target_name is None or target_name not in configured_layers:
                 raise ValueError(
                     f"KV sharing layer {layer_name!r} must target a configured owner, got {target_name!r}."
                 )

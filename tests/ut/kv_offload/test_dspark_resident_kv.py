@@ -478,11 +478,14 @@ def test_real_allocator_separates_host_target_and_persistent_mla_draft(monkeypat
     )
     host_calls = []
     host_marker = object()
+    host_allocator = SimpleNamespace(allocate_host_kv_tensors=Mock())
 
-    def allocate_host(k_bytes, v_bytes, alignment, rank, keep_device, allocate_device):
+    def allocate_host(k_bytes, v_bytes, alignment, rank, keep_device, allocate_device, allocate_host):
+        assert allocate_host is host_allocator.allocate_host_kv_tensors
         host_calls.append((k_bytes, v_bytes, rank, keep_device))
         return host_marker
 
+    monkeypatch.setattr(attn_utils, "get_sparse_kv_offload_manager", lambda: host_allocator)
     monkeypatch.setattr(attn_utils, "allocate_kv_cache_tensors_for_sparse_kv_offload", allocate_host)
     raw = attn_utils._allocate_kv_cache(config, shared_layers={}, device=torch.device("cpu"))
     assert raw["target.attn"] is host_marker
