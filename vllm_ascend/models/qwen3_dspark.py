@@ -32,5 +32,5 @@ class AscendQwen3DSparkForCausalLM(Qwen3DSparkForCausalLM):
         if set_capture_mode is not None:
             set_capture_mode(True)
 
-    def post_process(self, vllm_config: VllmConfig, *, on_embedding_replaced=None) -> None:
-        align_draft_weights(self, self.model.fc, vllm_config, on_embedding_replaced=on_embedding_replaced)
+    def post_process(self, vllm_config: VllmConfig, *, target_model=None) -> None:
+        align_draft_weights(self, self.model.fc, vllm_config, target_model=target_model)

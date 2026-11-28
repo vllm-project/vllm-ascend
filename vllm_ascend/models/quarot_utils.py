@@ -1,7 +1,7 @@
 # SPDX-License-Identifier: Apache-2.0
 # SPDX-FileCopyrightText: Copyright contributors to the vLLM project
 
-"""Shared QuaRot weight-alignment helpers for draft models.
+"""Shared weight-alignment and embedding helpers for draft models.
 
 This module must stay importable independently of any DSpark/DFlash
 model module; do not import model classes here.
@@ -9,19 +9,22 @@ model module; do not import model classes here.
 
 import json
 import logging
-from collections.abc import Callable
 from pathlib import Path
 
 import torch
 from safetensors import safe_open
 from torch import nn
-from vllm.distributed import GroupCoordinator, get_pp_group
+from vllm.distributed import get_pp_group, parallel_state
+from vllm.lora.layers.base import BaseLayerWithLoRA
 from vllm.model_executor.layers.vocab_parallel_embedding import ParallelLMHead, VocabParallelEmbedding
+from vllm.model_executor.models.utils import PPMissingLayer
+from vllm.v1.worker.gpu.spec_decode.eagle.utils import get_target_lm_head
 
 from vllm_ascend.utils import (
     get_rotation_matrix,
     get_rotation_path,
     lmhead_tp_enable,
+    vllm_version_is,
 )
 
 logger = logging.getLogger(__name__)
@@ -132,10 +135,48 @@ def process_weight(linear_weight: torch.Tensor, rotation_weight: torch.Tensor):
     return processed_weight.to(ori_dtype)
 
 
+def _shares_embedding(candidate, embedding):
+    if isinstance(candidate, BaseLayerWithLoRA):
+        candidate = candidate.base_layer
+    if isinstance(embedding, BaseLayerWithLoRA):
+        embedding = embedding.base_layer
+    weight = getattr(embedding, "weight", None)
+    return candidate is embedding or (weight is not None and getattr(candidate, "weight", None) is weight)
+
+
+def _unused_target_embed_owner(target_model, vllm_config, pp):
+    is_last_pp_stage = pp.world_size > 1 and pp.is_last_rank
+    # The runner only loads drafts on the physical last rank inside single_pp_stage().
+    if not is_last_pp_stage and (vllm_version_is("0.34.0") or not parallel_state.in_single_pp_stage()):
+        return None
+    if getattr(vllm_config.model_config.hf_text_config, "tie_word_embeddings", False):
+        return None
+
+    language_model = target_model.get_language_model() if hasattr(target_model, "get_language_model") else target_model
+    target_inner = getattr(language_model, "model", language_model)
+    embedding = getattr(target_inner, "embed_tokens", None)
+    if embedding is None or isinstance(embedding, PPMissingLayer):
+        return None
+    if _shares_embedding(get_target_lm_head(target_model, language_model), embedding):
+        return None
+    return target_inner
+
+
+def release_unshared_target_embedding(target_model, draft_model, vllm_config):
+    # A draft can load a private embedding from the checkpoint without QuaRot.
+    if draft_model is None:
+        return
+    target_inner = _unused_target_embed_owner(target_model, vllm_config, get_pp_group())
+    if target_inner is None:
+        return
+    draft_embed = getattr(getattr(draft_model, "model", None), "embed_tokens", None)
+    if draft_embed is not None and not isinstance(draft_embed, PPMissingLayer):
+        if not _shares_embedding(draft_embed, target_inner.embed_tokens):
+            target_inner.embed_tokens = PPMissingLayer()
+
+
 @torch.no_grad()
-def align_draft_weights(
-    model, projection, vllm_config, *, on_embedding_replaced: Callable[[GroupCoordinator], None] | None = None
-):
+def align_draft_weights(model, projection, vllm_config, *, target_model=None):
     """Align draft inputs with the rotated target without modifying shared weights."""
     rotation_path = get_rotation_path(vllm_config)
     if rotation_path is not None:
@@ -177,5 +218,7 @@ def align_draft_weights(
         layer.quant_method.process_weights_after_loading(layer)
         setattr(owner, name, layer)
         setattr(model, own_flag, True)
-        if name == "embed_tokens" and rotation is not None and on_embedding_replaced is not None:
-            on_embedding_replaced(get_pp_group())
+        if name == "embed_tokens" and rotation is not None and target_model is not None:
+            target_inner = _unused_target_embed_owner(target_model, vllm_config, get_pp_group())
+            if target_inner is not None:
+                target_inner.embed_tokens = PPMissingLayer()

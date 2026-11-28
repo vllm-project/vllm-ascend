@@ -306,9 +306,6 @@ def test_pp2_private_mtp_embedding_releases_target_copy(monkeypatch, tmp_path):
     speculator.method = "mtp"
     speculator.vllm_config = target_config
     speculator.draft_vllm_config = draft_config
-    speculator._target_pp_group = parallel_state.get_pp_group()
-    assert speculator._target_pp_group.world_size == 2
-    assert speculator._target_pp_group.is_last_rank is True
     draft_ctx = cast(Any, parallel_state).single_pp_stage() if not vllm_version_is("0.34.0") else nullcontext()
     with draft_ctx:
         if not vllm_version_is("0.34.0"):

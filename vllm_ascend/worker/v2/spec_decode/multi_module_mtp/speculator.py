@@ -27,6 +27,7 @@ from vllm.v1.worker.gpu.spec_decode.multi_module_mtp.speculator import (
 
 from vllm_ascend.attention.attention_v1 import AscendAttentionState
 from vllm_ascend.compilation.updatable_graph import SharedSource
+from vllm_ascend.models.quarot_utils import release_unshared_target_embedding
 from vllm_ascend.worker.v2.aclgraph_utils import _get_graph_update_backend
 from vllm_ascend.worker.v2.attn_utils import (
     build_attn_metadata_factory,
@@ -40,7 +41,6 @@ from vllm_ascend.worker.v2.spec_decode.target_dependent_ar.aclgraph import (
 from vllm_ascend.worker.v2.spec_decode.target_dependent_ar.speculator import (
     torch_gather_wrapper,
 )
-from vllm_ascend.worker.v2.spec_decode.target_embed_utils import release_target_embed
 
 
 class AscendMultiModuleMTPSpeculator(MultiModuleMTPSpeculator):
@@ -91,7 +91,7 @@ class AscendMultiModuleMTPSpeculator(MultiModuleMTPSpeculator):
     def load_model(self, target_model: torch.nn.Module) -> None:
         self._fixup_draft_model_config()
         super().load_model(target_model)
-        release_target_embed(self, target_model, self.model)
+        release_unshared_target_embedding(target_model, self.model, self.vllm_config)
 
     def _create_draft_vllm_config(self) -> VllmConfig:
         parallel_config = get_mtp_draft_parallel_config(self.vllm_config)

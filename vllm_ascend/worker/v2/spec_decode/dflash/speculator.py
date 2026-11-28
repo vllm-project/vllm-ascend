@@ -5,7 +5,6 @@
 from collections.abc import Iterator, Mapping
 from contextlib import ExitStack, contextmanager
 from dataclasses import replace
-from functools import partial
 from typing import Any, cast
 
 import numpy as np
@@ -30,7 +29,6 @@ from vllm_ascend.worker.v2.aclgraph_utils import _get_graph_update_backend
 from vllm_ascend.worker.v2.attn_utils import build_attn_metadata_factory, build_attn_metadata_wrapper
 from vllm_ascend.worker.v2.spec_decode.lmhead_tp_utils import LmheadTPDraftSamplingMixin
 from vllm_ascend.worker.v2.spec_decode.pcp_utils import prepare_replicated_draft_profile_inputs
-from vllm_ascend.worker.v2.spec_decode.target_embed_utils import release_target_embed
 
 
 @contextmanager
@@ -164,10 +162,6 @@ class AscendDFlashSpeculator(LmheadTPDraftSamplingMixin, DFlashSpeculator):
             # NPU draft-logits kernels index the cache by request state.
             return False
 
-    def load_model(self, target_model: torch.nn.Module) -> None:
-        super().load_model(target_model)
-        release_target_embed(self, target_model, self.model)
-
     @draft_config_context()
     def load_draft_model(
         self,
@@ -178,9 +172,7 @@ class AscendDFlashSpeculator(LmheadTPDraftSamplingMixin, DFlashSpeculator):
         # QuaRot targets require draft weights to be aligned after sharing
         # target layers, using the target Ascend configuration.
         if hasattr(model, "post_process"):
-            model.post_process(
-                self.vllm_config, on_embedding_replaced=partial(release_target_embed, self, target_model, model)
-            )
+            model.post_process(self.vllm_config, target_model=target_model)
         return model
 
     def build_draft_attn_metadatas(self, num_reqs_padded, seq_lens_cpu_upper_bound):

@@ -16,7 +16,6 @@
 # This file is a part of the vllm-ascend project.
 #
 from collections.abc import Mapping, Sequence
-from functools import partial
 from typing import Any, cast
 
 import numpy as np
@@ -38,6 +37,7 @@ from vllm_ascend.distributed.kv_transfer.kv_p2p.sfa_pd_rd2h.dspark_context impor
     DSparkContextChunk,
     initialize_draft_context_chunk,
 )
+from vllm_ascend.models.quarot_utils import release_unshared_target_embedding
 from vllm_ascend.utils import embedding_tp_enable, lmhead_tp_enable, lmhead_tp_max_num_logits
 from vllm_ascend.worker.dcp_utils import DCPManager
 from vllm_ascend.worker.v2.attn_utils import (
@@ -55,7 +55,6 @@ from vllm_ascend.worker.v2.spec_decode.pcp_utils import (
     build_dspark_draft_config,
     prepare_replicated_draft_profile_inputs,
 )
-from vllm_ascend.worker.v2.spec_decode.target_embed_utils import release_target_embed
 
 
 class AscendDSparkSpeculator(LmheadTPDraftSamplingMixin, DSparkSpeculator):
@@ -109,14 +108,12 @@ class AscendDSparkSpeculator(LmheadTPDraftSamplingMixin, DSparkSpeculator):
             context_kv_only=getattr(self, "context_kv_only", False),
         )
         if hasattr(model, "post_process"):
-            model.post_process(
-                self.vllm_config, on_embedding_replaced=partial(release_target_embed, self, target_model, model)
-            )
+            model.post_process(self.vllm_config, target_model=target_model)
         if hasattr(model, "configure_target_aux_hidden_capture"):
             model.configure_target_aux_hidden_capture(target_model)
 
         self._lmhead_tp_wrap_draft_logits(model)
-        release_target_embed(self, target_model, model)
+        release_unshared_target_embedding(target_model, model, self.vllm_config)
         return model
 
     def _lmhead_tp_wrap_draft_logits(self, model: torch.nn.Module) -> None:
