@@ -17,7 +17,7 @@
 #define DISPATCH_FFN_COMBINE_TORCH_ADPT_H
 
 namespace vllm_ascend {
-std::tuple<at::Tensor&, at::Tensor&> dispatch_ffn_combine(
+void dispatch_ffn_combine(
     const at::Tensor& x,
     const at::TensorList& weight1,
     const at::TensorList& weight2,
@@ -86,8 +86,7 @@ std::tuple<at::Tensor&, at::Tensor&> dispatch_ffn_combine(
                  world_size,
                  out,
                  expert_token_nums);
-    }    
-    return {out, expert_token_nums};
+    }
 }
 }
 #endif

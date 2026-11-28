@@ -100,4 +100,5 @@ class NPUCommunicator(DeviceCommunicatorBase):
     def all_reduce(self, input_: torch.Tensor) -> torch.Tensor:
         if self.quantized_ar is not None and self.world_size > 1:
             return self.quantized_ar.all_reduce(input_)
-        return super().all_reduce(input_)
+        # vLLM registers all_reduce as an out-of-place custom op.
+        return super().all_reduce(input_.clone())

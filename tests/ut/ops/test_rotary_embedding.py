@@ -105,6 +105,27 @@ def check_parent_init_signature_has_not_changed(parent_func, child_func, allowed
 
 class TestRopeForwardOOT:
     @patch("vllm_ascend.ops.rotary_embedding.rope_forward_triton", create=True)
+    def test_triton_rotates_output_without_mutating_inputs(self, mock_rope_triton):
+        query = torch.ones(SEQ_LEN, 2 * HEAD_SIZE)
+        key = torch.ones(SEQ_LEN, HEAD_SIZE)
+
+        def rotate(q, k, **kwargs):
+            q.add_(2)
+            k.add_(3)
+            return q, k
+
+        mock_rope_triton.side_effect = rotate
+        with patch("vllm_ascend.ops.rotary_embedding.HAS_TRITON", True):
+            query_out, key_out = rope_forward_oot(
+                torch.arange(SEQ_LEN), query, key, torch.empty(MAX_POS, ROTARY_DIM), HEAD_SIZE, ROTARY_DIM, True
+            )
+
+        torch.testing.assert_close(query_out, torch.full_like(query, 3))
+        torch.testing.assert_close(key_out, torch.full_like(key, 4))
+        torch.testing.assert_close(query, torch.ones_like(query))
+        torch.testing.assert_close(key, torch.ones_like(key))
+
+    @patch("vllm_ascend.ops.rotary_embedding.rope_forward_triton", create=True)
     def test_fp8_dispatch_preserves_index_head_inference(self, mock_rope_triton):
         positions = torch.arange(SEQ_LEN, dtype=torch.long)
         query = torch.empty(SEQ_LEN, 2 * 96, dtype=torch.bfloat16)

@@ -1,0 +1,4 @@
+pr: 23557
+entries:
+  - category: bugfix
+    text: Fixed graph compilation failures under stricter PyTorch validation for Ascend inference paths that use LoRA, RoPE, MLA, MoE, or distributed collectives.

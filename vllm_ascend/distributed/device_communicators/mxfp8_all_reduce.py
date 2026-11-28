@@ -88,8 +88,10 @@ class Mxfp8AllReduce:
                     input_.numel(),
                     self.min_numel,
                 )
-            dist.all_reduce(input_, group=self.group)
-            return input_
+            # HCCL reduces in place. Preserve the input to vLLM's out-of-place all_reduce op.
+            output = input_.clone()
+            dist.all_reduce(output, group=self.group)
+            return output
 
         if logger.isEnabledFor(logging.DEBUG):
             logger.debug(

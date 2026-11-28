@@ -106,7 +106,7 @@ inline int64_t GetRopeHeadDim(const at::Tensor &kvCacheRope, int64_t cacheMode)
 
 }  // namespace mla_preprocess_detail
 
-std::tuple<at::Tensor &, at::Tensor &, at::Tensor &, at::Tensor &, at::Tensor &> mla_preprocess(
+void mla_preprocess(
     const at::Tensor &hiddenState, const at::Tensor &wdqkv,
     const c10::optional<at::Tensor> &descale0, const at::Tensor &gamma1,
     const c10::optional<at::Tensor> &beta1, const at::Tensor &wuq,
@@ -188,8 +188,6 @@ std::tuple<at::Tensor &, at::Tensor &, at::Tensor &, at::Tensor &, at::Tensor &>
         q_out1,
         kv_cache_out1,
         inner_out);
-
-    return std::forward_as_tuple(q_out0, kv_cache_out0, q_out1, kv_cache_out1, inner_out);
 }
 
 }  // namespace vllm_ascend

@@ -259,6 +259,10 @@ def rope_forward_oot(
         raise NotImplementedError("Batched rotary embedding is currently not supported on NPU.")
     if out_dtype is not None and out_dtype != torch.float8_e4m3fn:
         raise NotImplementedError(f"Unsupported RoPE output dtype: {out_dtype}")
+    if out_dtype is None:
+        # Ordinary Triton RoPE rotates its buffers in place. Copy them to honor the custom op's out-of-place schema.
+        query = query.clone(memory_format=torch.contiguous_format)
+        key = key.clone(memory_format=torch.contiguous_format)
     if HAS_TRITON:
         num_tokens = query.shape[0]
         if out_dtype == torch.float8_e4m3fn:

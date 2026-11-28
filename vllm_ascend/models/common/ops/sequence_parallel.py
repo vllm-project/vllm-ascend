@@ -67,15 +67,17 @@ def sp_shard(x: torch.Tensor) -> torch.Tensor:
 def _ascend_sp_reduce_scatter_impl(x: torch.Tensor) -> torch.Tensor:
     """Pad rows to the TP multiple, then reduce-scatter across TP ranks."""
     tp_size = get_tensor_model_parallel_world_size()
+    input_tensor = x
     sp_pad = (-x.shape[0]) % tp_size
     # Avoid copying the full input when its token count is already aligned.
     if sp_pad > 0:
         pad_shape = [sp_pad, x.shape[1]]
         x = torch.cat([x, x.new_zeros(pad_shape)], dim=0)
     output = _custom_collective("custom_reduce_scatter", x)
-    if output is not None:
-        return output
-    return tensor_model_parallel_reduce_scatter(x, 0)
+    if output is None:
+        output = tensor_model_parallel_reduce_scatter(x, 0)
+    # A single-rank collective can return its input. This custom op must return independent storage.
+    return input_tensor.clone(memory_format=torch.contiguous_format) if output is input_tensor else output
 
 
 def _ascend_sp_reduce_scatter_fake(x: torch.Tensor) -> torch.Tensor:

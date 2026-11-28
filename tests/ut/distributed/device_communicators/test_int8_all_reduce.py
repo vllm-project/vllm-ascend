@@ -156,7 +156,9 @@ class TestQuantizedAllReduce(unittest.TestCase):
             self.assertEqual(mock_ar.call_args.args[0].dtype, torch.bfloat16)
             mock_q.assert_not_called()
             mock_aq.assert_not_called()
-            self.assertTrue(out is x)
+            self.assertIs(mock_ar.call_args.args[0], out)
+            self.assertNotEqual(out.data_ptr(), x.data_ptr())
+            torch.testing.assert_close(out, x)
 
     def test_oversized_group_warns_with_its_group_size(self):
         wrapper = _make(world_size=16, min_numel=1)
@@ -188,7 +190,9 @@ class TestQuantizedAllReduce(unittest.TestCase):
             mock_ar.assert_called_once()
             mock_q.assert_not_called()
             mock_aq.assert_not_called()
-            self.assertTrue(out is x)
+            self.assertIs(mock_ar.call_args.args[0], out)
+            self.assertNotEqual(out.data_ptr(), x.data_ptr())
+            torch.testing.assert_close(out, x)
 
     def test_degenerate_shapes_skip_quantization(self):
         wrapper = _make(min_numel=8)
@@ -205,7 +209,9 @@ class TestQuantizedAllReduce(unittest.TestCase):
                 out = wrapper.all_reduce(x)
             mock_ar.assert_called_once()
             mock_q.assert_not_called()
-            self.assertTrue(out is x)
+            self.assertIs(mock_ar.call_args.args[0], out)
+            self.assertNotEqual(out.data_ptr(), x.data_ptr())
+            torch.testing.assert_close(out, x)
 
     def test_large_message_uses_quantized_path(self):
         wrapper = _make(min_numel=8)

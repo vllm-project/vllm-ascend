@@ -596,8 +596,8 @@ void bgmv_shrink(at::Tensor &x, at::Tensor &weight, at::Tensor &indices, at::Ten
     return;
 }
 
-at::Tensor bgmv_expand(at::Tensor &x, at::Tensor &weight, at::Tensor &indices, at::Tensor &y,
-                       int64_t slice_offset, int64_t slice_size)
+void bgmv_expand(at::Tensor &x, at::Tensor &weight, at::Tensor &indices, at::Tensor &y,
+                 int64_t slice_offset, int64_t slice_size)
 {
     at::ScalarType scalar_type = y.scalar_type();
     TORCH_CHECK(scalar_type == torch::kHalf || scalar_type == torch::kBFloat16, "only support half and bf16");
@@ -613,20 +613,18 @@ at::Tensor bgmv_expand(at::Tensor &x, at::Tensor &weight, at::Tensor &indices, a
     TORCH_CHECK((slice_size + slice_offset) <= y.size(1),
                 "slice_size + slice_offset should be smaller than the second dimension of y")
 
-    at::Tensor y_out = y;
     void* x_ptr = x.data_ptr();
     void* weight_ptr = weight.data_ptr();
     void* indices_ptr = indices.data_ptr();
     int indices_size = indices.size(0);
     void* y_ptr = y.data_ptr();
-    void* y_out_ptr = y_out.data_ptr();
     int batch_size = x.size(0);
     int lora_rank = x.size(1);
     int output_full_dim = y.size(1);
     aclrtStream stream = c10_npu::getCurrentNPUStream().stream();
     at_npu::native::OpCommand cmd;
     cmd.Name("bgmv_expand");
-    cmd.SetCustomHandler([scalar_type, stream, x_ptr, weight_ptr, indices_ptr, indices_size, y_ptr, y_out_ptr, batch_size, lora_rank,
+    cmd.SetCustomHandler([scalar_type, stream, x_ptr, weight_ptr, indices_ptr, indices_size, y_ptr, batch_size, lora_rank,
                           slice_offset, slice_size, output_full_dim]() -> int {
         auto dtype = get_dtype_from_torch(scalar_type);
         int device_id = 0;
@@ -634,12 +632,11 @@ at::Tensor bgmv_expand(at::Tensor &x, at::Tensor &weight, at::Tensor &indices, a
         TORCH_CHECK(aclGetDeviceCapability(device_id, ACL_DEVICE_INFO_VECTOR_CORE_NUM, &aiv_num) == ACL_SUCCESS);
         int num_tokens_per_core = (batch_size + aiv_num - 1) / aiv_num;
         TORCH_CHECK("num_tokens_per_core != 0", "num_tokens_per_core should not be 0");
-        bgmv_expand_impl(dtype, stream, x_ptr, weight_ptr, indices_ptr, indices_size, y_ptr, y_out_ptr, batch_size,
+        bgmv_expand_impl(dtype, stream, x_ptr, weight_ptr, indices_ptr, indices_size, y_ptr, y_ptr, batch_size,
                          num_tokens_per_core, lora_rank, slice_size, slice_offset, output_full_dim);
         return 0;
     });
     cmd.Run();
-    return y_out;
 }
 
 void sgmv_shrink(at::Tensor &x, at::Tensor &weight, at::Tensor &lora_indices, at::Tensor &seq_len,
@@ -684,8 +681,8 @@ void sgmv_shrink(at::Tensor &x, at::Tensor &weight, at::Tensor &lora_indices, at
     return;
 }
 
-at::Tensor sgmv_expand(at::Tensor &x, at::Tensor &weight, at::Tensor &lora_indices, at::Tensor &seq_len,
-                       at::Tensor &y, int64_t slice_offset, int64_t slice_size)
+void sgmv_expand(at::Tensor &x, at::Tensor &weight, at::Tensor &lora_indices, at::Tensor &seq_len,
+                 at::Tensor &y, int64_t slice_offset, int64_t slice_size)
 {
     at::ScalarType scalar_type = y.scalar_type();
     TORCH_CHECK(scalar_type == torch::kHalf || scalar_type == torch::kBFloat16, "only support half and bf16");
@@ -698,7 +695,6 @@ at::Tensor sgmv_expand(at::Tensor &x, at::Tensor &weight, at::Tensor &lora_indic
     TORCH_CHECK((slice_size + slice_offset) <= y.size(1),
                 "slice_size + slice_offset should be smaller than the second dimension of y")
 
-    at::Tensor y_out = y;
     void* x_ptr = x.data_ptr();
     void* weight_ptr = weight.data_ptr();
     void* lora_indices_ptr = lora_indices.data_ptr();
@@ -706,14 +702,13 @@ at::Tensor sgmv_expand(at::Tensor &x, at::Tensor &weight, at::Tensor &lora_indic
     int lora_indices_size = lora_indices.size(0);
     int seq_len_size = seq_len.size(0);
     void* y_ptr = y.data_ptr();
-    void* y_out_ptr = y_out.data_ptr();
     int batch_size = x.size(0);
     int lora_rank = x.size(1);
     int output_full_dim = y.size(1);
     aclrtStream stream = c10_npu::getCurrentNPUStream().stream();
     at_npu::native::OpCommand cmd;
     cmd.Name("sgmv_expand");
-    cmd.SetCustomHandler([scalar_type, stream, x_ptr, weight_ptr, lora_indices_ptr, lora_indices_size, seq_len_ptr, seq_len_size, y_ptr, y_out_ptr,
+    cmd.SetCustomHandler([scalar_type, stream, x_ptr, weight_ptr, lora_indices_ptr, lora_indices_size, seq_len_ptr, seq_len_size, y_ptr,
                           batch_size, lora_rank, slice_offset, slice_size, output_full_dim]() -> int {
         auto dtype = get_dtype_from_torch(scalar_type);
         int device_id = 0;
@@ -721,12 +716,11 @@ at::Tensor sgmv_expand(at::Tensor &x, at::Tensor &weight, at::Tensor &lora_indic
         TORCH_CHECK(aclGetDeviceCapability(device_id, ACL_DEVICE_INFO_VECTOR_CORE_NUM, &aiv_num) == ACL_SUCCESS);
         int num_tokens_per_core = (batch_size + aiv_num - 1) / aiv_num;
         TORCH_CHECK("num_tokens_per_core != 0", "num_tokens_per_core should not be 0");
-        sgmv_expand_impl(dtype, stream, x_ptr, weight_ptr, lora_indices_ptr, lora_indices_size, seq_len_ptr, seq_len_size, y_ptr, y_out_ptr,
+        sgmv_expand_impl(dtype, stream, x_ptr, weight_ptr, lora_indices_ptr, lora_indices_size, seq_len_ptr, seq_len_size, y_ptr, y_ptr,
                          batch_size, num_tokens_per_core, lora_rank, slice_size, slice_offset, output_full_dim);
         return 0;
     });
     cmd.Run();
-    return y_out;
 }
 #endif
 
@@ -3055,23 +3049,24 @@ TORCH_LIBRARY_EXPAND(CONCAT(_C, _ascend), ops)
              &ascend_kernel::gmm_situ_quant_v2_nz_list);
 
 #ifdef VLLM_ENABLE_ATB_AND_DIRECT_KERNELS
-    // Direct kernel custom ops
-    ops.def("bgmv_shrink(Tensor! x, Tensor! weight, Tensor! indices, Tensor! y, float scale) -> ()");
+    // LoRA kernels update y in place. A void return lets AOTAutograd functionalize the write.
+    ops.def("bgmv_shrink(Tensor x, Tensor weight, Tensor indices, Tensor(a!) y, float scale) -> ()");
     ops.impl("bgmv_shrink", torch::kPrivateUse1, &vllm_ascend::bgmv_shrink);
 
     ops.def(
-        "bgmv_expand(Tensor! x, Tensor! weight, Tensor! indices, Tensor! y,"
-        "            int slice_offset, int slice_size) -> Tensor");
+        "bgmv_expand(Tensor x, Tensor weight, Tensor indices, Tensor(a!) y,"
+        "            int slice_offset, int slice_size) -> ()");
     ops.impl("bgmv_expand", torch::kPrivateUse1, &vllm_ascend::bgmv_expand);
 
-    ops.def("sgmv_shrink(Tensor! x, Tensor! weight, Tensor! lora_indices, Tensor! seq_len, Tensor! y, float scale) -> ()");
+    ops.def("sgmv_shrink(Tensor x, Tensor weight, Tensor lora_indices, Tensor seq_len, Tensor(a!) y, float scale) -> ()");
     ops.impl("sgmv_shrink", torch::kPrivateUse1, &vllm_ascend::sgmv_shrink);
 
     ops.def(
-        "sgmv_expand(Tensor! x, Tensor! weight, Tensor! lora_indices, Tensor! seq_len, Tensor! y,"
-        "            int slice_offset, int slice_size) -> Tensor");
+        "sgmv_expand(Tensor x, Tensor weight, Tensor lora_indices, Tensor seq_len, Tensor(a!) y,"
+        "            int slice_offset, int slice_size) -> ()");
     ops.impl("sgmv_expand", torch::kPrivateUse1, &vllm_ascend::sgmv_expand);
 
+    // Callers consume the output buffers directly. Register only the writes for AOTAutograd.
     ops.def(
         "mla_preprocess(Tensor hiddenState, Tensor wdqkv,"
         "               Tensor? descale0, Tensor gamma1, Tensor? beta1, Tensor wuq, Tensor? descale1,"
@@ -3079,9 +3074,8 @@ TORCH_LIBRARY_EXPAND(CONCAT(_C, _ascend), ops)
         "               Tensor kv_cache_rope, Tensor slotmapping, Tensor? quant_scale0,"
         "               Tensor? quant_offset0, Tensor? bias0, Tensor? quant_scale1, Tensor? quant_offset1,"
         "               Tensor? bias1, Tensor? ctkv_scale, Tensor? q_nope_scale, str? cache_mode,"
-        "               str? quant_mode, bool? enable_inner_out, Tensor! q_out0, Tensor! kv_cache_out0, Tensor! q_out1,"
-        "               Tensor! kv_cache_out1, Tensor! inner_out) -> (Tensor q_out0, Tensor kv_cache_out0,"
-        "                                          Tensor q_out1, Tensor kv_cache_out1, Tensor inner_out)"
+        "               str? quant_mode, bool? enable_inner_out, Tensor(a!) q_out0, Tensor(b!) kv_cache_out0,"
+        "               Tensor(c!) q_out1, Tensor(d!) kv_cache_out1, Tensor(e!) inner_out) -> ()"
     );
     ops.impl("mla_preprocess", torch::kPrivateUse1, &vllm_ascend::mla_preprocess);
 
@@ -3354,10 +3348,12 @@ TORCH_LIBRARY_EXPAND(CONCAT(_C, _ascend), ops)
     ops.impl("npu_kv_quant_sparse_flash_attention_vllm", torch::kPrivateUse1,
              &vllm_ascend::npu_kv_quant_sparse_flash_attention_vllm);
 
+    // Callers consume out and expert_token_nums directly. Register only the writes for AOTAutograd.
     ops.def(
         "dispatch_ffn_combine(Tensor x, Tensor[] weight1, Tensor[] weight2, Tensor expert_idx,"
         "                     Tensor[] scale1, Tensor[] scale2, Tensor[] bias1, Tensor[] bias2, Tensor probs, str group,"
-        "                     int max_output_size, Tensor! out, Tensor! expert_token_nums, Tensor? x_active_mask=None, float swiglu_limit=1000000.0, int world_size=0) -> (Tensor out, Tensor expert_token_nums)"
+        "                     int max_output_size, Tensor(a!) out, Tensor(b!) expert_token_nums,"
+        "                     Tensor? x_active_mask=None, float swiglu_limit=1000000.0, int world_size=0) -> ()"
     );
     ops.impl("dispatch_ffn_combine", torch::kPrivateUse1, &vllm_ascend::dispatch_ffn_combine);
 
