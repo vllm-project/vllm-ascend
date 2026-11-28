@@ -346,3 +346,28 @@ def test_builder_pool_bytes_keeps_default_layout_without_step5_aux_layers() -> N
     merged = UniformTypeKVCacheSpecs.from_specs({L0: _main_spec(), SUMMARY0: _summary_spec()})
     step_groups = [KVCacheGroupSpec([L0, SUMMARY0], merged), KVCacheGroupSpec([L1], _sw_spec())]
     assert builder._get_pool_bytes_per_block(vllm_config, step_groups) == MAIN_PAGE + SUMMARY_PAGE
+
+
+def test_step5_builder_characterization() -> None:
+    vllm_config = _planner_vllm_config()
+    vllm_config.model_config.supports_kv_cache_grouping = False
+    vllm_config.parallel_config = SimpleNamespace(decode_context_parallel_size=1)
+    vllm_config.scheduler_config = SimpleNamespace(disable_hybrid_kv_cache_manager=False)
+    vllm_config.cache_config.get_resolved_kv_cache_layout = lambda: SimpleNamespace(
+        is_layer_compact=True, is_block_compact=True, is_block_outermost=False
+    )
+    specs = _step5_kv_cache_spec()
+    builder = AscendKVCacheConfigBuilder()
+    groups = builder.get_kv_cache_groups(vllm_config, specs)
+    plan = builder.get_kv_cache_config_from_groups(vllm_config, groups, num_blocks=3)
+
+    assert [g.layer_names for g in groups] == [[L0, SUMMARY0], [L2, SUMMARY2], [L1], [RING]]
+    packed_envelope = MAIN_PAGE + SUMMARY_PAGE
+    assert [(t.layers, t.size, t.block_stride, t.layer_stride, t.offset) for t in plan.kv_cache_tensors] == [
+        ([L0], 3 * packed_envelope, MAIN_PAGE, 3 * MAIN_PAGE, 0),
+        ([SUMMARY0], 3 * packed_envelope, SUMMARY_PAGE, 3 * SUMMARY_PAGE, 3 * MAIN_PAGE),
+        ([L2], 3 * packed_envelope, MAIN_PAGE, 3 * MAIN_PAGE, 0),
+        ([SUMMARY2], 3 * packed_envelope, SUMMARY_PAGE, 3 * SUMMARY_PAGE, 3 * MAIN_PAGE),
+        ([L1], 3 * packed_envelope, MAIN_PAGE, 3 * MAIN_PAGE, 0),
+        ([RING], 3 * packed_envelope, RING_PAGE, 3 * RING_PAGE, 0),
+    ]

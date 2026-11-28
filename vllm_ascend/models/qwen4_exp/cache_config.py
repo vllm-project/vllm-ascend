@@ -4,7 +4,7 @@ from __future__ import annotations
 
 import math
 from collections.abc import Callable
-from dataclasses import dataclass
+from dataclasses import dataclass, replace
 from typing import Final
 
 import regex as re
@@ -19,6 +19,7 @@ try:
 except ImportError:
     from vllm.v1.core.kv_cache_planning import may_override_num_blocks
 from vllm.v1.kv_cache_interface import (
+    AttentionSpec,
     CircularBufferSpec,
     FullAttentionSpec,
     HiddenStateCacheSpec,
@@ -630,8 +631,20 @@ def get_qwen4_exp_kv_cache_groups(
     owners = _prepare_qsa_composite_groups(kv_cache_spec)
     if owners is None:
         return None
-    groups = get_default_groups(vllm_config, kv_cache_spec)
-    groups = _merge_qsa_composite_groups(groups, kv_cache_spec, *owners)
+    mamba_page_size = max(
+        (spec.page_size_bytes for spec in kv_cache_spec.values() if isinstance(spec, MambaSpec)),
+        default=0,
+    )
+    aligned_specs = {
+        name: (
+            replace(spec, page_size_padded=mamba_page_size)
+            if isinstance(spec, AttentionSpec) and spec.page_size_bytes < mamba_page_size
+            else spec
+        )
+        for name, spec in kv_cache_spec.items()
+    }
+    groups = get_default_groups(vllm_config, aligned_specs)
+    groups = _merge_qsa_composite_groups(groups, aligned_specs, *owners)
     groups = _merge_mamba_state_groups(groups, len(owners[0]))
     logger.info(
         "Using Qwen4 cache grouping: %d main/compressed owners, %d raw circular owners, %d total cache groups",
