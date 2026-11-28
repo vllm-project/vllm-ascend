@@ -1,0 +1,4 @@
+pr: 23681
+entries:
+  - category: feature
+    text: Added an opt-in shared pHash/SSIM index for ECMemcacheConnector so data-parallel schedulers can recall each other's similar images; configure the same shared_index_endpoint and shared_index_namespace on every scheduler (DP0 automatically owns the index thread). Shared indexes also aggregate cumulative exact hits, similarity hits, and misses across schedulers and log overall and similarity hit rates with the same formulas for single-DP and multi-DP runs.
