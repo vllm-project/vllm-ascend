@@ -164,9 +164,6 @@ partition:
   a5-8:
     runner_label: linux-aarch64-a5-8
     count: 1
-  a5-2:
-    runner_label: linux-aarch64-a5-2
-    count: 1
   310p-1:
     runner_label: linux-aarch64-310p-1
     count: 2

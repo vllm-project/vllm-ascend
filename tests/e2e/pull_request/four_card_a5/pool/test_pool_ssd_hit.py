@@ -212,7 +212,6 @@ def _assert_ssd_evidence(before: dict[str, float], after: dict[str, float]) -> N
 @patch.dict(
     os.environ,
     {
-        "VLLM_USE_V2_MODEL_RUNNER": "1",
         "VLLM_WORKER_MULTIPROC_METHOD": "spawn",
         "PYTHONHASHSEED": "0",
         # 950PR/950DT uses the UB super plane by default; automatic UB endpoint

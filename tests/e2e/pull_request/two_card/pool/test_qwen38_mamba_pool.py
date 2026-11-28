@@ -110,7 +110,6 @@ def _leg(use_pool: bool, case_name: str):
         # (empty /etc/hccn.conf, no /etc/hixlep + /lib/route.conf), so a plain
         # device_urma local service stays pending in WaitForChannelsReady.
         "TEST_MF_TRANSPORT_FULL_MESH": "1",
-        "VLLM_USE_V2_MODEL_RUNNER": "1",
         "VLLM_WORKER_MULTIPROC_METHOD": "spawn",
         "PYTHONHASHSEED": "0",
     },

@@ -119,7 +119,6 @@ def _leg(use_pool: bool, case_name: str):
 @patch.dict(
     os.environ,
     {
-        "VLLM_USE_V2_MODEL_RUNNER": "1",
         "VLLM_WORKER_MULTIPROC_METHOD": "spawn",
         "PYTHONHASHSEED": "0",
         # 950PR/950DT uses the UB super plane by default; automatic UB endpoint

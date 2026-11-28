@@ -110,10 +110,6 @@ jobs:
       RUNS_ON_RUNNER_NAME: ""
     container:
       image: swr.cn-north-12.myhuaweicloud.com/atlas_inference/cann:${{ matrix.group.image_tag }}
-      # The A5 HYBM full mesh needs the host IPC/net namespace; the default
-      # container /dev/shm (64MB) and bridge netns leave the transfer probe
-      # blocked in HYBM init.
-      options: --ipc=host --shm-size=100g --net=host
       env:
         VLLM_LOGGING_LEVEL: ERROR
         VLLM_USE_MODELSCOPE: True
