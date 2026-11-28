@@ -258,9 +258,15 @@ def draft_hf_override(hf_config):
         return hf_config
     from transformers import MiniMaxM3VLTextConfig as MiniMaxM3TextConfig
 
-    model_root = Path(hf_config._name_or_path).parent
-    config = draft_config_from_file(hf_config.to_dict(), read_draft_header(model_root))
-    return MiniMaxM3TextConfig(**config)
+    draft_dir = Path(hf_config._name_or_path)
+    config = draft_config_from_file(hf_config.to_dict(), read_draft_header(draft_dir.parent))
+    normalized = MiniMaxM3TextConfig(**config)
+    # Transformers normalizes hidden_act to its pointwise fallback (silu).
+    # The Ascend draft decoder uses the checkpoint's activation to select SwiGLU-OAI.
+    source = json.loads((draft_dir / "config.json").read_text(encoding="utf-8"))
+    draft = source.get("text_config", source)
+    normalized.hidden_act = draft.get("hidden_act", normalized.hidden_act)
+    return normalized
 
 
 class MiniMaxFlashDraftLayer(DFlashQwen3DecoderLayer):
