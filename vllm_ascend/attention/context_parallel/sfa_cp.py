@@ -9,6 +9,7 @@ from vllm.v1.attention.backends.utils import get_dcp_local_seq_lens
 from vllm.v1.kv_cache_interface import AttentionSpec
 
 import vllm_ascend.ops.triton.dcp.dcp_a2a  # noqa: F401
+from vllm_ascend.ascend_config import get_ascend_config
 from vllm_ascend.attention.attention_v1 import AscendAttentionState
 from vllm_ascend.attention.context_parallel.common_cp import (
     DCPImplMixin,
@@ -26,6 +27,7 @@ from vllm_ascend.attention.context_parallel.sfa_dcp_utils import (
     get_sfa_dcp_max_local_block_table_cols,
     get_sfa_pcp_global_metadata,
 )
+from vllm_ascend.attention.context_parallel.sfa_split_kv import run_qsfa_split_kv
 from vllm_ascend.attention.context_parallel.sharded_indexer import use_local_topk_output
 from vllm_ascend.attention.sfa_v1 import (
     AscendSFAImpl,
@@ -41,6 +43,7 @@ from vllm_ascend.attention.utils import (
     split_decodes_and_prefills,
 )
 from vllm_ascend.device.device_op import DeviceOperator
+from vllm_ascend.device.hardware import AscendDeviceType, get_ascend_device_type
 from vllm_ascend.distributed.utils import all_gather_async
 from vllm_ascend.utils import (
     enable_sfa_dcp_force_tmajor_restore,
@@ -526,11 +529,18 @@ class AscendSFADCPImpl(DCPImplMixin, AscendSFAImpl):
     """DCP execution, inheriting the shared ordinary and PCP preprocessing."""
 
     can_return_lse_for_decode: bool = True
+    _use_split_kv: bool = False
 
     def __init__(self, *args, **kwargs) -> None:
         super().__init__(*args, **kwargs)
         # Legacy MLAPO has no DCP cache writer; K3.1 PROLOG_V3 uses local owned slots.
         self.enable_mlapo = False
+        self._use_split_kv = (
+            get_ascend_config().enable_sfa_dcp_split_kv
+            and self.is_kimi_k31
+            and self.qk_rope_head_dim == 0
+            and get_ascend_device_type() == AscendDeviceType.A5
+        )
         self._sharded_indexer = enable_sfa_dcp_sharded_indexer(self.vllm_config)
         # Shared Top-K buffers carry the same coordinates on every layer.
         self._local_topk = use_local_topk_output(
@@ -970,25 +980,44 @@ class AscendSFADCPImpl(DCPImplMixin, AscendSFAImpl):
                 gather_context,
                 keep_view=not enable_sfa_dcp_force_tmajor_restore(),
             )
-        sfa_output, softmax_max, softmax_sum = DeviceOperator.execute_sparse_flash_attention_process(
-            self,
-            ql_nope,
-            q_pe,
-            kv_cache,
-            topk_indices,
-            attn_metadata,
-            actual_seq_lengths_query,
-            dcp_context.seq_lens,
-            block_table=dcp_context.block_table,
-            # The indexer already applies global causal visibility, including
-            # distributed local candidates on the sharded-indexer path.
-            # After DCP remaps topk indices to local KV positions, local KV
-            # length no longer shares the same coordinate system as global
-            # query length, so SFA must not apply its right-down causal crop.
-            sparse_mode=0,
-            return_lse=True,
-            **packed_query_kwargs,
-        )
+        # The indexer already applied global causal visibility. In DCP the
+        # remapped local KV lengths cannot be used for a right-down causal crop.
+        if self._use_split_kv and attn_metadata.num_prefills == 0 and kv_cache[0].dtype == torch.float8_e4m3fn:
+
+            def attend(query, indices, cu_seqlens_q):
+                return DeviceOperator.execute_sparse_flash_attention_process(
+                    self,
+                    ql_nope,
+                    q_pe,
+                    kv_cache,
+                    indices,
+                    attn_metadata,
+                    cu_seqlens_q,
+                    dcp_context.seq_lens,
+                    block_table=dcp_context.block_table,
+                    sparse_mode=0,
+                    return_lse=True,
+                    packed_query=query,
+                )
+
+            sfa_output, softmax_max, softmax_sum = run_qsfa_split_kv(
+                packed_query_kwargs["packed_query"], topk_indices, actual_seq_lengths_query, attend
+            )
+        else:
+            sfa_output, softmax_max, softmax_sum = DeviceOperator.execute_sparse_flash_attention_process(
+                self,
+                ql_nope,
+                q_pe,
+                kv_cache,
+                topk_indices,
+                attn_metadata,
+                actual_seq_lengths_query,
+                dcp_context.seq_lens,
+                block_table=dcp_context.block_table,
+                sparse_mode=0,
+                return_lse=True,
+                **packed_query_kwargs,
+            )
         sfa_output, softmax_max, softmax_sum = self._mask_nope_dcp_padding(
             sfa_output, actual_seq_lengths_query, softmax_max, softmax_sum
         )

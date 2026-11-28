@@ -1,0 +1,6 @@
+pr: 23419
+entries:
+  - category: config
+    text: >-
+      Added the default-off enable_sfa_dcp_split_kv additional_config option to evaluate
+      two-way FP8 KV splitting for Kimi K3.1 Pro DCP decode on Ascend 950.
