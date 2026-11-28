@@ -14,6 +14,8 @@ from vllm_ascend.quantization.method_adapters import (
 )
 from vllm_ascend.quantization.methods.base import AscendAttentionScheme, AscendLinearScheme, AscendMoEScheme
 
+MODULE = "vllm_ascend.quantization.method_adapters"
+
 
 def test_mx_scale_weight_loader_preserves_group_phase():
     weight_loader = MagicMock()
@@ -148,11 +150,49 @@ class TestAscendLinearMethod(TestBase):
         self.assertEqual(layer.weight_scale_inv.input_dim, 1)
         self.assertNotIn("_block_quant_scale", dict(layer.named_parameters()))
 
+    def test_block_quant_scale_prefers_the_v2_weight_loader(self):
+        # The plain loaders narrow a scale by the weight shard size and would
+        # read past its end for a shard smaller than one tile; the v2 loaders
+        # round the bound up to whole tiles.
+        self.mock_scheme.get_pergroup_param.return_value = {
+            "weight_scale_inv": torch.empty(1, 1, dtype=torch.float32),
+            "_block_quant_scale": (128, 128),
+        }
+        layer = torch.nn.Module()
+        v2_loader = MagicMock()
+        layer.weight_loader_v2 = v2_loader
+        plain_loader = MagicMock()
+
+        with (
+            patch("vllm.model_executor.parameter.get_tensor_model_parallel_rank", return_value=0),
+            patch("vllm.model_executor.parameter.get_tensor_model_parallel_world_size", return_value=1),
+        ):
+            self.method.create_weights(
+                layer,
+                input_size_per_partition=64,
+                output_partition_sizes=[64],
+                input_size=512,
+                output_size=512,
+                params_dtype=torch.bfloat16,
+                weight_loader=plain_loader,
+            )
+
+        self.assertEqual(layer.weight_scale_inv.weight_loader, v2_loader)
+        self.assertEqual(layer.weight.weight_loader, plain_loader)
+
     def test_process_weights_after_loading_delegates(self):
         layer = torch.nn.Module()
         self.mock_scheme.process_weights_after_loading.return_value = None
         self.method.process_weights_after_loading(layer)
         self.mock_scheme.process_weights_after_loading.assert_called_once_with(layer)
+
+    def test_create_weights_validates_before_allocating(self):
+        self.mock_scheme.validate_weight_shapes.side_effect = ValueError("invalid shape")
+        layer = torch.nn.Module()
+        with self.assertRaisesRegex(ValueError, "invalid shape"):
+            self.method.create_weights(layer, 256, [192], 256, 1536, torch.bfloat16)
+        self.mock_scheme.validate_weight_shapes.assert_called_once_with(layer, 256, 1536, 256, [192])
+        self.mock_scheme.get_weight.assert_not_called()
 
     def test_apply_delegates_to_scheme(self):
         layer = MagicMock(spec=ColumnParallelLinear)
@@ -242,16 +282,22 @@ class TestAscendFusedMoEMethod(TestBase):
         self.assertEqual(layer.w13_weight_scale.quant_method, FusedMoeWeightScaleSupported.GROUP.value)
         self.assertEqual(layer.w2_weight_offset.quant_method, FusedMoeWeightScaleSupported.GROUP.value)
 
-    def create_moe_weights(self):
+    def create_moe_weights(self, intermediate_size_per_partition=256):
         layer = torch.nn.Module()
         self.method.create_weights(
             layer,
             num_experts=8,
             hidden_size=128,
-            intermediate_size_per_partition=256,
+            intermediate_size_per_partition=intermediate_size_per_partition,
             params_dtype=torch.bfloat16,
         )
         return layer
+
+    def test_create_weights_validates_before_allocating(self):
+        self.mock_scheme.validate_weight_shapes.side_effect = ValueError("invalid shape")
+        with self.assertRaisesRegex(ValueError, "invalid shape"):
+            self.create_moe_weights(intermediate_size_per_partition=250)
+        self.mock_scheme.get_weight.assert_not_called()
 
     def test_apply_method(self):
         layer = torch.nn.Module()
