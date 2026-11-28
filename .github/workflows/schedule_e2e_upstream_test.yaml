@@ -202,11 +202,12 @@ jobs:
               uv pip install vllm_bnb_plugin
               uv pip install msguard openpyxl
               uv pip install --no-deps mhc==0.5.5
+              uv pip install "smg-grpc-servicer==0.16.0"
 
           - name: Install FLA NPU for A2 upstream tests
             run: |
               set -euo pipefail
-              uv pip install --no-deps flash-linear-attention-npu-a2===26.10.0+feature
+              uv pip install --no-deps flash-linear-attention-npu-a2==26.11.0.dev20261126
               python3 -c "import fla_npu.ops.ascendc"
 
           - name: Run vllm-project/vllm test
@@ -346,7 +347,7 @@ jobs:
           - name: Install FLA NPU for A2 upstream tests
             run: |
               set -euo pipefail
-              uv pip install --no-deps flash-linear-attention-npu-a2===26.10.0+feature
+              uv pip install --no-deps flash-linear-attention-npu-a2==26.11.0.dev20261126
               python3 -c "import fla_npu.ops.ascendc"
 
           - name: Run vllm-project/vllm test
@@ -485,7 +486,7 @@ jobs:
           - name: Install FLA NPU for A2 upstream tests
             run: |
               set -euo pipefail
-              uv pip install --no-deps flash-linear-attention-npu-a2===26.10.0+feature
+              uv pip install --no-deps flash-linear-attention-npu-a2==26.11.0.dev20261126
               python3 -c "import fla_npu.ops.ascendc"
 
           - name: Run vllm-project/vllm test

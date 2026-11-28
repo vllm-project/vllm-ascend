@@ -80,6 +80,11 @@ class AscendModelState(DefaultModelState):
     kvpp_runtime: "KVPPRuntime | None" = None
     kvpp_is_dummy_run: bool = False
     device_metadata: "TargetDeviceMetadata | None" = None
+    # Annotated locally because mypy (``--follow-imports skip``) may analyze
+    # earlier methods before prepare_attn() or skip upstream DefaultModelState.
+    attn_metadata: dict[str, Any]
+    block_tables: tuple[torch.Tensor, ...]
+    slot_mappings: torch.Tensor
 
     def runner_plan_launch_d2h(self, **kwargs) -> None:
         """Runner-assigned hook: plan and launch the delayed D2H batch."""

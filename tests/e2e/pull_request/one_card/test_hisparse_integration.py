@@ -684,6 +684,7 @@ def test_direct_target_mirror_survives_legal_draft_writes(graph_producer, shared
             )
             owner = SimpleNamespace(
                 host_pool=host_pool,
+                device=source.device,
                 max_num_reqs=max_num_reqs,
                 resident_source_index=group,
                 request_state_indices=states,
@@ -712,6 +713,11 @@ def test_direct_target_mirror_survives_legal_draft_writes(graph_producer, shared
             )
             for owner in [leader, *followers]:
                 owner.index_group = index_group
+        worker_config.compilation_config = SimpleNamespace(
+            static_forward_context={
+                name: SimpleNamespace(hisparse_cache=handle) for name, handle in zip(names, handles)
+            }
+        )
         worker = AscendHiSparseConnectorWorker(worker_config, cache_config)
         worker.initialize(handles, list(names), max_num_reqs, host_blocks, source.device, host_pool.pinned)
         connector = HiSparseConnector.__new__(HiSparseConnector)
