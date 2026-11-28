@@ -73,6 +73,9 @@ class AscendInputBuffers(InputBuffers):
 class AscendInputBatch(InputBatch):
     """Input batch for Ascend NPUs."""
 
+    # CPU request length caps, populated only for real PP batches with prefill.
+    max_seq_len_np: np.ndarray | None = None
+
     # Create seq_lens_np.
     # npu's attention backend still needs seq_lens on CPU side.
     # InputBatch gained max_query_len default field,
