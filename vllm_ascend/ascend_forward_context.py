@@ -372,6 +372,9 @@ def _select_capacity_and_world_size_moe_comm_method(
     is_draft_model: bool = False,
     draft_moe_quant_type: QuantType = QuantType.NONE,
 ) -> MoECommType:
+    if get_ascend_config().deepgemm_mega_moe and getattr(get_ep_group(), "_deepgemm_supported", False) is True:
+        if not is_draft_model or draft_moe_quant_type == QuantType.W4A8MXFP:
+            return MoECommType.FUSED_MC2
     if get_ascend_config().enable_fused_mc2 == 1:
         if is_mega_moe_supported():
             if is_draft_model and draft_moe_quant_type not in A5_SUPPORT_MEGA_MOE_QUANT_TYPES:

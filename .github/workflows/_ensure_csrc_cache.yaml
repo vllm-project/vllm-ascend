@@ -151,7 +151,7 @@ jobs:
           cd "$GITHUB_WORKSPACE"
 
           # Limit invalidation to tracked inputs that can change csrc artifacts.
-          CSRC_MANIFEST=$(git ls-files -s -- csrc setup.py CMakeLists.txt cmake)
+          CSRC_MANIFEST=$(git ls-files -s -- csrc setup.py CMakeLists.txt cmake tools/deepgemm/build.py tools/deepgemm/install_build_deps.sh tools/deepgemm/requirements-build.txt)
           if [ -z "$CSRC_MANIFEST" ]; then
             echo "::error::No tracked csrc inputs found."
             exit 1
@@ -231,6 +231,7 @@ jobs:
             vllm_ascend/*.so
             vllm_ascend/lib
             vllm_ascend/include
+            vllm_ascend/third_party/deep_gemm
           key: vllm-ascend-build-v2-ARM64-9.2.1-950-ubuntu22.04-py3.12-${{ steps.hash.outputs.csrc_hash }}
           lookup-only: 'true'
 

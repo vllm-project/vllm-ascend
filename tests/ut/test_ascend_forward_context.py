@@ -20,7 +20,9 @@ def reset_mc2_tokens_capacity(monkeypatch):
     monkeypatch.setattr(
         afc,
         "get_ascend_config",
-        lambda: SimpleNamespace(enable_prefill_mc2=False, enable_fused_mc2=0, megamoe_shared_expert_fusion=False),
+        lambda: SimpleNamespace(
+            enable_prefill_mc2=False, enable_fused_mc2=0, megamoe_shared_expert_fusion=False, deepgemm_mega_moe=False
+        ),
     )
 
 
@@ -92,16 +94,19 @@ def _patch_select_moe_comm_method_deps(
     capacity: int = 128,
     ep_world_size: int = 8,
     enable_fused_mc2: int = 0,
+    deepgemm_mega_moe: bool = False,
     is_moe: bool = True,
 ):
     monkeypatch.setattr(afc, "is_moe_model", lambda _: is_moe)
     monkeypatch.setattr(afc, "get_mc2_tokens_capacity", lambda: capacity)
     monkeypatch.setattr(afc, "get_current_hardware_profile", lambda: get_hardware_profile(device_type))
-    monkeypatch.setattr(afc, "get_ep_group", lambda: SimpleNamespace(world_size=ep_world_size))
+    monkeypatch.setattr(
+        afc, "get_ep_group", lambda: SimpleNamespace(world_size=ep_world_size, _deepgemm_supported=deepgemm_mega_moe)
+    )
     monkeypatch.setattr(
         afc,
         "get_ascend_config",
-        lambda: SimpleNamespace(enable_fused_mc2=enable_fused_mc2),
+        lambda: SimpleNamespace(enable_fused_mc2=enable_fused_mc2, deepgemm_mega_moe=deepgemm_mega_moe),
     )
 
 
@@ -320,6 +325,16 @@ def test_select_moe_comm_method_uses_allgather_without_effective_expert_parallel
     vllm_config = _make_vllm_config(enable_expert_parallel=enable_expert_parallel)
 
     assert afc.select_moe_comm_method(16, vllm_config) == MoECommType.ALLGATHER
+
+
+@pytest.mark.parametrize("tokens", [16, 256])
+def test_select_moe_comm_method_uses_deepgemm_across_mc2_threshold(monkeypatch, tokens):
+    _patch_select_moe_comm_method_deps(
+        monkeypatch,
+        device_type=AscendDeviceType.A5,
+        deepgemm_mega_moe=True,
+    )
+    assert afc.select_moe_comm_method(tokens, _make_vllm_config()) == MoECommType.FUSED_MC2
 
 
 @pytest.mark.parametrize(

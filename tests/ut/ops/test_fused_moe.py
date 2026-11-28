@@ -2032,7 +2032,7 @@ def test_runner_selects_sp_multistream_custom_op(
     uses_sp_custom_op,
 ):
     upstream_forward_entry = object()
-    moe_config = SimpleNamespace(hidden_dim=4, ep_size=1)
+    moe_config = SimpleNamespace(hidden_dim=4, ep_size=1, deepgemm_mega_moe=False)
     routed_experts = SimpleNamespace(
         quant_type=QuantType.NONE,
         quant_method=object(),
@@ -3011,11 +3011,13 @@ def _stub_moe_runner_init(
     fused_mc2_comm=None,
     divide_shared_output_in_fp16=False,
     routed_scale_mode=None,
+    deepgemm=False,
+    routed_scaling_factor=1.0,
 ):
     """Construct AscendMoERunner with a lightweight MoERunner.__init__ stub."""
-    moe_config = SimpleNamespace(hidden_dim=4, ep_size=1)
+    moe_config = SimpleNamespace(hidden_dim=4, ep_size=8 if deepgemm else 1, deepgemm_mega_moe=deepgemm)
     routed_experts = SimpleNamespace(
-        quant_type=QuantType.NONE,
+        quant_type=QuantType.W4A8MXFP if deepgemm else QuantType.NONE,
         quant_method=object(),
         return_with_event=False,
         router=None,
@@ -3053,8 +3055,11 @@ def _stub_moe_runner_init(
         runner.divide_shared_output_in_fp16 = divide_shared_output_in_fp16
         runner._forward_entry = object()
 
+    if deepgemm:
+        monkeypatch.setattr(fused_moe_module, "get_ep_group", MagicMock())
+        monkeypatch.setattr(fused_moe_module, "get_mc2_group", MagicMock())
     monkeypatch.setattr(fused_moe_module.MoERunner, "__init__", init_base_runner)
-    monkeypatch.setattr(fused_moe_module, "AscendSharedExperts", MagicMock(return_value=SimpleNamespace()))
+    monkeypatch.setattr(fused_moe_module, "AscendSharedExperts", MagicMock(return_value=MagicMock()))
     monkeypatch.setattr(fused_moe_module, "get_tp_group", MagicMock(return_value=object()))
     monkeypatch.setattr(fused_moe_module, "get_dp_group", MagicMock(return_value=object()))
     monkeypatch.setattr(fused_moe_module, "setup_moe_comm_method", MagicMock())
@@ -3078,6 +3083,7 @@ def _stub_moe_runner_init(
         shared_experts=shared_experts,
         divide_shared_output_in_fp16=divide_shared_output_in_fp16,
         routed_scale_mode=routed_scale_mode,
+        routed_scaling_factor=routed_scaling_factor,
     )
 
 
@@ -3097,6 +3103,23 @@ def test_runner_preserves_native_shared_scaling(monkeypatch, divide_shared, dtyp
     torch.testing.assert_close(fused, torch.full_like(fused, 3.0 if divides else 6.0), rtol=0, atol=0)
     if shared is not None:
         torch.testing.assert_close(shared, torch.full_like(shared, 1.0 if divides else 2.0), rtol=0, atol=0)
+
+
+@pytest.mark.parametrize("with_shared", [True, False])
+def test_deepgemm_runner_leaves_step_execution_to_the_backend(monkeypatch, with_shared):
+    shared = nn.Module() if with_shared else None
+    if shared is not None:
+        shared.gate_up_proj = nn.Linear(4, 8, bias=False)
+        shared.down_proj = nn.Linear(4, 4, bias=False)
+    runner = _stub_moe_runner_init(monkeypatch, shared_experts=shared, deepgemm=True, routed_scaling_factor=1.5)
+
+    if shared is not None:
+        assert dict(runner.named_parameters())["_shared_experts.gate_up_proj.weight"] is shared.gate_up_proj.weight
+        assert runner.routed_experts._deepgemm_mega_moe_shared_experts() is runner.ascend_shared_experts
+        assert runner.ascend_shared_experts is not None
+        assert runner.routed_experts.return_with_event
+    assert runner.moe_config.deepgemm_mega_moe
+    assert runner.routed_scaling_factor == 1.5
 
 
 def test_runner_keeps_mega_moe_activation_with_each_layer(monkeypatch):

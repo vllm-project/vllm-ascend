@@ -178,6 +178,10 @@ jobs:
           yum install -y python3-pip net-tools numactl patch clang
           pip install uv
 
+      - name: Install DeepGEMM build dependencies (A5)
+        if: startsWith(fromJSON(inputs.target).soc_version, 'ascend950')
+        run: bash tools/deepgemm/install_build_deps.sh
+
       # Stage manifests where both the job container and runner can read them.
       - name: Check layout and stage actions
         shell: bash
@@ -218,6 +222,15 @@ jobs:
             exit 1
           fi
 
+      - name: Verify packaged DeepGEMM (A5)
+        if: startsWith(fromJSON(inputs.target).soc_version, 'ascend950')
+        run: |
+          source /usr/local/Ascend/ascend-toolkit/set_env.sh
+          source /usr/local/Ascend/nnal/atb/set_env.sh
+          arch=$(uname -i)
+          export LD_LIBRARY_PATH=$LD_LIBRARY_PATH:/usr/local/Ascend/ascend-toolkit/latest/${arch}-linux/devlib
+          TORCH_DEVICE_BACKEND_AUTOLOAD=0 python3 tools/deepgemm/verify_install.py
+
       # L1 transport failure is a performance degradation, not a correctness
       # failure. The verified final L0 artifact can still be published.
       - name: Save incremental build cache
@@ -244,4 +257,5 @@ jobs:
             vllm_ascend/*.so
             vllm_ascend/lib
             vllm_ascend/include
+            ${{ startsWith(fromJSON(inputs.target).soc_version, 'ascend950') && 'vllm_ascend/third_party/deep_gemm' || '' }}
           key: vllm-ascend-build-v2-${{ fromJSON(inputs.target).cache_arch }}-${{ fromJSON(inputs.target).image_tag }}-${{ inputs.csrc_hash }}

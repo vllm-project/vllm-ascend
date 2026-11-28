@@ -23,7 +23,9 @@ on:
     paths:
       - 'csrc/**'
       - 'setup.py'
-      - 'pyproject.toml'
+      - 'tools/deepgemm/requirements-build.txt'
+      - 'tools/deepgemm/build.py'
+      - 'tools/deepgemm/install_build_deps.sh'
       - 'CMakeLists.txt'
       - 'cmake/**'
       - 'packages.txt'
@@ -68,7 +70,7 @@ jobs:
           cd "$GITHUB_WORKSPACE"
 
           # Limit invalidation to tracked inputs that can change csrc artifacts.
-          CSRC_MANIFEST=$(git ls-files -s -- csrc setup.py CMakeLists.txt cmake)
+          CSRC_MANIFEST=$(git ls-files -s -- csrc setup.py CMakeLists.txt cmake tools/deepgemm/build.py tools/deepgemm/install_build_deps.sh tools/deepgemm/requirements-build.txt)
           if [ -z "$CSRC_MANIFEST" ]; then
             echo "::error::No tracked csrc inputs found."
             exit 1
