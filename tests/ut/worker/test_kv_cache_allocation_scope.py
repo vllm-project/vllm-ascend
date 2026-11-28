@@ -44,7 +44,7 @@ def test_kv_wake_does_not_run_model_runner_recovery() -> None:
     with patch.object(NPUWorker, "__init__", lambda *_args, **_kwargs: None):
         worker = NPUWorker()
     worker.model_runner = runner
-    worker._sleep_mode_backend = MagicMock()
+    worker._extra_cleanup_pending = False
     worker.sleep_wakeup_manager = MagicMock()
     worker._sleep_mode_backend = MagicMock()
 
@@ -81,6 +81,7 @@ def _make_sleep_worker(model: torch.nn.Module) -> NPUWorker:
         model=model,
         get_draft_model=lambda: None,
     )
+    worker._extra_cleanup_pending = False
     worker._sleep_mode_backend = MagicMock(spec=CaMemBackend)
     worker.sleep_wakeup_manager = MagicMock()
     return worker

@@ -100,6 +100,7 @@ estimated_times:
   tests/e2e/pull_request/two_card/rlhf/state_transitions/test_weight_checker.py: 1200
   tests/e2e/pull_request/one_card/rlhf/state_transitions/test_sleep_wake.py: 360
   tests/e2e/pull_request/one_card/rlhf/state_transitions/test_sleep_level2_reload.py: 210
+  tests/e2e/pull_request/one_card/rlhf/state_transitions/test_release_kv_cache.py: 400
   tests/e2e/pull_request/one_card/test_sampler.py: 200
   tests/e2e/pull_request/one_card/test_turboquant_finalize.py: 50
   tests/e2e/pull_request/one_card/test_vlm.py: 480
@@ -198,6 +199,7 @@ estimated_times:
   tests/e2e/pull_request/one_card/test_eplb_map_to_physical_npu.py: 50
   tests/e2e/pull_request/one_card/test_gdn_layerwise_kv.py: 80
   tests/e2e/pull_request/two_card/test_activation.py: 50
+  tests/e2e/pull_request/two_card/test_eplb_placement_export.py: 50
   tests/e2e/pull_request/two_card/test_kimi_kda_fused_norm_gate.py: 80
   tests/e2e/pull_request/one_card/test_linear_quantization.py: 50
   tests/e2e/pull_request/one_card/test_gumbel_sampling.py: 170

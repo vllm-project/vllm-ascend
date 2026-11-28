@@ -174,6 +174,7 @@ def server(
     port: int = 8770,
     timeout: float = 180.0,
     dummy_weights: bool = False,
+    weight_nz_mode: int | None = 0,
 ):
     """Launch a vLLM server with the dev router; yield its base URL.
 
@@ -182,6 +183,8 @@ def server(
         port:            HTTP port to bind (caller is responsible for uniqueness).
         timeout:         Seconds to wait for /health before giving up.
         dummy_weights:   If True, use --load-format dummy (fast, no real weights).
+        weight_nz_mode:  Override AscendConfig.weight_nz_mode; pass None to keep
+                         the default (FRACTAL_NZ enabled).
     """
     env = {
         **os.environ,
@@ -189,6 +192,7 @@ def server(
         "HF_HUB_OFFLINE": "1",
     }
     base = _DUMMY_ARGS if dummy_weights else _BASE_ARGS
+    nz_args = ["--additional-config", f'{{"weight_nz_mode": {weight_nz_mode}}}'] if weight_nz_mode is not None else []
     cmd = [
         sys.executable,
         "-m",
@@ -199,8 +203,7 @@ def server(
         str(port),
         "--served-model-name",
         "m",
-        "--additional-config",
-        '{"weight_nz_mode": 0}',
+        *nz_args,
         *(base + (extra_args or [])),
     ]
     # Establish the test process's NPU device context while the card is still
@@ -323,6 +326,10 @@ def sleep(url, level=1, mode="abort"):
 def wake(url, tags=None):
     params = {"tags": tags} if tags else {}
     return requests.post(f"{url}/wake_up", params=params, timeout=20).status_code
+
+
+def release_kv_cache(url):
+    return requests.post(f"{url}/release_kv_cache_memory", timeout=CONTROL_TIMEOUT).status_code
 
 
 def pause(url, mode="abort", clear_cache=True):

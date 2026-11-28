@@ -1,0 +1,8 @@
+pr: 21260
+entries:
+  - category: feature
+    text: >-
+      Added `eplb_config.expert_placement_path` under `--additional-config` to
+      atomically export committed MoE expert placements on rank 0 whenever a
+      rearranged layout achieves a new lowest observed peak-to-mean rank-load
+      ratio before the next rearrangement.

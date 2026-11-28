@@ -123,9 +123,9 @@ above deviate from them, and when to do the same:
   increase rearrangement frequency and trade stability for faster response.
 
 These fields may also be passed together as JSON through `--eplb-config`.
-They must not be placed in `--additional-config` for MRv2: the only MRv2 EPLB
-fields under `additional_config.eplb_config` are `load_collection_phase` and
-`stair_config`; any other field is rejected at startup.
+Keep upstream fields in `--eplb-config`; Ascend EPLB fields under
+`additional_config.eplb_config` are `load_collection_phase`,
+`expert_placement_path`, and `stair_config`.
 
 Ascend extends the upstream `policy` field without adding a second selector.
 For example, use `--eplb-config.policy default` to run the upstream policy;
@@ -191,6 +191,18 @@ vllm serve Qwen/Qwen3-30B-A3B \
   --enable-eplb \
   --additional-config '{"eplb_config":{"load_collection_phase":"prefill"}}'
 ```
+
+#### Placement Export
+
+Set `eplb_config.expert_placement_path` (for example,
+`--additional-config '{"eplb_config":{"expert_placement_path":"/tmp/expert_placement.json"}}'`)
+to atomically export the best committed expert placement on global rank 0's
+host. Before the first rearrangement, EPLB records the initial placement's
+observed per-step peak-to-mean rank-load ratio without writing to disk; before
+each subsequent rearrangement, global rank 0 updates the file only when the
+active committed placement achieves a strictly lower observed peak-to-mean
+ratio (requiring at least two rearrangement intervals in calibration runs).
+Pipeline parallelism and speculative MoE drafts with EPLB enabled are supported.
 
 #### MRv2 Constraints
 

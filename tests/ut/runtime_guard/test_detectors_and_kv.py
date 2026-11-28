@@ -255,8 +255,21 @@ def test_slice_blocks_selects_requested_and_empty():
     out, used = sliced
     assert used == [1, 3]
     assert out.shape == (2, 8)  # keep [n_blocks, block_size, ...]
+    assert out.device.type == "cpu"
     assert torch.equal(out[0], t[1])
     assert torch.equal(out[1], t[3])
+
+
+def test_slice_blocks_preserves_request_order():
+    # Caller order must be kept (not sorted / densified by advanced indexing).
+    t = torch.arange(0, 4 * 8).reshape(4, 8).float()
+    sliced = _slice_blocks(t, [3, 1, 3])
+    assert sliced is not None
+    out, used = sliced
+    assert used == [3, 1, 3]
+    assert torch.equal(out[0], t[3])
+    assert torch.equal(out[1], t[1])
+    assert torch.equal(out[2], t[3])
 
 
 def test_slice_blocks_partial_out_of_range_reports_used_ids():
