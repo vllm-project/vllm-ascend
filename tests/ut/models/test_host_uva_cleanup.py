@@ -1,7 +1,9 @@
 # SPDX-License-Identifier: Apache-2.0
 """Real shared mappings with simulated CANN initialization/cleanup failures."""
 
+import ctypes
 import gc
+import os
 import weakref
 from multiprocessing import shared_memory
 from types import SimpleNamespace
@@ -102,3 +104,104 @@ def test_failed_unregister_retains_mapping_for_retry(shared_buffer_factory):
     owner.close()
     assert owner.shm is None and not owner.pointer.value
     assert lib.aclrtHostUnregister.call_count == 2
+
+
+def test_aligned_shared_size_rounds_up_to_two_mib():
+    align = npu.SHARED_MAP_ALIGN
+    assert npu._aligned_shared_size(0) == 0
+    assert npu._aligned_shared_size(1) == align
+    assert npu._aligned_shared_size(align) == align
+    assert npu._aligned_shared_size(align + 1) == 2 * align
+
+
+@pytest.mark.skipif(not os.path.isdir("/dev/shm"), reason="POSIX shared memory is required")
+def test_map_shared_hugepage_is_two_mib_aligned():
+    size = npu._aligned_shared_size((3 << 20) + 1)
+    shm = shared_memory.SharedMemory(create=True, size=size)
+    try:
+        address = npu.map_shared_hugepage(shm.name, size)
+        try:
+            assert address % npu.SHARED_MAP_ALIGN == 0
+            # The device gathers from this mapping, so it must alias the segment.
+            ctypes.memset(ctypes.c_void_p(address), 0x5A, 4096)
+            assert shm.buf[0] == 0x5A
+        finally:
+            npu.unmap_shared_hugepage(address, size)
+    finally:
+        shm.close()
+        shm.unlink()
+
+
+@pytest.mark.skipif(not os.path.isdir("/dev/shm"), reason="POSIX shared memory is required")
+def test_open_failure_reserves_nothing(monkeypatch):
+    calls = []
+    real = npu._libc()
+
+    def record_mmap(*args):
+        calls.append(args[1])
+        return real.mmap(*args)
+
+    fake = SimpleNamespace(mmap=record_mmap, munmap=real.munmap, madvise=real.madvise)
+    monkeypatch.setattr(npu, "_libc", lambda: fake)
+
+    def fail_open(name):
+        raise OSError("too many open files")
+
+    monkeypatch.setattr(npu, "_open_shared", fail_open)
+    with pytest.raises(OSError):
+        npu.map_shared_hugepage("unused", npu.SHARED_MAP_ALIGN)
+    assert calls == []
+
+
+def test_madvise_failure_logs_warning(monkeypatch, caplog):
+    real = npu._libc()
+    fake = SimpleNamespace(mmap=real.mmap, munmap=real.munmap, madvise=lambda *args: -1)
+    monkeypatch.setattr(npu, "_libc", lambda: fake)
+    size = npu.SHARED_MAP_ALIGN
+    shm = shared_memory.SharedMemory(create=True, size=size)
+    try:
+        with caplog.at_level("WARNING"):
+            address = npu.map_shared_hugepage(shm.name, size)
+        npu.unmap_shared_hugepage(address, size)
+        assert "madvise(MADV_HUGEPAGE) failed" in caplog.text
+    finally:
+        shm.close()
+        shm.unlink()
+
+
+def _spy_unmap(monkeypatch):
+    """Record released ranges while still performing the real unmap."""
+    released = []
+    real_unmap = npu.unmap_shared_hugepage
+
+    def unmap(address, size):
+        released.append((address, size))
+        real_unmap(address, size)
+
+    monkeypatch.setattr(npu, "unmap_shared_hugepage", unmap)
+    return released
+
+
+def test_failed_registration_releases_aligned_mapping(shared_buffer_factory, monkeypatch):
+    construct, lib, names, real_shm = shared_buffer_factory
+    released = _spy_unmap(monkeypatch)
+    lib.aclrtHostRegisterV2.return_value = 1
+    with pytest.raises(RuntimeError, match="initialization failed"):
+        construct()
+    assert len(released) == 1
+    address, size = released[0]
+    assert address % npu.SHARED_MAP_ALIGN == 0
+    assert size == npu._aligned_shared_size(8 * 32 * 2)
+
+
+def test_close_releases_aligned_mapping_once(shared_buffer_factory, monkeypatch):
+    construct, lib, names, real_shm = shared_buffer_factory
+    released = _spy_unmap(monkeypatch)
+    owner = construct()
+    assert owner.map_address is not None
+    assert owner.map_address % npu.SHARED_MAP_ALIGN == 0
+    assert owner.size_padded == npu._aligned_shared_size(8 * 32 * 2)
+    owner.close()
+    owner.close()
+    assert len(released) == 1
+    assert owner.map_address is None

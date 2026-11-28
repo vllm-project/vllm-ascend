@@ -10,10 +10,9 @@ copy nor a host-side gather.
 """
 
 import ctypes
-import mmap
+import os
 from functools import cache
 from multiprocessing import shared_memory
-from typing import cast
 from unittest.mock import patch
 
 import torch
@@ -28,13 +27,89 @@ SCALE_GROUP = 32
 # separately.
 CHUNK_ROWS = 1 << 22
 
+# A shared Engram table only registers when the mapping is backed by shmem huge
+# pages, and shmem THP requires a 2 MiB aligned virtual address over a whole
+# number of 2 MiB pages at file offset 0.  ``SharedMemory`` maps at an
+# arbitrary 4 KiB aligned address, so the object is mapped a second time here.
+SHARED_MAP_ALIGN = 2 << 20
+_PROT_NONE = 0x0
+_PROT_READ_WRITE = 0x1 | 0x2
+_MAP_SHARED = 0x1
+_MAP_PRIVATE = 0x2
+_MAP_FIXED = 0x10
+_MAP_ANONYMOUS = 0x20
+_MADV_HUGEPAGE = 14
+_MAP_FAILED = (1 << 64) - 1
 
-def _madvise_hugepage(shm: shared_memory.SharedMemory, size: int) -> None:
-    """Ask the kernel to back a shared Engram mapping with shmem THPs."""
+
+def _aligned_shared_size(size: int) -> int:
+    """Round a shared table size up to whole 2 MiB pages."""
+    return (size + SHARED_MAP_ALIGN - 1) // SHARED_MAP_ALIGN * SHARED_MAP_ALIGN
+
+
+@cache
+def _libc():
+    libc = ctypes.CDLL("libc.so.6", use_errno=True)
+    libc.mmap.restype = ctypes.c_void_p
+    libc.mmap.argtypes = [
+        ctypes.c_void_p,
+        ctypes.c_size_t,
+        ctypes.c_int,
+        ctypes.c_int,
+        ctypes.c_int,
+        ctypes.c_long,
+    ]
+    libc.munmap.argtypes = [ctypes.c_void_p, ctypes.c_size_t]
+    libc.madvise.argtypes = [ctypes.c_void_p, ctypes.c_size_t, ctypes.c_int]
+    return libc
+
+
+def _open_shared(name: str) -> int:
+    """Open a shared Engram segment for mapping."""
+    return os.open(f"/dev/shm/{name}", os.O_RDWR)
+
+
+def map_shared_hugepage(name: str, size: int) -> int:
+    """Map ``/dev/shm/<name>`` over ``size`` bytes at a 2 MiB aligned address.
+
+    ``size`` must already be a multiple of ``SHARED_MAP_ALIGN``.  A private
+    anonymous reservation is aligned up and the shared object is then mapped on
+    top of the aligned window, so the result starts on a 2 MiB boundary at file
+    offset 0 while the slack around it is released again.
+    """
+    libc = _libc()
+    fd = _open_shared(name)
+    reservation = 0
     try:
-        cast(mmap.mmap, shm.buf.obj).madvise(mmap.MADV_HUGEPAGE, 0, size)
-    except (AttributeError, OSError) as exc:
-        logger.warning("madvise(MADV_HUGEPAGE) failed for shared Engram: %s", exc)
+        reservation = libc.mmap(None, size + SHARED_MAP_ALIGN, _PROT_NONE, _MAP_PRIVATE | _MAP_ANONYMOUS, -1, 0)
+        if not reservation or reservation == _MAP_FAILED:
+            reservation = 0
+            raise RuntimeError("failed to reserve an aligned window for the shared Engram table")
+        aligned = (reservation + SHARED_MAP_ALIGN - 1) // SHARED_MAP_ALIGN * SHARED_MAP_ALIGN
+        leading = aligned - reservation
+        trailing = reservation + size + SHARED_MAP_ALIGN - (aligned + size)
+        address = libc.mmap(ctypes.c_void_p(aligned), size, _PROT_READ_WRITE, _MAP_SHARED | _MAP_FIXED, fd, 0)
+        if address != aligned:
+            raise RuntimeError("failed to map the shared Engram table at a 2 MiB aligned address")
+        if leading:
+            libc.munmap(ctypes.c_void_p(reservation), leading)
+        if trailing:
+            libc.munmap(ctypes.c_void_p(aligned + size), trailing)
+        if libc.madvise(ctypes.c_void_p(aligned), size, _MADV_HUGEPAGE):
+            logger.warning("madvise(MADV_HUGEPAGE) failed for shared Engram: errno=%d", ctypes.get_errno())
+        # From here on the aligned window belongs to the caller.
+        reservation = 0
+        return aligned
+    except BaseException:
+        if reservation:
+            libc.munmap(ctypes.c_void_p(reservation), size + SHARED_MAP_ALIGN)
+        raise
+    finally:
+        os.close(fd)
+
+
+def unmap_shared_hugepage(address: int, size: int) -> None:
+    _libc().munmap(ctypes.c_void_p(address), size)
 
 
 def engram_cpu_offload(vllm_config) -> bool:
@@ -307,6 +382,8 @@ class SharedUvaBuffer:
         row_elements = int(torch.Size(shape[1:]).numel())
         self.row_bytes = row_elements * torch.empty((), dtype=dtype).element_size()
         size = rows * self.row_bytes
+        self.size_padded = _aligned_shared_size(size)
+        self.map_address: int | None = None
         self.shm = None
         self.tensor = None
         self.ptrs = None
@@ -317,7 +394,7 @@ class SharedUvaBuffer:
         payload: list[str | None] = [None]
         if group.rank_in_group == 0:
             try:
-                self.shm = shared_memory.SharedMemory(create=True, size=size)
+                self.shm = shared_memory.SharedMemory(create=True, size=self.size_padded)
                 payload = [self.shm.name]
             except Exception as exc:  # noqa: BLE001 - reported to the group
                 if self.shm is not None:
@@ -336,10 +413,13 @@ class SharedUvaBuffer:
                 # SharedMemory attach path so only the creator unlinks it.
                 with patch("multiprocessing.resource_tracker.register", lambda *args, **kwargs: None):
                     self.shm = shared_memory.SharedMemory(name=name)
-            assert self.shm.size >= size
-            address_of_mapping = ctypes.c_void_p(ctypes.addressof(ctypes.c_char.from_buffer(self.shm.buf)))
-            _madvise_hugepage(self.shm, size)
-            rc = self.lib.aclrtHostRegisterV2(address_of_mapping, size, DeviceOperator.host_register_flags())
+            assert self.shm.size >= self.size_padded
+            mapping_address = map_shared_hugepage(self.shm.name, self.size_padded)
+            self.map_address = mapping_address
+            address_of_mapping = ctypes.c_void_p(mapping_address)
+            rc = self.lib.aclrtHostRegisterV2(
+                address_of_mapping, self.size_padded, DeviceOperator.host_register_flags()
+            )
             if rc:
                 raise RuntimeError(f"aclrtHostRegisterV2 failed: rc={rc} size={size}")
             # Registration succeeded: from here on the mapping owes exactly one
@@ -351,7 +431,11 @@ class SharedUvaBuffer:
             rc = self.lib.aclrtHostGetDevicePointer(self.pointer, ctypes.byref(address), 0)
             if rc:
                 raise RuntimeError(f"aclrtHostGetDevicePointer failed: rc={rc}")
-            self.tensor = torch.frombuffer(self.shm.buf, dtype=dtype, count=rows * row_elements).reshape(shape)
+            self.tensor = torch.frombuffer(
+                (ctypes.c_char * self.size_padded).from_address(mapping_address),
+                dtype=dtype,
+                count=rows * row_elements,
+            ).reshape(shape)
             self.ptrs = torch.tensor(
                 [address.value + start * self.row_bytes for start in range(0, rows, CHUNK_ROWS)],
                 dtype=torch.int64,
@@ -410,6 +494,9 @@ class SharedUvaBuffer:
         self.pointer = ctypes.c_void_p()
         self.tensor = None
         self.ptrs = None
+        if self.map_address is not None:
+            unmap_shared_hugepage(self.map_address, self.size_padded)
+            self.map_address = None
         if self.shm is not None:
             self.shm.close()
             self.shm = None

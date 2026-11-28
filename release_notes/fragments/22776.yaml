@@ -1,0 +1,6 @@
+pr: 22776
+entries:
+  - category: bugfix
+    text: "Fixed Engram CPU offload aborting at startup with `aclrtHostRegisterV2 failed: rc=107017` when `dp_shared_memory` was enabled; such deployments now start normally."
+    model: deepseek-v4.1-flash
+    hardware: [A2]
