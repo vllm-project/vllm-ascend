@@ -312,6 +312,10 @@ a3-560t:
 a5:
 #  multi_node:
 #    test_config:
+#      - name: multi-node-Step-5-Preview-w8a8-mxfp8-Co-located
+#        config_file_path: Step-5-Preview-w8a8-mxfp8-dual-nodes-Co-located.yaml
+#        config_base_path: tests/SIT/cases/models/configs/Step
+#        size: 2
 #      - name: DeepSeek-V4.1-Flash-A5-PD
 #        config_file_path: DeepSeek-V4.1-Flash-A5-PD.yaml
 #        config_base_path: tests/SIT/cases/models/configs/DeepSeek
