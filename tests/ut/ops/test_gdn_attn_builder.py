@@ -1344,6 +1344,7 @@ def test_checkpoint_offsets_follow_each_groups_reserved_page(monkeypatch):
     config = _make_vllm_config(mamba_cache_mode="align")
     config.cache_config.hash_block_size = 16
     config.cache_config.cache_hit_alignment_tokens = 128
+    checkpoint_alignment: dict[str, object]
     if vllm_version_is("0.34.0"):
         checkpoint_alignment = {"get_kv_cache_checkpoint_alignment": lambda _: 16}
     else:
