@@ -230,8 +230,9 @@ vllm serve Qwen/Qwen3.8-27B \
   --speculative-config '{"method":"dflash","model":"z-lab/Qwen3.8-27B-DFlash2","num_speculative_tokens":7}'
 ```
 
-Full draft ACLGraph capture requires target `FULL_DECODE_ONLY` or
-`FULL_AND_PIECEWISE` and draft `enforce_eager` unset or false.
+Full draft ACLGraph capture requires full decode ACLGraphs on the target and a
+draft attention backend that supports full graph capture for uniform decode
+batches. Leave `speculative_config.enforce_eager` unset or set it to `false`.
 
 ##### LiLiCorr
 
