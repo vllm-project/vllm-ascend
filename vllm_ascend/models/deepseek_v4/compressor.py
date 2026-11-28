@@ -222,4 +222,16 @@ class Compressor(nn.Module):
             rotary_mode=2,
             cache_mode=1,
         )
+        # Block 0 is the null block reserved for padding, and the KV cache is
+        # zero-initialised so padded rows read zeros back. Dummy batches can
+        # still produce compressed slots inside that block; route them to the
+        # -1 skip sentinel the KV writers already honour instead of storing
+        # compressed KV, which can be non-finite, into the reserved page.
+        # The cached mapping is shared by every layer of the cache group, so
+        # rewrite a copy and leave the input untouched.
+        if slot_mapping.ndim == 1:
+            in_null_block = (slot_mapping >= 0) & (slot_mapping < compressor_metadata.storage_block_size)
+        else:
+            in_null_block = slot_mapping[:, :1] == 0
+        slot_mapping = torch.where(in_null_block, -1, slot_mapping)
         return compressed_kv, slot_mapping

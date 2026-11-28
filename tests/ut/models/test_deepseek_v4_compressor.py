@@ -98,11 +98,24 @@ class TestCompressorForward:
         ("compress_ratio", "overlap", "expected_coff"),
         [(4, True, 2), (128, False, 1)],
     )
+    @pytest.mark.parametrize(
+        ("slots", "expected_slots"),
+        [
+            ([0, 0, -1, 31, 32, 33], [-1, -1, -1, -1, 32, 33]),
+            (
+                [[0, 0], [0, 31], [-1, 31], [1, 0], [1, 1]],
+                [[-1, -1], [-1, -1], [-1, 31], [1, 0], [1, 1]],
+            ),
+        ],
+        ids=["flat", "block_offset"],
+    )
     def test_routes_cache_and_state_metadata(
         self,
         compress_ratio: int,
         overlap: bool,
         expected_coff: int,
+        slots: list[int] | list[list[int]],
+        expected_slots: list[int] | list[list[int]],
     ):
         compressor = Compressor.__new__(Compressor)
         torch.nn.Module.__init__(compressor)
@@ -115,6 +128,7 @@ class TestCompressorForward:
         compressor.wgate = SimpleNamespace(weight=torch.ones((4, 4)))
         compressor.norm = SimpleNamespace(weight=torch.ones(4))
         cache_req_metadata = SimpleNamespace(
+            storage_block_size=32,
             query_start_loc=torch.tensor([0, 2], dtype=torch.int32),
             start_pos=torch.tensor([1], dtype=torch.int32),
         )
@@ -125,10 +139,12 @@ class TestCompressorForward:
         )
         hidden_states = torch.ones((2, 4))
         state_cache = torch.ones((1, 2, 1, 4))
-        compress_cos = torch.ones((1, 1, 2))
-        compress_sin = torch.zeros((1, 1, 2))
-        slot_mapping = torch.tensor([[0, 1]], dtype=torch.int32)
-        compressed_kv = torch.ones((1, 1, 4))
+        num_rows = len(slots)
+        compress_cos = torch.ones((num_rows, 1, 2))
+        compress_sin = torch.zeros((num_rows, 1, 2))
+        slot_mapping = torch.tensor(slots, dtype=torch.int32)
+        original_slot_mapping = slot_mapping.clone()
+        compressed_kv = torch.ones((num_rows, 1, 4))
         compute_metadata = MagicMock(return_value=(compress_cos, compress_sin, slot_mapping))
         compressor._compute_metadata = compute_metadata
 
@@ -145,7 +161,10 @@ class TestCompressorForward:
             )
 
         assert actual_kv is compressed_kv
-        assert actual_slot_mapping is slot_mapping
+        torch.testing.assert_close(actual_slot_mapping, torch.tensor(expected_slots, dtype=torch.int32))
+        # Every layer of a cache group reads this cached mapping, so the
+        # reserved-block rewrite must not touch the input buffer.
+        torch.testing.assert_close(slot_mapping, original_slot_mapping)
         compute_metadata.assert_called_once_with(cache_req_metadata)
         call = compressor_op.call_args
         assert call.args[0] is hidden_states
