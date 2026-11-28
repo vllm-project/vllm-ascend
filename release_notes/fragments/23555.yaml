@@ -1,0 +1,6 @@
+pr: 23555
+entries:
+  - category: performance
+    text: >-
+      Reduced host-side stalls when uploading GDN chunked prefill metadata
+      to the NPU by allocating the CPU staging tensors in pinned memory.

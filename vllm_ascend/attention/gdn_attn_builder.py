@@ -348,13 +348,23 @@ def _build_non_spec_chunked_prefill_metadata(
             chunk_indices_chunk32_host = ()
 
     if build_device_metadata:
+        host_chunk_metadata = {
+            "chunk_indices_chunk64": chunk_indices_chunk64,
+            "chunk_offsets_chunk64": chunk_offsets_chunk64,
+            "update_chunk_offsets_chunk64": update_chunk_offsets_chunk64,
+            "final_chunk_indices_chunk64": final_chunk_indices_chunk64,
+            "chunk_indices_large_block": chunk_indices_large_block,
+            "block_indices_cumsum": block_indices_cumsum,
+        }
+        if device.type == "npu":
+            # Pageable sources can make ACL's async H2D submission wait for
+            # queued device work. PyTorch owns the pinned allocation lifetime.
+            host_chunk_metadata = {
+                name: tensor.pin_memory() for name, tensor in host_chunk_metadata.items()
+            }
         device_chunk_metadata = {
-            "chunk_indices_chunk64": chunk_indices_chunk64.to(device=device, non_blocking=True),
-            "chunk_offsets_chunk64": chunk_offsets_chunk64.to(device=device, non_blocking=True),
-            "update_chunk_offsets_chunk64": update_chunk_offsets_chunk64.to(device=device, non_blocking=True),
-            "final_chunk_indices_chunk64": final_chunk_indices_chunk64.to(device=device, non_blocking=True),
-            "chunk_indices_large_block": chunk_indices_large_block.to(device=device, non_blocking=True),
-            "block_indices_cumsum": block_indices_cumsum.to(device=device, non_blocking=True),
+            name: tensor.to(device=device, non_blocking=True)
+            for name, tensor in host_chunk_metadata.items()
         }
     else:
         device_chunk_metadata = {
