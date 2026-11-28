@@ -246,7 +246,7 @@ def test_backend_uses_normalized_q_c_and_separate_tail_metadata(
     )
     backend.topk_indices_buffer = torch.empty(64, 16, dtype=torch.int32)
     backend.softmax_scale = 0.5
-    backend._key_weight = None
+    backend._head_weight_f32 = None
     recorder = _RecordingKPool()
     backend._forward_cann = recorder.forward
     tail_metadata = _tail_metadata()
@@ -302,8 +302,8 @@ def test_backend_uses_normalized_q_c_and_separate_tail_metadata(
         torch.testing.assert_close(recorder.args[0], torch.cat((hidden + 3, hidden + 3)))
     else:
         torch.testing.assert_close(recorder.args[0], hidden[:expected_rows] + 3)
-    torch.testing.assert_close(backend._key_weight, backend.wk_weights_proj.weight[:2])
-    torch.testing.assert_close(backend._norm_weight_f32, backend.k_norm.weight.float())
+    torch.testing.assert_close(backend._head_weight_f32, backend.wk_weights_proj.weight[2:].float())
+    assert backend._head_weight_f32.data_ptr() != backend.wk_weights_proj.weight[2:].data_ptr()
     expected_weights = torch.nn.functional.linear(hidden[:expected_rows], backend.wk_weights_proj.weight[2:]) * (
         0.5 * 2**-0.5
     )
@@ -387,10 +387,9 @@ def test_cann_indexer_writes_caches_before_optional_selection(
     op = Glm5NextKPoolIndexerBackend.__new__(Glm5NextKPoolIndexerBackend)
     nn.Module.__init__(op)
     op.topk_tokens, op.head_dim, op.index_kpool = 4, 2, 4
-    op._key_weight = torch.empty(2, 3, dtype=torch.bfloat16)
-    op._gate_weight = torch.empty(2, 3, dtype=torch.bfloat16)
-    op._norm_weight_f32 = op._norm_bias_f32 = None
-    op.k_norm = SimpleNamespace(eps=1e-6)
+    op.wk_weights_proj = nn.Linear(3, 2, bias=False, dtype=torch.bfloat16)
+    op.index_kpool_compress_gate = nn.Parameter(torch.empty(2, 3, dtype=torch.bfloat16))
+    op.k_norm = SimpleNamespace(eps=1e-6, weight=None, bias=None)
     op.index_kpool_compress_ape = torch.empty(4, 2)
     storage = torch.full((20, 22), 77, dtype=torch.int32)
     op.topk_indices_buffer = storage[::2, :11] if reuse_output else None
@@ -442,7 +441,8 @@ def test_cann_indexer_writes_caches_before_optional_selection(
         )
     names = [call[0] for call in calls.mock_calls]
     assert names[:3] == ["prepare_keypool_state", "key_pool", "write_keypool_caches"]
-    assert op._key_pool.call_args.args[1:3] == (op._key_weight, op._gate_weight)
+    assert op._key_pool.call_args.args[1].data_ptr() == op.wk_weights_proj.weight.data_ptr()
+    assert op._key_pool.call_args.args[2] is op.index_kpool_compress_gate
     assert op._key_pool.call_args.kwargs["cu_seqlens"] is metadata.query_start_loc
     assert op._write_keypool_caches.call_args.args[:2] == (tail, cache)
     assert op._write_keypool_caches.call_args.args[4] is pooled
@@ -473,3 +473,31 @@ def test_cann_indexer_writes_caches_before_optional_selection(
         assert result is None
         op._pool_key_indexer.assert_not_called()
         op._pack_keypool_indices.assert_not_called()
+
+
+@pytest.mark.parametrize("dtype", [torch.float32, torch.bfloat16])
+def test_head_projection_reload_preserves_graph_owned_storage(dtype):
+    backend = Glm5NextKPoolIndexerBackend.__new__(Glm5NextKPoolIndexerBackend)
+    nn.Module.__init__(backend)
+    backend.head_dim = 2
+    backend.wk_weights_proj = nn.Linear(3, 4, bias=False, dtype=dtype)
+    backend._head_weight_f32 = None
+    backend.process_weights_after_loading()
+    captured = backend._head_weight_f32
+    assert captured is not None
+    pointer = captured.data_ptr()
+    assert not captured.requires_grad
+    assert "_head_weight_f32" not in dict(backend.named_buffers(recurse=False))
+    assert "_head_weight_f32" not in dict(backend.named_parameters(recurse=False))
+    assert captured.data_ptr() != backend.wk_weights_proj.weight[2:].data_ptr()
+
+    for value in (1.0, 2.0):
+        # Replace the source storage, as offloading/reload can do.
+        backend.wk_weights_proj.weight.data = torch.full_like(backend.wk_weights_proj.weight, value)
+        backend.process_weights_after_loading()
+        assert backend._head_weight_f32 is captured
+        assert captured.data_ptr() == pointer
+        torch.testing.assert_close(captured, torch.full((2, 3), value))
+        assert not any(
+            hasattr(backend, name) for name in ("_key_weight", "_gate_weight", "_norm_weight_f32", "_norm_bias_f32")
+        )

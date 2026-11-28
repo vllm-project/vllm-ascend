@@ -15,7 +15,6 @@
 # This file is a part of the vllm-ascend project.
 #
 
-import json
 from pathlib import Path
 
 import torch
@@ -26,8 +25,6 @@ from vllm.logger import logger
 from vllm_ascend.device.hardware_profile import HardwareCapability, get_current_hardware_profile
 from vllm_ascend.utils import (
     ASCEND_QUANTIZATION_METHOD,
-    COMPRESSED_TENSORS_METHOD,
-    FP8_METHOD,
     enable_sfa,
 )
 
@@ -132,69 +129,51 @@ def get_model_file(
 
 
 def detect_quantization_method(model: str, revision: str | None = None) -> str | None:
-    """Auto-detect the quantization method from model files.
+    """Auto-detect the ModelSlim (Ascend) quantization method from model files.
 
-    This function performs a lightweight check (JSON files only — no
-    .safetensors or .bin inspection) to determine which quantization
-    method was used to produce the weights in *model*.
+    Only ModelSlim needs file-based auto-detection here: ModelSlim-quantized
+    checkpoints carry their quantization description in a dedicated
+    ``quant_model_description.json`` file which upstream vLLM does not know
+    about.  All other quantization formats (compressed-tensors, fp8, gptq, ...)
+    declare ``quantization_config.quant_method`` in ``config.json`` and are
+    already auto-detected by upstream vLLM's
+    ``ModelConfig._verify_quantization``, so re-detecting them here would be
+    redundant.
 
     Works with both local directories (``/path/to/model``) and remote
     repository identifiers (``org/model-name``).  For remote repos the
     lookup goes through the HuggingFace / ModelScope cache, downloading
     config files if not already cached.
 
-    Detection priority:
-        1. **ModelSlim (Ascend)** – ``quant_model_description.json`` exists.
-        2. **LLM-Compressor (compressed-tensors)** – ``config.json`` contains
-           a ``quantization_config`` section with
-           ``"quant_method": "compressed-tensors"``.
-        3. **None** – neither condition is met; the caller should fall back to
-           the default (float) behaviour.
-
     Args:
         model: Local directory path **or** HuggingFace / ModelScope repo id.
         revision: Optional model revision (branch, tag, or commit id).
 
     Returns:
-        ``"ascend"`` for ModelSlim models,
-        ``"compressed-tensors"`` for LLM-Compressor models,
-        or ``None`` if no quantization signature is found.
+        ``"ascend"`` for ModelSlim models, or ``None`` if no ModelSlim
+        quantization signature is found.
     """
     from vllm_ascend.quantization.configs.modelslim_config import MODELSLIM_CONFIG_FILENAME
 
-    # Case 1: ModelSlim — look for quant_model_description.json
     modelslim_path = get_model_file(model, MODELSLIM_CONFIG_FILENAME, revision=revision)
     if modelslim_path is not None:
         return ASCEND_QUANTIZATION_METHOD
-
-    # Case 2: LLM-Compressor — look for compressed-tensors in config.json
-    config_path = get_model_file(model, "config.json", revision=revision)
-    if config_path is not None:
-        try:
-            with open(config_path) as f:
-                config = json.load(f)
-            quant_cfg = config.get("quantization_config")
-            if isinstance(quant_cfg, dict):
-                quant_method = quant_cfg.get("quant_method", "")
-                if quant_method == COMPRESSED_TENSORS_METHOD:
-                    return COMPRESSED_TENSORS_METHOD
-            if isinstance(quant_cfg, dict):
-                quant_method = quant_cfg.get("quant_method", "")
-                if quant_method == FP8_METHOD:
-                    return FP8_METHOD
-        except (json.JSONDecodeError, OSError):
-            pass
-
-    # Case 3: No quantization signature found.
     return None
 
 
 def maybe_auto_detect_quantization(vllm_config) -> None:
-    """Auto-detect and apply the quantization method on *vllm_config*.
+    """Auto-detect and apply the ModelSlim quantization on *vllm_config*.
 
     This should be called during engine initialisation (from
     ``NPUPlatform.check_and_update_config``) **after** ``VllmConfig`` has been
     created but **before** heavy weights are loaded.
+
+    Only ModelSlim detection is performed here (see
+    ``detect_quantization_method``).  Quantization formats declared via
+    ``quantization_config.quant_method`` in ``config.json`` (compressed-tensors,
+    fp8, ...) have already been resolved by upstream vLLM's
+    ``ModelConfig._verify_quantization`` before this runs, so
+    ``model_config.quantization`` may already be set when we get here.
 
     Because ``check_and_update_config`` runs *after*
     ``VllmConfig.__post_init__`` has already evaluated
@@ -203,14 +182,15 @@ def maybe_auto_detect_quantization(vllm_config) -> None:
 
     1. Set ``model_config.quantization`` to the detected value.
     2. Recreate ``vllm_config.quant_config`` so that the quantization
-       pipeline (``get_quant_config`` → ``QuantizationConfig`` →
-       ``get_quant_method`` for every layer) is properly initialised.
+        pipeline (``get_quant_config`` → ``QuantizationConfig`` →
+        ``get_quant_method`` for every layer) is properly initialised.
 
     Rules:
-        * If the user explicitly set ``--quantization``, that value is
-          respected.  A warning is emitted when the detected method differs.
-        * If no ``--quantization`` was given, the detected method (if any) is
-          applied automatically.
+        * If the user explicitly set ``--quantization`` (or it was resolved
+          from ``config.json``), that value is respected.  A warning is
+          emitted when the detected method differs.
+        * If no quantization method is set and none is detected, the model
+          is loaded as float.
 
     Args:
         vllm_config: A ``vllm.config.VllmConfig`` instance (mutable).
@@ -222,23 +202,27 @@ def maybe_auto_detect_quantization(vllm_config) -> None:
     detected = detect_quantization_method(model, revision=revision)
 
     if detected is None:
-        logger.info(
-            'No quantization signature detected from model files for "%s". '
-            "The model will be loaded as float. "
-            'To force a quantization method, pass "--quantization <method>" explicitly.',
-            model,
-        )
+        # A non-ModelSlim quantization method may already be set (by the
+        # user or resolved from config.json by upstream vLLM); only report
+        # the float fallback when nothing is set at all.
+        if user_quant is None:
+            logger.info_once(
+                'No ModelSlim quantization signature detected from model files for "%s". '
+                'To force a quantization method, pass "--quantization <method>" explicitly.',
+                model,
+            )
         return
 
     if user_quant is not None:
-        # User explicitly specified a quantization method.
+        # User explicitly specified a quantization method (or upstream vLLM
+        # resolved one from config.json).
         if user_quant != detected:
-            logger.warning(
+            logger.warning_once(
                 "Auto-detected quantization method '%s' from model "
-                "files for '%s', but user explicitly specified "
-                "'--quantization %s'. Respecting the user-specified "
-                "value. If you encounter errors during model loading, "
-                "consider using '--quantization %s' instead.",
+                "files for '%s', but quantization is already set to "
+                "'%s'. Respecting the existing value. If you encounter "
+                "errors during model loading, consider using "
+                "'--quantization %s' instead.",
                 detected,
                 model,
                 user_quant,
@@ -248,7 +232,7 @@ def maybe_auto_detect_quantization(vllm_config) -> None:
 
     # No user-specified quantization — apply auto-detected value.
     model_config.quantization = detected
-    logger.info(
+    logger.info_once(
         "Auto-detected quantization method '%s' from model files "
         "for '%s'. To override, pass '--quantization <method>' explicitly.",
         detected,

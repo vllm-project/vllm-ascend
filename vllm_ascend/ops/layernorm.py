@@ -54,6 +54,13 @@ class AscendRMSNorm(RMSNorm):
         dtype: torch.dtype | None = None,
     ) -> None:
         super().__init__(hidden_size, eps, var_hidden_size, has_weight, dtype)
+        # Weightless norms still need their constant tensor on the NPU. Track
+        # it for device moves and sleep/wake backup without making it a weight.
+        if not has_weight:
+            weight = self.weight
+            del self.weight
+            self.register_buffer("weight", weight, persistent=False)
+
         vllm_config = get_current_vllm_config()
         self.bias = None
         self.bias_loaded = False
