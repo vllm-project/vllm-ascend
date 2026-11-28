@@ -1,7 +1,7 @@
 from __future__ import annotations
 
 from abc import ABC, abstractmethod
-from collections.abc import Iterable
+from collections.abc import Callable, Iterable, Sequence
 from numbers import Integral
 from typing import Any
 
@@ -72,6 +72,9 @@ def set_scheduler_device(parallel_config: ParallelConfig) -> None:
     torch.npu.set_device(get_scheduler_device_id(parallel_config))
 
 
+PrefixBlockLookup = Callable[[tuple[str, ...], Sequence[bytes | str]], int | None]
+
+
 class Backend(ABC):
     store: Any | None = None
     layerwise_data_plane: str | None = None
@@ -133,6 +136,15 @@ class Backend(ABC):
     @abstractmethod
     def exists(self, keys: list[str]) -> list[int]:
         pass
+
+    @property
+    def prefix_block_lookup(self) -> PrefixBlockLookup | None:
+        """Optional lookup of consecutive blocks present under every rank prefix.
+
+        The callable receives rank prefixes and ordered block hashes. Returning
+        None for a batch requests the standard string-key lookup.
+        """
+        return None
 
     def batch_is_exist(self, keys: list[str]) -> list[int]:
         return self.exists(keys)

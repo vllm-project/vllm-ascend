@@ -116,6 +116,8 @@ on the same instances that previously exported the environment variable.
     python3 -m pip show mooncake-transfer-engine-npu
     ```
 
+For blockwise lookups with a single KV cache group, `AscendStoreConnector` automatically uses Mooncake's `KeyProber` when the installed Store exposes `create_key_prober`. This reduces host-side key construction across ranks. Older SDKs, layerwise and hybrid configurations, and SSD prefetch continue to use the existing batch lookup.
+
 #### Step 2: Configure mooncake.json and Start mooncake_master
 
 > The following Mooncake guides are optional in-depth references; you can complete the deployment in this document without reading them:

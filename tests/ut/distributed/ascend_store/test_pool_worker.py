@@ -47,6 +47,10 @@ from vllm_ascend.distributed.kv_transfer.kv_pool.ascend_store.ascend_store_conne
     AscendStoreConnector,
     create_kv_pool_worker,
 )
+from vllm_ascend.distributed.kv_transfer.kv_pool.ascend_store.backend.mooncake_backend import (
+    MooncakeBackend,
+    SsdPrefetchConf,
+)
 from vllm_ascend.distributed.kv_transfer.kv_pool.ascend_store.buffer import BufferDescriptor, MemoryLocation
 from vllm_ascend.distributed.kv_transfer.kv_pool.ascend_store.hisparse.draft_host_mirror import (
     HiSparseDraftHostMirrorSaveHook,
@@ -158,7 +162,7 @@ def make_worker(
     start_patch(test, f"{module}.get_decode_context_model_parallel_world_size", return_value=dcp_size)
     start_patch(test, f"{module}.get_decode_context_model_parallel_rank", return_value=dcp_rank)
     importlib = start_patch(test, f"{module}.importlib")
-    importlib.import_module.return_value = MagicMock()
+    importlib.import_module.return_value.MooncakeBackend.return_value.prefix_block_lookup = None
 
     config = MagicMock()
     config.model_config.model = "org/llama-7b"
@@ -253,6 +257,133 @@ def test_cache_coordinator_uses_kv_cache_config_retention_interval(retention_int
     assert coordinator_cls.call_args.args[0] is worker.kv_cache_config.kv_cache_groups
     assert coordinator_cls.call_args.kwargs["retention_interval"] == retention_interval
     assert coordinator_cls.call_args.kwargs["use_eagle"] is True
+
+
+class TestSchedulerKeyProber(unittest.TestCase):
+    def setUp(self):
+        self.worker = make_worker(self, tp_size=2, num_kv_heads=2)
+        self.hashes = [bytes([i]) * 16 for i in range(4)]
+        self.states: dict[str, int] = {}
+        self.batch_exists = MagicMock(side_effect=lambda keys, *args: [self.states.get(k, 1) for k in keys])
+        self.old_sdk = SimpleNamespace(batch_is_exist=self.batch_exists)
+        self.sdk = SimpleNamespace(
+            batch_is_exist=self.batch_exists, create_key_prober=MagicMock(side_effect=self.create_prober)
+        )
+        self.backend = MooncakeBackend.__new__(MooncakeBackend)
+        self.backend._store_initialized = True
+        self.backend._key_probers = {}
+        self.backend._lazy_init = False
+        self.backend._prefetch_conf = SsdPrefetchConf.disabled()
+        self.worker.m_store = self.backend
+
+    def create_prober(self, groups, hash_len):
+        (templates,) = groups
+
+        def is_exist(packed):
+            hashes = [packed[i : i + hash_len].hex() for i in range(0, len(packed), hash_len)]
+            keys = [template.replace("{hash}", digest) for digest in hashes for template in templates]
+            return [bytes(self.states.get(k, 1) & 0xFF for k in keys)]
+
+        return SimpleNamespace(is_exist=is_exist)
+
+    def assert_lookup_matches(self, hashes, expected, token_len=64):
+        with patch.object(self.worker, "_build_lookup_keys", wraps=self.worker._build_lookup_keys) as build_keys:
+            self.backend.store = self.old_sdk
+            self.assertEqual(self.worker.lookup_scheduler(token_len, hashes), StoreLookupResult(expected))
+            build_keys.assert_called_once_with(token_len, hashes, 0)
+            self.batch_exists.reset_mock()
+            build_keys.reset_mock()
+            self.backend.store = self.sdk
+            self.assertEqual(self.worker.lookup_scheduler(token_len, hashes), StoreLookupResult(expected))
+            build_keys.assert_not_called()
+        self.batch_exists.assert_not_called()
+
+    def test_prefix_across_all_ranks(self):
+        # Seed missing/error statuses using the legacy rank-major key order.
+        keys, _, _ = self.worker._build_lookup_keys(64, self.hashes, 0)
+        rank_keys = self.worker._expand_lookup_keys_by_rank(keys, 0)
+        self.assertEqual(len(rank_keys), 8)
+        for hashes in (self.hashes, [value.hex() for value in self.hashes]):
+            self.states.clear()
+            self.assert_lookup_matches(hashes, 64)
+            for index, key in enumerate(rank_keys):
+                for status in (0, -1):
+                    with self.subTest(index=index, status=status):
+                        self.states = {key: status}
+                        self.assert_lookup_matches(hashes, index % len(keys) * 16)
+        self.sdk.create_key_prober.assert_called_once()
+
+    def test_hash_and_token_boundaries(self):
+        self.assert_lookup_matches([], 0)
+        self.assert_lookup_matches(self.hashes, 0, token_len=15)
+        self.sdk.create_key_prober.assert_not_called()
+        self.assert_lookup_matches(self.hashes[:2], 32)
+        self.assert_lookup_matches(self.hashes, 32, token_len=39)
+        self.worker.max_model_len = 31
+        self.assert_lookup_matches(self.hashes, 16)
+        self.worker.hash_block_size = self.worker.token_database.hash_block_size = 8
+        self.assert_lookup_matches(self.hashes, 16)
+        prefix = self.worker.token_database._get_key_prefix(0)
+        self.states[prefix + self.hashes[1].hex()] = 0
+        self.assert_lookup_matches(self.hashes, 0)
+
+    def test_partial_rank_hit_rounds_down_to_transfer_alignment(self):
+        self.worker.cache_transfer_granularity = 32
+        keys, _, _ = self.worker._build_lookup_keys(64, self.hashes, 0)
+        rank_keys = self.worker._expand_lookup_keys_by_rank(keys, 0)
+        self.states[rank_keys[-1]] = 0
+        self.assert_lookup_matches(self.hashes, 32)
+
+    def test_rebuilds_for_new_hash_width_or_key_prefix(self):
+        self.assert_lookup_matches(self.hashes, 64)
+        longer = [digest * 2 for digest in self.hashes]
+        self.assert_lookup_matches(longer, 64)
+        self.worker.token_database.set_group_buffers({}, {}, group_cache_families={0: "registered"})
+        keys, _, _ = self.worker._build_lookup_keys(64, longer, 0)
+        self.states[keys[1]] = 0
+        self.assert_lookup_matches(longer, 16)
+        self.assertEqual(self.sdk.create_key_prober.call_count, 3)
+
+    def test_probes_only_the_pp_owners_and_all_dcp_shards(self):
+        self.worker = make_worker(self, pp_partition=[1, 1], dcp_size=2, tp_size=2, num_kv_heads=2)
+        self.worker.m_store = self.backend
+        self.worker._group_pp_ranks = ((1,),)
+        keys, _, _ = self.worker._build_lookup_keys(64, self.hashes, 0)
+        rank_keys = self.worker._expand_lookup_keys_by_rank(keys, 0)
+        # Two 32-token blocks per PP owner, DCP rank and TP shard.
+        self.assertEqual(len(rank_keys), 8)
+        self.states[rank_keys[-1]] = 0
+        self.assert_lookup_matches(self.hashes, 32)
+        (templates,), _ = self.sdk.create_key_prober.call_args.args
+        self.assertEqual(len(templates), 4)
+        self.assertTrue(all("@pp_rank:1@" in template for template in templates))
+
+    def test_deferred_initialization_and_incomplete_reply(self):
+        self.backend.store = self.sdk
+        self.backend._lazy_init = True
+        self.backend._store_initialized = False
+        self.assertEqual(self.worker.lookup_scheduler(64, self.hashes), StoreLookupResult(0))
+        self.sdk.create_key_prober.assert_not_called()
+        self.backend._store_initialized = True
+        self.sdk.create_key_prober.side_effect = None
+        self.sdk.create_key_prober.return_value.is_exist.return_value = [b"\x01"]
+        self.assertEqual(self.worker.lookup_scheduler(64, self.hashes), StoreLookupResult(0))
+        self.sdk.create_key_prober.assert_called_once()
+
+    def test_legacy_keys_and_unsupported_modes(self):
+        self.backend.store = self.sdk
+        for hashes in (["opaque"], ["AB"], ["aa", "bbbb"]):
+            self.assertEqual(
+                self.worker.lookup_scheduler(16 * len(hashes), hashes), StoreLookupResult(16 * len(hashes))
+            )
+        for field, value in (("use_layerwise", True), ("use_hybrid", True), ("num_kv_cache_groups", 2)):
+            with patch.object(self.worker, field, value):
+                self.assertEqual(self.worker.lookup_scheduler(64, self.hashes), StoreLookupResult(64))
+        options = object()
+        self.backend._prefetch_conf = SsdPrefetchConf(True, options, {}, False)
+        self.assertEqual(self.worker.lookup_scheduler(64, self.hashes), StoreLookupResult(64))
+        self.assertIs(self.batch_exists.call_args.args[1], options)
+        self.sdk.create_key_prober.assert_not_called()
 
 
 class TestPCPPoolWorker(unittest.TestCase):
@@ -1652,7 +1783,7 @@ class TestKVPoolWorkerRegisterAndTransfer(unittest.TestCase):
         pcp_group = MagicMock()
         pcp_group.world_size = 1
         mocks["pcp_group"].return_value = pcp_group
-        mocks["importlib"].import_module.return_value = MagicMock()
+        mocks["importlib"].import_module.return_value.MooncakeBackend.return_value.prefix_block_lookup = None
         self._patches = patches
         return mocks
 
@@ -2398,7 +2529,7 @@ class TestKVPoolWorkerRegisterAndTransfer(unittest.TestCase):
         pcp_group = MagicMock()
         pcp_group.world_size = 1
         mocks["pcp_group"].return_value = pcp_group
-        mocks["importlib"].import_module.return_value = MagicMock()
+        mocks["importlib"].import_module.return_value.MooncakeBackend.return_value.prefix_block_lookup = None
         self._patches = patches
 
         config = self._make_config()

@@ -1285,6 +1285,69 @@ class BaseKVPoolWorker(ABC):
         )
         return StoreLookupResult(hit)
 
+    def _lookup_group_hit_positions(
+        self, token_len: int, block_hashes: list[BlockHash], group_id: int, max_hit_position: int, use_layerwise: bool
+    ) -> Sequence[int]:
+        """Return the group's aligned hit positions in increasing token order."""
+        alignment = self.cache_transfer_granularity
+        uses_align_state = group_id < len(self.group_uses_align_state) and self.group_uses_align_state[group_id]
+        prefix_lookup = getattr(self.m_store, "prefix_block_lookup", None)
+        if (
+            prefix_lookup is not None
+            and not use_layerwise
+            and not self.use_layerwise
+            and not self.use_hybrid
+            and self.num_kv_cache_groups == 1
+            and group_id == 0
+            and not uses_align_state
+        ):
+            block_size = self.token_database.get_block_size(group_id)
+            limit = max(0, min(token_len, max_hit_position)) // block_size
+            hashes = get_block_hashes(block_hashes, block_size, self.hash_block_size)[:limit]
+            if not hashes:
+                return []
+            prefix = self.token_database._get_key_prefix(group_id)
+            rank_prefixes = tuple(self._expand_lookup_keys_by_rank([prefix], group_id))
+            hit_blocks = prefix_lookup(rank_prefixes, hashes)
+            if hit_blocks is not None:
+                return range(alignment, hit_blocks * block_size + 1, alignment)
+
+        keys, _, ends = self._build_lookup_keys(token_len, block_hashes, group_id)
+        if not keys:
+            return []
+
+        multi_tp_keys = self._expand_lookup_keys_by_rank(keys, group_id)
+        num_ranks = len(multi_tp_keys) // len(keys)
+        res = self.m_store.exists(multi_tp_keys)  # type: ignore[assignment]
+        num_block = len(keys)
+        if use_layerwise:
+            res = self.check_all_layers_exists(
+                res,
+                getattr(self, "layerwise_key_layers", 0) or self.num_layers,
+            )
+            num_block = len(keys) // (getattr(self, "layerwise_key_layers", 0) or self.num_layers)
+        multi_tp_values = [
+            res[i * num_block : (i + 1) * num_block]  # type: ignore[index]
+            for i in range(num_ranks)
+        ]
+        logger.debug(
+            "KV pool lookup request token_len=%d group=%d keys=%d multi_tp_keys=%d "
+            "exists_count=%d/%d exists_sample=%s sample_keys=%s",
+            token_len,
+            group_id,
+            len(keys),
+            len(multi_tp_keys),
+            sum(1 for value in res if value == 1),  # type: ignore[union-attr]
+            len(res),
+            list(res[: min(12, len(res))]),  # type: ignore[index]
+            multi_tp_keys[:3],
+        )
+        if uses_align_state:
+            return self.find_all_discontinuous_hit_positions(
+                multi_tp_values, ends, num_block, max_hit_position, alignment
+            )
+        return self.find_all_continuous_hit_positions(multi_tp_values, ends, num_block, max_hit_position, alignment)
+
     def lookup_scheduler(
         self,
         token_len: int,
@@ -1299,7 +1362,7 @@ class BaseKVPoolWorker(ABC):
         :return: Recoverable prefix length and per-group tail-key boundaries.
         """
         try:
-            hits: list[list[int]] = []
+            hits: list[Sequence[int]] = []
             max_hit_position = self.max_model_len
             kv_cache_group_ids = kv_cache_group_ids or [0]
             coordinator_hit = (
@@ -1316,53 +1379,16 @@ class BaseKVPoolWorker(ABC):
             if coordinator_hit is not None:
                 return coordinator_hit
             for group_id in kv_cache_group_ids:
-                keys, starts, ends = self._build_lookup_keys(token_len, block_hashes, group_id)
-
-                if not keys:
-                    return StoreLookupResult(0)
-
-                multi_tp_keys = self._expand_lookup_keys_by_rank(keys, group_id)
-                num_ranks = len(multi_tp_keys) // len(keys)
-                res = self.m_store.exists(multi_tp_keys)  # type: ignore[assignment]
-                num_block = len(keys)
-                if use_layerwise:
-                    res = self.check_all_layers_exists(
-                        res,
-                        getattr(self, "layerwise_key_layers", 0) or self.num_layers,
-                    )
-                    num_block = len(keys) // (getattr(self, "layerwise_key_layers", 0) or self.num_layers)
-                multi_tp_values = [
-                    res[i * num_block : (i + 1) * num_block]  # type: ignore[index]
-                    for i in range(num_ranks)
-                ]
-                logger.debug(
-                    "KV pool lookup request token_len=%d group=%d keys=%d multi_tp_keys=%d "
-                    "exists_count=%d/%d exists_sample=%s sample_keys=%s",
-                    token_len,
-                    group_id,
-                    len(keys),
-                    len(multi_tp_keys),
-                    sum(1 for value in res if value == 1),  # type: ignore[union-attr]
-                    len(res),
-                    list(res[: min(12, len(res))]),  # type: ignore[index]
-                    multi_tp_keys[:3],
+                group_hits = self._lookup_group_hit_positions(
+                    token_len, block_hashes, group_id, max_hit_position, use_layerwise
                 )
-                if group_id < len(self.group_uses_align_state) and self.group_uses_align_state[group_id]:
-                    group_hits = self.find_all_discontinuous_hit_positions(
-                        multi_tp_values, ends, num_block, max_hit_position, self.cache_transfer_granularity
-                    )
-                else:
-                    group_hits = self.find_all_continuous_hit_positions(
-                        multi_tp_values, ends, num_block, max_hit_position, self.cache_transfer_granularity
-                    )
                 if not group_hits:
                     return StoreLookupResult(0)
                 max_hit_position = min(max_hit_position, group_hits[-1])
                 hits.append(group_hits)
                 logger.debug(
-                    "KV pool scheduler lookup group=%d keys=%d hit=%d token_len=%d",
+                    "KV pool scheduler lookup group=%d hit=%d token_len=%d",
                     group_id,
-                    len(keys),
                     max_hit_position,
                     token_len,
                 )
@@ -1383,12 +1409,14 @@ class BaseKVPoolWorker(ABC):
         return StoreLookupResult(final_hits)
 
     @staticmethod
-    def _max_intersection_hit_position(hits: list[list[int]]) -> int:
+    def _max_intersection_hit_position(hits: Sequence[Sequence[int]]) -> int:
         """
         For all attention groups, treat the position of the maximum common hit as the final hit position
         """
-        if not hits:
+        if not hits or not hits[0]:
             return 0
+        if len(hits) == 1:
+            return hits[0][-1]
         common_elements = set(hits[0]).intersection(*hits[1:])
         if not common_elements:
             return 0

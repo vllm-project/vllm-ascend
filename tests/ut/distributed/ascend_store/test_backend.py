@@ -889,6 +889,21 @@ class TestMooncakeBackendMethods(unittest.TestCase):
             backend.local_seg = None
             return backend
 
+    def test_prefix_lookup_uses_the_complete_rank_prefixes(self):
+        backend = self._make_backend()
+        backend._key_probers = {}
+        lookup = backend.prefix_block_lookup
+        self.assertIsNotNone(lookup)
+        make_prober = backend.store.create_key_prober
+        make_prober.return_value.is_exist.return_value = [bytes([1, 1, 1, 0])]
+        for prefixes in (("tp0@", "tp1@"), ("tp0@", "tp2@")):
+            self.assertEqual(lookup(prefixes, ["00", "ff"]), 1)
+            self.assertEqual(lookup(prefixes, [b"\x00", b"\xff"]), 1)
+            make_prober.return_value.is_exist.assert_called_with(b"\x00\xff")
+            make_prober.assert_called_with([[prefix + "{hash}" for prefix in prefixes]], 1)
+        self.assertIsNone(lookup(("model-{hash}@tp0@",), ["00", "ff"]))
+        self.assertEqual(make_prober.call_count, 2)
+
     def test_exists(self):
         b = self._make_backend()
         b.store.batch_is_exist.return_value = [1, 0]

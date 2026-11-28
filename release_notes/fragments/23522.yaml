@@ -1,0 +1,8 @@
+pr: 23522
+entries:
+  - category: performance
+    text: >-
+      AscendStoreConnector automatically uses Mooncake KeyProber for blockwise
+      prefix lookups with a single KV cache group when the SDK supports it and
+      SSD prefetch is disabled. In a CPU/TCP test with four rank shards and
+      1,024 cached blocks, median host lookup latency fell from 8.34 ms to 2.73 ms.
