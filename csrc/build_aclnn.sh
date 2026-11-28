@@ -133,6 +133,7 @@ elif [[ "$SOC_VERSION" =~ ^ascend910b ]]; then
         "fused_lightning_indexer_manage"
         "fused_quant_lightning_indexer_manage"
         "fused_scatter_copy_sparse_flash_attention"
+        "top_k_per_row"
     )
 
     CUSTOM_OPS=$(IFS=';'; echo "${CUSTOM_OPS_ARRAY[*]}")
@@ -186,6 +187,7 @@ elif [[ "$SOC_VERSION" =~ ^ascend910_93 ]]; then
         "fused_lightning_indexer_manage"
         "fused_quant_lightning_indexer_manage"
         "fused_scatter_copy_sparse_flash_attention"
+        "top_k_per_row"
     )
 
     CUSTOM_OPS=$(IFS=';'; echo "${CUSTOM_OPS_ARRAY[*]}")
