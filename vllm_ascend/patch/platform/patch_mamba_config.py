@@ -2,6 +2,7 @@
 
 import math
 
+import torch
 import vllm.model_executor.models.config
 from vllm.logger import logger
 from vllm.model_executor.models import ModelRegistry
@@ -37,6 +38,15 @@ def _using_sparse_sfa_c8(vllm_config, model_config) -> bool:
     from vllm_ascend.utils import model_uses_kpool_indexer, model_uses_sfa_sparse
 
     return model_uses_sfa_sparse(model_config) or model_uses_kpool_indexer(model_config)
+
+
+def _using_sparse_sfa_fp4(vllm_config, model_config) -> bool:
+    """Mirror AscendConfig.enable_sparse_sfa_fp4 gating at config time."""
+    if vllm_config.cache_config.cache_dtype != "mxfp4":
+        return False
+    from vllm_ascend.utils import model_uses_kpool_indexer
+
+    return model_uses_kpool_indexer(model_config)
 
 
 def _using_kv_store(vllm_config) -> bool:
@@ -79,6 +89,10 @@ def verify_and_update_config(cls, vllm_config) -> None:
         parallel_config = vllm_config.parallel_config
         if cache_config.cache_dtype == "auto":
             kv_cache_dtype = model_config.dtype
+        elif cache_config.cache_dtype == "mxfp4":
+            # Packed MXFP4 pages are addressed as bytes; the logical token page
+            # size is overridden below.
+            kv_cache_dtype = torch.uint8
         else:
             kv_cache_dtype = STR_DTYPE_TO_TORCH_DTYPE[cache_config.cache_dtype]
 
@@ -103,6 +117,11 @@ def verify_and_update_config(cls, vllm_config) -> None:
         else:
             attn_head_size = model_config.get_head_size()
             attn_token_page_size = 2 * attn_head_size * attn_num_kv_heads * get_dtype_size(kv_cache_dtype)
+
+        sfa_fp4_packed = model_config.use_mla and _using_sparse_sfa_fp4(vllm_config, model_config)
+        if sfa_fp4_packed:
+            # Packed MXFP4 latent rows: 512 four-bit values + 32 BF16 scales.
+            attn_token_page_size = 320
 
         sfa_c8_packed = model_config.use_mla and _using_sparse_sfa_c8(vllm_config, model_config)
         if sfa_c8_packed:
@@ -134,6 +153,11 @@ def verify_and_update_config(cls, vllm_config) -> None:
             # coarsen scheduling granularity without adding coverage.
             c8_block_size = alignment_tokens * cdiv(min_block_size, alignment_tokens)
             attn_block_size = min(attn_block_size, c8_block_size)
+        if sfa_fp4_packed:
+            # Cover the mamba page with the smallest packed-FP4 block; larger
+            # requests would only coarsen scheduler granularity.
+            fp4_block_size = alignment_tokens * cdiv(min_block_size, alignment_tokens)
+            attn_block_size = min(attn_block_size, fp4_block_size)
         if cache_config.block_size != attn_block_size:
             cache_config.block_size = attn_block_size
             logger.info(

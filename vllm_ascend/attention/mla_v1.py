@@ -196,16 +196,28 @@ class AscendMLAAttention(MLAAttention):
         if model_type in ("kimi_linear", "glm_moe_dsa"):
             # Use the upstream storage slot count for the cache layout.
             storage_heads = spec.num_heads
-        head_size, dtype, cache_dtype_str, use_sfa_turboquant, use_sfa_c8, use_sfa_hif8 = self._get_kv_cache_format(
-            spec
-        )
+        (
+            head_size,
+            dtype,
+            cache_dtype_str,
+            use_sfa_turboquant,
+            use_sfa_c8,
+            use_sfa_hif8,
+            use_sfa_fp4,
+        ) = self._get_kv_cache_format(spec)
         speculative_config = getattr(vllm_config, "speculative_config", None)
         draft_config = getattr(speculative_config, "draft_model_config", None)
         if (
             (spec.is_draft or self.is_draft_layer)
             and getattr(speculative_config, "method", None) == "dspark"
             and getattr(getattr(draft_config, "hf_config", None), "model_type", None) == "k3_dspark"
-            and not (use_sfa_turboquant or use_sfa_c8 or use_sfa_hif8 or getattr(self.impl, "fa_quant_layer", False))
+            and not (
+                use_sfa_turboquant
+                or use_sfa_c8
+                or use_sfa_hif8
+                or use_sfa_fp4
+                or getattr(self.impl, "fa_quant_layer", False)
+            )
             and self.impl.dtype in (torch.bfloat16, torch.float16)
         ):
             # The target may request FP8 while the draft is unquantized. Keep
@@ -226,6 +238,7 @@ class AscendMLAAttention(MLAAttention):
             cache_sparse_sfa_turboquant=use_sfa_turboquant,
             cache_sparse_sfa_c8=use_sfa_c8,
             cache_sparse_sfa_hif8=use_sfa_hif8,
+            cache_sparse_sfa_fp4=use_sfa_fp4,
             store_on_host=(
                 # Only draft layers owned by the DSpark resident protocol stay
                 # device-resident; an MTP head under another method has no
@@ -240,7 +253,9 @@ class AscendMLAAttention(MLAAttention):
         )
         return AscendMLAAttentionSpec(**values)
 
-    def _get_kv_cache_format(self, spec: MLAAttentionSpec) -> tuple[int, torch.dtype, str | None, bool, bool, bool]:
+    def _get_kv_cache_format(
+        self, spec: MLAAttentionSpec
+    ) -> tuple[int, torch.dtype, str | None, bool, bool, bool, bool]:
         """Resolve cache dimensions, dtype and SFA flags from the execution format."""
         # Keep TurboQuant's existing precedence when both SFA switches are set.
         use_sfa_turboquant = getattr(self.impl, "enable_sparse_sfa_turboquant", False)
@@ -251,6 +266,14 @@ class AscendMLAAttention(MLAAttention):
         # coexists with the packed C8/TurboQuant layouts or dense FA quant.
         use_sfa_hif8 = (
             not use_packed_sfa and not use_fa_quant and bool(getattr(self.impl, "enable_sparse_sfa_hif8", False))
+        )
+        # Packed MXFP4 is a single-cache layout and never coexists with the
+        # C8/TurboQuant layouts, the HIF8 recipe or dense FA quant.
+        use_sfa_fp4 = (
+            not use_packed_sfa
+            and not use_fa_quant
+            and not use_sfa_hif8
+            and bool(getattr(self.impl, "enable_sparse_sfa_fp4", False))
         )
         head_size = spec.head_size
         dtype = spec.dtype
@@ -270,12 +293,26 @@ class AscendMLAAttention(MLAAttention):
             cache_dtype_str = None
         elif use_sfa_hif8:
             dtype = torch.uint8
+        elif use_sfa_fp4:
+            # Packed MXFP4 latent rows: nope[448] + rope[64] as E2M1 pairs
+            # (256 B) followed by one BF16 group scale per 16 values (64 B).
+            head_size = self.impl.fp4_row_bytes
+            dtype = torch.uint8
+            cache_dtype_str = self.impl.kv_cache_dtype
         elif cache_dtype_str == HIF8_C8_KV_CACHE_DTYPE:
             # The global dtype does not select layers without a ModelSlim recipe.
             dtype = self.impl.vllm_config.model_config.dtype
             cache_dtype_str = "auto"
 
-        return head_size, dtype, cache_dtype_str, use_sfa_turboquant, use_sfa_c8, use_sfa_hif8
+        return (
+            head_size,
+            dtype,
+            cache_dtype_str,
+            use_sfa_turboquant,
+            use_sfa_c8,
+            use_sfa_hif8,
+            use_sfa_fp4,
+        )
 
 
 @dataclass
