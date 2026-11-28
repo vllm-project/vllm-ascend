@@ -159,10 +159,16 @@ class WorkerSentinel(GPUWorkerSentinel):
         # Verify the redistributed model is runnable before reporting healthy.
         parallel_config = self.worker.parallel_config
         timeout = timedelta(seconds=self.worker.parallel_config.fault_tolerance_config.engine_recovery_timeout_sec)
+        # cpu_all_reduce_ uses the cached GroupCoordinator.cpu_timeout instead
+        # of the gloo backend timeout, so update both.
         if parallel_config.data_parallel_size > 1:
-            set_gloo_backend_timeout(get_dp_group().cpu_group, timeout)
+            dp_group = get_dp_group()
+            set_gloo_backend_timeout(dp_group.cpu_group, timeout)
+            dp_group.cpu_timeout = timeout
         if parallel_config.tensor_parallel_size > 1:
-            set_gloo_backend_timeout(get_tp_group().cpu_group, timeout)
+            tp_group = get_tp_group()
+            set_gloo_backend_timeout(tp_group.cpu_group, timeout)
+            tp_group.cpu_timeout = timeout
         self.worker.execute_dummy_batch()
         self.activate_cpu_group_timeouts(ft_request)
         torch.npu.synchronize()
