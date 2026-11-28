@@ -23,7 +23,7 @@ from __future__ import annotations
 
 from collections.abc import Callable
 from dataclasses import dataclass
-from typing import Any
+from typing import TYPE_CHECKING, Any, TypeAlias
 
 import torch
 import torch_npu
@@ -31,19 +31,19 @@ from vllm.config import get_current_vllm_config_or_none
 from vllm.model_executor.layers.fused_moe.activation import MoEActivation
 
 from vllm_ascend.ascend_forward_context import _EXTRA_CTX, MoECommType
-from vllm_ascend.device.device_op import DeviceOperator
 from vllm_ascend.lora.fused_moe import (
     _recover_moe_lora_routing_all2all,
     _recover_moe_lora_routing_allgather,
     moe_lora_apply_w2,
     moe_lora_apply_w13,
 )
-from vllm_ascend.ops.activation import AscendSwigluOAIAndMul, AscendSwigluStepAndMul
-from vllm_ascend.ops.fused_moe.dataclass.moe_mlp import MoEMlpComputeInput
 from vllm_ascend.quantization.quant_type import QuantType
 
-QuantMoELoRAApply = Callable[[MoEMlpComputeInput, Any], tuple[torch.Tensor, torch.npu.Event | None]]
-QuantMoELoRAActivationValidator = Callable[[torch.Tensor, torch.Tensor | None], None]
+if TYPE_CHECKING:
+    from vllm_ascend.ops.fused_moe.dataclass.moe_mlp import MoEMlpComputeInput
+
+QuantMoELoRAApply: TypeAlias = Callable[["MoEMlpComputeInput", Any], tuple[torch.Tensor, "torch.npu.Event | None"]]
+QuantMoELoRAActivationValidator: TypeAlias = Callable[[torch.Tensor, torch.Tensor | None], None]
 
 
 @dataclass(frozen=True)
@@ -116,6 +116,8 @@ def _apply_moe_activation(
     """Match the activation semantics of the common unquantized MoE path."""
     act_name = getattr(activation, "value", activation)
     if activation == MoEActivation.SWIGLUOAI:
+        from vllm_ascend.ops.activation import AscendSwigluOAIAndMul
+
         return AscendSwigluOAIAndMul.swiglu_oai_forward(gate_up_out)
     if act_name == "swigluoai_uninterleave":
         return torch_npu.npu_clipped_swiglu(
@@ -126,6 +128,8 @@ def _apply_moe_activation(
             bias=swiglu_beta,
         )
     if activation == MoEActivation.SWIGLUSTEP:
+        from vllm_ascend.ops.activation import AscendSwigluStepAndMul
+
         return AscendSwigluStepAndMul.swiglustep_forward(gate_up_out, limit=swiglu_limit or 7.0)
     if activation in (MoEActivation.GELU, MoEActivation.GELU_TANH):
         gate, up = gate_up_out.chunk(2, dim=-1)
@@ -182,6 +186,8 @@ def _apply_dynamic_int8_moe_lora(
         # surrounding AlltoAll collectives, but avoid empty-tensor NPU kernels.
         # Shared activation still needs a milestone for this empty GMM2 stage.
         return hidden_states, torch.npu.current_stream().record_event()
+
+    from vllm_ascend.device.device_op import DeviceOperator
 
     # Weights are carried by the routed-expert layer since the MoE MLP refactor;
     # fall back to the payload for direct callers/tests that still build it.

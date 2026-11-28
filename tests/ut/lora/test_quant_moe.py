@@ -152,8 +152,9 @@ def test_dynamic_int8_lora_reads_weights_from_layer_via_quant_method() -> None:
 
     with (
         patch(f"{QUANT_MOE}._EXTRA_CTX") as extra_ctx,
-        patch(
-            f"{QUANT_MOE}.DeviceOperator.npu_dynamic_quant",
+        patch.object(
+            DeviceOperator,
+            "npu_dynamic_quant",
             side_effect=[(quantized_input, input_scale), (quantized_activated, activated_scale)],
         ),
         patch(f"{QUANT_MOE}.torch_npu.npu_grouped_matmul", return_value=[gate_up_out], create=True),
@@ -206,7 +207,7 @@ def test_dynamic_int8_all2all_lora_handles_empty_ep_rank() -> None:
 
     with (
         patch(f"{QUANT_MOE}._EXTRA_CTX") as extra_ctx,
-        patch(f"{QUANT_MOE}.DeviceOperator.npu_dynamic_quant") as dynamic_quant,
+        patch.object(DeviceOperator, "npu_dynamic_quant") as dynamic_quant,
         patch(f"{QUANT_MOE}.torch.npu.current_stream", return_value=stream),
     ):
         extra_ctx.moe_comm_type = MoECommType.ALLTOALL
@@ -320,8 +321,9 @@ def test_dynamic_int8_lora_applies_topk_scales_before_down_proj() -> None:
 
     with (
         patch(f"{QUANT_MOE}._EXTRA_CTX") as extra_ctx,
-        patch(
-            f"{QUANT_MOE}.DeviceOperator.npu_dynamic_quant",
+        patch.object(
+            DeviceOperator,
+            "npu_dynamic_quant",
             side_effect=[
                 (torch.ones(2, 4, dtype=torch.int8), torch.ones(2)),
                 (torch.ones(2, 3, dtype=torch.int8), torch.ones(2)),
@@ -343,7 +345,7 @@ def test_dynamic_int8_lora_applies_topk_scales_before_down_proj() -> None:
 
 def test_apply_moe_activation_dispatches_known_kernels() -> None:
     gate_up = torch.randn(2, 6)
-    with patch(f"{QUANT_MOE}.AscendSwigluOAIAndMul.swiglu_oai_forward", return_value="oai") as oai:
+    with patch("vllm_ascend.ops.activation.AscendSwigluOAIAndMul.swiglu_oai_forward", return_value="oai") as oai:
         assert _apply_moe_activation(gate_up, MoEActivation.SWIGLUOAI, 0.0, 1.0, 0.0) == "oai"
         oai.assert_called_once_with(gate_up)
     with patch(
@@ -353,7 +355,7 @@ def test_apply_moe_activation_dispatches_known_kernels() -> None:
     ) as clipped:
         assert _apply_moe_activation(gate_up, "swigluoai_uninterleave", 4.0, 1.5, 0.2) == "uninterleave"
         clipped.assert_called_once()
-    with patch(f"{QUANT_MOE}.AscendSwigluStepAndMul.swiglustep_forward", return_value="step") as step:
+    with patch("vllm_ascend.ops.activation.AscendSwigluStepAndMul.swiglustep_forward", return_value="step") as step:
         assert _apply_moe_activation(gate_up, MoEActivation.SWIGLUSTEP, 0.0, 1.0, 0.0) == "step"
         assert step.call_args.kwargs["limit"] == 7.0
 

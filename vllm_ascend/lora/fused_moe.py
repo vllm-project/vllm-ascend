@@ -40,7 +40,6 @@ from vllm.lora.layers.utils import _get_lora_device
 
 from vllm_ascend.ascend_config import get_ascend_config
 from vllm_ascend.ascend_forward_context import _EXTRA_CTX
-from vllm_ascend.ops.fused_moe.moe_utils import async_all_to_all
 
 _MOE_LORA_INDEX_FIELDS = (
     "split_lora_indices",
@@ -149,6 +148,8 @@ def all2all_lora_indices(
     permuted = getattr(lora_context, "permuted_lora_indices", None)
     if permuted is None:
         return
+    from vllm_ascend.ops.fused_moe.moe_utils import async_all_to_all
+
     lora_dtype = permuted.dtype
     _, exchanged, handle = async_all_to_all(permuted, output_splits, input_splits, ep_group)
     handle.wait()
