@@ -17,6 +17,7 @@
 // #include "log/log.h"
 #include "tiling/tiling_api.h"
 // #include "tiling_base/tiling_templates_registry.h"
+#include <memory>
 #include <vector>
 namespace optiling {
 constexpr uint32_t MODE_ATTR_IDX = 0;
@@ -84,10 +85,10 @@ ge::graphStatus Tiling4RotaryPositionEmbedding(gert::TilingContext *context)
             return ge::GRAPH_FAILED;
         }
         std::vector<std::unique_ptr<RopeRegBaseTilingClass>> regBaseTilingCases;
-        regBaseTilingCases.push_back(std::unique_ptr<RopeRegBaseTilingClass>(new RopeRegBaseTilingClassAAndB(context)));
-        regBaseTilingCases.push_back(std::unique_ptr<RopeRegBaseTilingClass>(new RopeRegBaseTilingClassAB(context)));
-        regBaseTilingCases.push_back(std::unique_ptr<RopeRegBaseTilingClass>(new RopeRegBaseTilingClassABAAndBA(context)));
-        regBaseTilingCases.push_back(std::unique_ptr<RopeRegBaseTilingClass>(new RopeRegBaseTilingClassBAB(context)));
+        regBaseTilingCases.push_back(std::make_unique<RopeRegBaseTilingClassAAndB>(context));
+        regBaseTilingCases.push_back(std::make_unique<RopeRegBaseTilingClassAB>(context));
+        regBaseTilingCases.push_back(std::make_unique<RopeRegBaseTilingClassABAAndBA>(context));
+        regBaseTilingCases.push_back(std::make_unique<RopeRegBaseTilingClassBAB>(context));
         OPS_LOG_I(context, "Using arch35 tiling for ASCEND950");
 
         for (const auto& ptr : regBaseTilingCases)

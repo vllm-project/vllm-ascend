@@ -224,6 +224,8 @@ public:
     {
     }
 
+    virtual ~RopeRegBaseTilingClass() = default;
+
     void Reset(gert::TilingContext *context)
     {
         RopeRegBaseTilingClass::Reset(context);
