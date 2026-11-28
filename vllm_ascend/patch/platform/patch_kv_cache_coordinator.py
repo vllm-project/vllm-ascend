@@ -8,6 +8,7 @@ from math import lcm
 
 import vllm
 import vllm.v1.core.kv_cache_coordinator as vllm_kv_cache_coordinator
+from vllm.logger import logger
 from vllm.utils.math_utils import cdiv
 from vllm.v1.core.block_pool import BlockPool
 from vllm.v1.core.kv_cache_coordinator import (
@@ -22,7 +23,9 @@ from vllm.v1.core.kv_cache_utils import (
     KVCacheBlock,
 )
 from vllm.v1.core.single_type_kv_cache_manager import (
+    FullAttentionManager,
     MambaManager,
+    SlidingWindowManager,
     get_manager_for_kv_cache_spec,
 )
 from vllm.v1.kv_cache_interface import (
@@ -33,6 +36,7 @@ from vllm.v1.kv_cache_interface import (
     MambaSpec,
     UniformTypeKVCacheSpecs,
 )
+from vllm.v1.request import Request
 
 from vllm_ascend.core.kv_cache_interface import is_prefix_cacheable
 
@@ -91,6 +95,51 @@ def _manager_spec(spec: KVCacheSpec) -> KVCacheSpec:
     if isinstance(spec, UniformTypeKVCacheSpecs):
         return next(iter(spec.kv_cache_specs.values()))
     return spec
+
+
+def _iter_layer_specs(kv_cache_spec: KVCacheSpec):
+    if isinstance(kv_cache_spec, UniformTypeKVCacheSpecs):
+        yield from kv_cache_spec.kv_cache_specs.values()
+    else:
+        yield kv_cache_spec
+
+
+def _has_ds4_compress_mla_group(kv_cache_config: KVCacheConfig, hash_block_size: int) -> bool:
+    """Any DeepSeek-V4/V4.1 compressed-MLA group whose logical block size
+    exceeds ``hash_block_size``. Such groups fold ``compress_ratio`` into the
+    spec ``block_size`` (e.g. 4096 raw tokens for the v4.0 C128 main group),
+    so full-block prefix-cache hits are pinned to whole blocks and any
+    shorter shared prefix misses entirely."""
+    return any(
+        getattr(spec, "model_version", None) in ("deepseek_v4", "deepseek_v41") and spec.block_size > hash_block_size
+        for g in kv_cache_config.kv_cache_groups
+        for spec in _iter_layer_specs(_manager_spec(g.kv_cache_spec))
+    )
+
+
+def _ds4_tail_alignment_divides_hash(kv_cache_config: KVCacheConfig, hash_block_size: int) -> bool:
+    """The upstream fine-grained lookup indexes partial hits at
+    ``hash_block_size``, which is only correct while the hybrid
+    ``cache_hit_alignment_tokens`` stays equal to ``hash_block_size``. That
+    requires every non-cacheable tail pool's ``compress_ratio`` to divide
+    ``hash_block_size`` -- i.e. the LCM of the ratios must divide
+    ``hash_block_size``; otherwise fall back to whole-block hits (correct,
+    just coarse) instead of probing on a misaligned index."""
+    tail_alignment = 1
+    for g in kv_cache_config.kv_cache_groups:
+        if not is_prefix_cacheable(g.kv_cache_spec):
+            for spec in _iter_layer_specs(g.kv_cache_spec):
+                # Guard against None/0 compress_ratio (TypeError/ZeroDivisionError).
+                ratio = getattr(spec, "compress_ratio", 1) or 1
+                tail_alignment = lcm(tail_alignment, ratio)
+    return hash_block_size % tail_alignment == 0
+
+
+# Bound on remembered shared-prefix junctions (one entry per request whose
+# lookup observed per-group hit divergence; popped after registration).
+# Requests aborted before the write path runs never free their entry, so
+# the table is cleared wholesale once the bound is reached.
+_SHARED_PREFIX_JUNCTION_TABLE_LIMIT = 1024
 
 
 class AscendHybridKVCacheCoordinator(HybridKVCacheCoordinator):
@@ -209,22 +258,51 @@ class AscendHybridKVCacheCoordinator(HybridKVCacheCoordinator):
                 for g in kv_cache_config.kv_cache_groups
                 if is_prefix_cacheable(g.kv_cache_spec)
             ), "block_size must be divisible by hash_block_size"
-        self.enable_partial_hash_hits = allow_partial_hash_hits and any(
-            isinstance(g.kv_cache_spec, MambaSpec)
-            and g.kv_cache_spec.mamba_cache_mode == "align"
-            and (
-                g.kv_cache_spec.block_size > hash_block_size
-                or (dcp_world_size > 1 and g.kv_cache_spec.block_size == hash_block_size)
+        self.enable_partial_hash_hits = allow_partial_hash_hits and (
+            any(
+                isinstance(g.kv_cache_spec, MambaSpec)
+                and g.kv_cache_spec.mamba_cache_mode == "align"
+                and (
+                    g.kv_cache_spec.block_size > hash_block_size
+                    or (dcp_world_size > 1 and g.kv_cache_spec.block_size == hash_block_size)
+                )
+                for g in kv_cache_config.kv_cache_groups
             )
-            for g in kv_cache_config.kv_cache_groups
+            # DeepSeek-V4/V4.1 compressed-MLA groups: full-block hits are
+            # pinned to whole (huge) logical blocks, e.g. 4096 tokens for the
+            # v4.0 C128 main group. FullAttentionManager already supports
+            # fine-grained hash lookup natively, so opening this gate unlocks
+            # hash_block_size-granular partial hits with no custom manager.
+            or (
+                dcp_world_size == 1
+                and _has_ds4_compress_mla_group(kv_cache_config, hash_block_size)
+                and _ds4_tail_alignment_divides_hash(kv_cache_config, hash_block_size)
+            )
         )
         if self.enable_partial_hash_hits:
             self.enable_partial_hash_hits = all(
                 not is_prefix_cacheable(g.kv_cache_spec)
                 or getattr(manager, "block_size", self._get_effective_block_size(g.kv_cache_spec)) == hash_block_size
                 or getattr(manager, "supports_fine_grained_hash_lookup", False)
+                # SlidingWindowManager.find_longest_cache_hit already degrades
+                # to alignment_tokens boundaries when the hybrid alignment is
+                # finer than its block size (it only reports hits whose
+                # boundary is a multiple of alignment_tokens), so it is safe
+                # in fine-grained mode even without the capability flag.
+                or (
+                    isinstance(manager, SlidingWindowManager)
+                    and getattr(manager, "block_size", 0) % hash_block_size == 0
+                )
                 for manager, g in zip(self.single_type_managers, kv_cache_config.kv_cache_groups)
             )
+        # Shared-prefix junction memory for fine-grained partial-hash hits:
+        # find_longest_cache_hit records the boundary where the finest group
+        # hit stopped while the reconciled hybrid hit fell short, keyed by
+        # the request's block_hashes list (the lookup receives no request
+        # identity; the list object is stable for the request's lifetime).
+        # cache_blocks consumes the entry to register a partial hash entry
+        # there, then pops it.
+        self._shared_prefix_junctions: dict = {}
         self.verify_and_split_kv_cache_groups()
 
         # Align the WRITE-path mask granularity (reachable_block_mask) with the
@@ -264,6 +342,14 @@ class AscendHybridKVCacheCoordinator(HybridKVCacheCoordinator):
                 # boundary, including groups outside the draft model.
                 if isinstance(manager, MambaManager):
                     manager.drop_eagle_checkpoint_block = True
+
+        if self.enable_partial_hash_hits:
+            logger.info_once(
+                "Ascend hybrid fine-grained prefix-cache hits enabled: "
+                "hash_block_size=%d, cache_hit_alignment_tokens=%d",
+                self.hash_block_size,
+                self._cache_hit_alignment_tokens,
+            )
 
     @property
     def _cache_hit_alignment_tokens(self) -> int:
@@ -360,6 +446,91 @@ class AscendHybridKVCacheCoordinator(HybridKVCacheCoordinator):
         # NOTE: use 16k as the alignment tokens for model with compress ratio
         block_sizes = [self._get_effective_block_size(group.spec) for group in self.attention_groups]
         self.lcm_block_size = lcm(*block_sizes)
+
+    def cache_blocks(self, request: Request, num_computed_tokens: int) -> None:
+        """Cache the request's blocks, then register the shared-prefix junction.
+
+        The upstream write path only registers a partial entry at each
+        request's own prompt endpoint, so traffic that shares a long prefix
+        but diverges mid-block can only hit whole blocks (e.g. DeepSeek-V4
+        C128 groups with 4096-token blocks hit 4096 of a 6912-token shared
+        prefix). After the upstream registration completes, re-register a
+        partial entry at the junction this request's lookup remembered during
+        hit reconciliation.
+        """
+        super().cache_blocks(request, num_computed_tokens)
+        if not self.enable_partial_hash_hits:
+            return
+        self._register_shared_prefix_junctions(request, num_computed_tokens)
+
+    def _register_shared_prefix_junctions(self, request: Request, num_computed_tokens: int) -> None:
+        """Register partial entries at the remembered shared-prefix junction."""
+        junction = self._shared_prefix_junctions.get(id(request.block_hashes))
+        if not junction:
+            return
+        registered = False
+        for group_id, manager in enumerate(self.single_type_managers):
+            if not manager.enable_caching:
+                continue
+            # Only full-attention groups whose blocks are coarser than the
+            # hash granularity need a junction entry: their whole-block
+            # hits are pinned to whole blocks, while finer groups already
+            # hit (and register) at their own granularity.
+            if not isinstance(manager, FullAttentionManager):
+                continue
+            if manager.block_size <= self.hash_block_size:
+                continue
+            num_tokens = self.get_num_cacheable_tokens(num_computed_tokens, group_id)
+            if junction >= num_tokens:
+                # The junction prefix is not final at this write; retry on
+                # later steps once more tokens are computed.
+                continue
+            if self._cache_junction_partial_block(manager, request, junction):
+                registered = True
+        if registered:
+            # The junction hash is registered now; requests sharing the
+            # prefix will hit it on the read path, and this request must
+            # not re-register the entry on its later writes.
+            self._shared_prefix_junctions.pop(id(request.block_hashes), None)
+
+    def _cache_junction_partial_block(self, manager: FullAttentionManager, request: Request, junction: int) -> bool:
+        """Register one partial prefix-cache entry at ``junction`` tokens."""
+        if junction % self.hash_block_size != 0:
+            return False
+        if junction % manager.block_size == 0:
+            # Whole-block boundary: already covered by the full-block hash.
+            return False
+        if junction // self.hash_block_size > len(request.block_hashes):
+            return False
+        blocks = manager.req_to_blocks.get(request.request_id)
+        if not blocks:
+            return False
+        block_idx = junction // manager.block_size
+        if block_idx >= len(blocks):
+            return False
+        blk = blocks[block_idx]
+        if blk.is_null:
+            return False
+        if blk.block_hash_num_tokens == junction:
+            # Already registered at exactly this boundary (e.g. the prompt
+            # endpoint registered by the upstream write path).
+            return False
+        manager.block_pool.cache_partial_block(
+            request=request,
+            block=blk,
+            num_tokens=junction,
+            kv_cache_group_id=manager.kv_cache_group_id,
+            block_size=manager.block_size,
+        )
+        logger.info(
+            "Registered shared-prefix junction partial entry: "
+            "request_id=%s, group_id=%d, junction_tokens=%d, block_size=%d",
+            request.request_id,
+            manager.kv_cache_group_id,
+            junction,
+            manager.block_size,
+        )
+        return True
 
     def find_longest_cache_hit(
         self,
@@ -480,6 +651,24 @@ class AscendHybridKVCacheCoordinator(HybridKVCacheCoordinator):
                 if (blks := hit_blocks_by_group[group_id]) is not None:
                     del blks[num_blocks:]
                     hit_length_by_group[group_id] = hit_length
+
+        if self.enable_partial_hash_hits and longest_hit_length > hit_length:
+            # Shared-prefix junction: some group hit at ``longest_hit_length``
+            # (the upstream ``shared_prefix_boundary``: the reconciled
+            # ``hit_length`` plus the returned uncached common prefix) while
+            # the reconciled hybrid hit stopped at ``hit_length``. Remember it
+            # so the write path can register a partial entry at that
+            # junction; upstream only registers each request's own prompt
+            # endpoint, so cross-request traffic sharing a long prefix but
+            # diverging mid-block (DeepSeek-V4 C128) can otherwise only hit
+            # whole blocks. Keyed by id() of the request's block_hashes list
+            # (lists are unhashable; the lookup receives no request identity,
+            # and the list object is stable for the request's lifetime).
+            if len(self._shared_prefix_junctions) >= _SHARED_PREFIX_JUNCTION_TABLE_LIMIT:
+                # Requests aborted before any write never free their entry;
+                # drop the whole table rather than grow without bound.
+                self._shared_prefix_junctions.clear()
+            self._shared_prefix_junctions[id(block_hashes)] = longest_hit_length
 
         cache_hit_blocks = tuple(blocks if blocks is not None else [] for blocks in hit_blocks_by_group)
         return cache_hit_blocks, hit_length, longest_hit_length - hit_length
