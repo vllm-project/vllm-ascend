@@ -46,6 +46,7 @@ from vllm_ascend.device.hardware_profile import HardwareCapability, get_current_
 from vllm_ascend.utils import (
     ASCEND_QUANTIZATION_METHOD,
     C8_MXFP_KV_CACHE_DTYPE,
+    QFA_INT8_KV_CACHE_DTYPE,
     calc_split_factor,
     is_hif8_c8_kv_quant,
 )
@@ -635,6 +636,12 @@ class AscendModelSlimConfig(QuantizationConfig):
             # The remaining FAKQuant legacy tensors have no MXFP8 consumer.
             suffix_map[".fa_v.offset"] = None
             suffix_map.update(dict.fromkeys(_MXFP_C8_UNUSED_FA_SUFFIXES, None))
+        if self.enable_qfa_int8_quant:
+            # QFA INT8 keeps K dynamic (per-token descale inside the packet
+            # cache) but V uses the static per-head FP32 scale (fa_v.scale,
+            # the calibration channel; reuses FAKQuant's key name).
+            suffix_map[".fa_v.scale"] = ".attn.v_cache_scale"
+            suffix_map[".fa_v.offset"] = None
         if self.hif8_quant_layers:
             # The HIF8 recipe's symmetric per-tensor fa scales only have a
             # consumer (the HIF8 scheme) when hif8 is the selected cache
@@ -922,6 +929,21 @@ class AscendModelSlimConfig(QuantizationConfig):
                 from ..methods.kv_cache.mxfp_c8 import AscendC8MXFPKVCacheAttentionMethod
 
                 scheme = AscendC8MXFPKVCacheAttentionMethod(self.quant_description, prefix)
+                logger.debug(
+                    "Select AscendKVCacheMethod(C8-MXFP) for %s (layer=%s)", prefix, "AttentionLayerBase[C8-MXFP]"
+                )
+            elif self.enable_qfa_int8_quant and self._is_full_attention_layer(layer):
+                # QFA INT8 KV cache: no recipe gate (the mxfp8 precedent);
+                # the checkpoint's fa_v.scale (per-head FP32, from the
+                # fa_v_scale.pt calibration) maps onto layer.v_cache_scale.
+                # Without those keys the parameter stays ones (uncalibrated
+                # placeholder, _layer_v_scale's fallback).
+                from ..methods.kv_cache.kv_c8 import AscendQFAKVCacheAttentionMethod
+
+                scheme = AscendQFAKVCacheAttentionMethod(self.quant_description, prefix)
+                logger.debug(
+                    "Select AscendKVCacheMethod(QFA-INT8) for %s (layer=%s)", prefix, "AttentionLayerBase[QFA-INT8]"
+                )
             elif self.is_hif8_quant_layer(runtime_prefix):
                 scheme = create_scheme_for_layer(_HIF8_C8_LAYER_QUANT_TYPE, prefix, "attention")
             else:
@@ -1017,6 +1039,19 @@ class AscendModelSlimConfig(QuantizationConfig):
         if vllm_config is None:
             return False
         return vllm_config.cache_config.cache_dtype == C8_MXFP_KV_CACHE_DTYPE
+
+    @property
+    def enable_qfa_int8_quant(self) -> bool:
+        """QFA INT8 KV cache is enabled with ``--kv-cache-dtype int8_qfa``.
+
+        Same Model-config-time contract as ``enable_mxfp_c8_quant``: no
+        recipe gate -- the dtype alone installs the per-head fa_v.scale
+        channel (ones placeholder when the checkpoint lacks the keys).
+        """
+        vllm_config = get_current_vllm_config_or_none()
+        if vllm_config is None:
+            return False
+        return vllm_config.cache_config.cache_dtype == QFA_INT8_KV_CACHE_DTYPE
 
     @property
     def _has_mxfp_c8_recipe(self) -> bool:
