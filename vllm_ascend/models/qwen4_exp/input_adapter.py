@@ -142,12 +142,23 @@ class Qwen4ExpPreparedInputAdapter:
 
     def __init__(self, model: torch.nn.Module) -> None:
         self._graph_query_offsets: dict[tuple[torch.device, int], torch.Tensor] = {}
-        self._layers = tuple(
-            module for module in model.modules() if module.__class__.__name__ == "AscendQwen4ExpQSAAttention"
-        )
+        self._layers: tuple[Any, ...] = ()
         self._rope_buffers: dict[tuple[int, tuple[int, ...], torch.dtype, torch.device], torch.Tensor] = {}
         self._metadata_buffers: dict[tuple[object, ...], torch.Tensor] = {}
-        for layer in self._layers:
+        self.register_model(model)
+
+    def register_model(self, model: torch.nn.Module) -> None:
+        """Include QSA attention layers from the target or MTP draft model."""
+        known_ids = {id(layer) for layer in self._layers}
+        added = tuple(
+            module
+            for module in model.modules()
+            if module.__class__.__name__ == "AscendQwen4ExpQSAAttention" and id(module) not in known_ids
+        )
+        if not added:
+            return
+        self._layers = (*self._layers, *added)
+        for layer in added:
             rotary = layer.rotary_emb
             if (
                 not layer.layer_name.startswith("mtp.")
@@ -340,23 +351,31 @@ class Qwen4ExpPreparedInputAdapter:
         mx = getattr(layer, "kv_cache_dtype", None) == "mxfp8"
         field = "qsa_mxfp8_gbsa_metadata" if mx else "qsa_gbsa_metadata"
         graph_offsets = getattr(main, "qsa_graph_query_offsets", None)
+        graph_cu_q: torch.Tensor | None = None
         if graph_offsets is not None:
+            graph_offsets = graph_offsets[: requests + 1]
+        if (
+            graph_offsets is not None
+            and requests > 0
+            and main.block_table.shape[0] == requests
+            and graph_offsets.shape == (requests + 1,)
+        ):
             # Capture and replay use the same int64 buffer. The runner supplies
             # padded request boundaries on device, including synthetic requests.
             key = (graph_offsets.device, requests)
-            cu_q = self._graph_query_offsets.get(key)
-            if cu_q is None:
-                cu_q = torch.empty(requests + 1, dtype=torch.int64, device=graph_offsets.device)
-                self._graph_query_offsets[key] = cu_q
-            main.qsa_request_cu_q = cu_q
-        elif full_graph:
+            graph_cu_q = self._graph_query_offsets.get(key)
+            if graph_cu_q is None:
+                graph_cu_q = torch.empty(requests + 1, dtype=torch.int64, device=graph_offsets.device)
+                self._graph_query_offsets[key] = graph_cu_q
+            main.qsa_request_cu_q = graph_cu_q
+        elif full_graph or graph_offsets is not None:
             main.qsa_request_cu_q = None
-        cu_q = getattr(main, "qsa_request_cu_q", None)
+        cu_q: torch.Tensor | None = getattr(main, "qsa_request_cu_q", None)
         request_layout = cu_q is not None
-        max_query_len = main.max_query_len if request_layout else 1
+        max_query_len = max(int(main.max_query_len), 1) if request_layout else 1
         signature = (
             field,
-            max_query_len if graph_offsets is None else None,
+            max_query_len if graph_cu_q is None else None,
             _tensor_storage_signature(cu_q) if cu_q is not None else None,
             int(layer.num_heads),
             num_kv_heads,
@@ -373,8 +392,8 @@ class Qwen4ExpPreparedInputAdapter:
         if prepared is not None:
             setattr(main, field, prepared)
             return
-        if graph_offsets is not None:
-            cu_q.copy_(graph_offsets)
+        if graph_cu_q is not None and graph_offsets is not None:
+            graph_cu_q.copy_(graph_offsets)
         # Match both Python indexing and the Triton preparation kernel: a
         # negative request index addresses from the end, so graph-padding -1
         # rows use the final request rather than request zero.
@@ -392,7 +411,6 @@ class Qwen4ExpPreparedInputAdapter:
             dtype=torch.int32,
             device=positions.device,
         )
-        grouped_prefill = cu_q is not None
         if cu_q is None:
             cu_q = torch.arange(rows + 1, dtype=torch.int64, device=positions.device)
             kv_lengths = visible
@@ -422,7 +440,9 @@ class Qwen4ExpPreparedInputAdapter:
             **common,
         )
         # Eager prefill lengths vary per step; only graph replay needs persistent storage.
-        prepared = generated if grouped_prefill and graph_offsets is None else self._persistent_metadata(signature, generated)
+        prepared = (
+            generated if request_layout and graph_cu_q is None else self._persistent_metadata(signature, generated)
+        )
         setattr(main, field, prepared)
         prepared_this_step[signature] = prepared
 

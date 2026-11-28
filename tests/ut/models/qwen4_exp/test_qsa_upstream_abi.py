@@ -459,6 +459,11 @@ def test_qwen_model_state_scopes_full_graph_to_parent_build(monkeypatch):
     assert observed == [True, False]
     assert [call.kwargs["full_graph"] for call in adapter.prepare_attention_metadata.call_args_list] == observed
 
+    draft_model = torch.nn.Module()
+    runner = SimpleNamespace(speculator=SimpleNamespace(model=draft_model), ascend_config=None)
+    state.initialize_spec_cpu_length_sync(runner)
+    adapter.register_model.assert_called_once_with(draft_model)
+
 
 @pytest.mark.parametrize("full_graph", [True, False])
 @pytest.mark.parametrize("live_reqs", [13, 14])

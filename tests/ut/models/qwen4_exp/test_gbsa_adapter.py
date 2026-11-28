@@ -374,3 +374,38 @@ def test_whole_page_kernel_pairs_reuse_mrv2_ids(num_kv_heads):
         page, token = divmod(slot, kernel_size)
         expected = page * 2 * page_bytes + token * num_kv_heads * head_size * 2
         assert keys[page, token].data_ptr() - backing.data_ptr() == expected
+
+
+def test_qsa_gbsa_validates_packed_query_boundaries_and_max_len():
+    source = Path(__file__).resolve().parents[4] / "vllm_ascend/models/qwen4_exp/gbsa.py"
+    module = ast.parse(source.read_text())
+    module.body = [node for node in module.body if not isinstance(node, (ast.Import, ast.ImportFrom))]
+    namespace = {
+        "torch": torch,
+        "prepare_qsa_gbsa_inputs": load_cpu_preparation(),
+        "generic_block_sparse_attention_metadata": lambda *args, **kwargs: torch.empty(0),
+        "generic_block_sparse_attention": lambda query, *args, **kwargs: (torch.zeros_like(query), torch.empty(0)),
+    }
+    exec(compile(module, str(source), "exec"), namespace)
+    fn = namespace["qsa_gbsa_attention"]
+    query = torch.randn(3, 4, 128, dtype=torch.bfloat16)
+    keys = torch.randn(2, 128, 2, 128, dtype=torch.bfloat16)
+    indices = torch.tensor([[0, -1, -1, -1, -1]] * 3, dtype=torch.int32)
+    args = (
+        query,
+        keys,
+        keys,
+        indices,
+        torch.tensor([[0], [1]], dtype=torch.int32),
+        torch.tensor([0, 0, 1], dtype=torch.int32),
+        torch.tensor([1, 2, 0], dtype=torch.int32),
+        torch.tensor([3, 1], dtype=torch.int32),
+        torch.empty_like(query),
+    )
+
+    with pytest.raises(ValueError, match="int64"):
+        fn(*args, query_start_loc=torch.tensor([0, 2, 3], dtype=torch.int32), max_query_len=2)
+    with pytest.raises(ValueError, match="max_query_len"):
+        fn(*args, query_start_loc=torch.tensor([0, 2, 3], dtype=torch.int64))
+    with pytest.raises(ValueError, match="positive"):
+        fn(*args, query_start_loc=torch.tensor([0, 2, 3], dtype=torch.int64), max_query_len=0)

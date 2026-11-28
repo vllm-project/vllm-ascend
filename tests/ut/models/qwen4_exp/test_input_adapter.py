@@ -445,3 +445,67 @@ def test_lightning_schedule_matches_trimmed_or_padded_query(monkeypatch, full_gr
         torch.tensor([3, 16, rows], dtype=torch.int32),
     )
     torch.testing.assert_close(metadata.query_start_loc, torch.tensor([0, 2, 4, 6], dtype=torch.int32))
+
+
+def test_graph_query_offsets_slice_oversized_buffer_and_register_mtp(monkeypatch):
+    adapter_cls, calls = _load_adapter(monkeypatch)
+    target = AscendQwen4ExpQSAAttention()
+    mtp = AscendQwen4ExpQSAAttention()
+    mtp.layer_name = "mtp.layers.48.self_attn"
+    mtp.rotary_emb = _RotaryDelegate()
+    mtp.indexer.raw_key_cache = SimpleNamespace(prefix="mtp_raw")
+    mtp.indexer.compressed_key_cache = SimpleNamespace(prefix="mtp_compressed")
+    adapter = adapter_cls(_Model(target))
+    adapter.register_model(_Model(mtp))
+    adapter.register_model(_Model(mtp))
+    assert isinstance(mtp.rotary_emb, _RotaryDelegate)
+
+    # AscendInputBuffers allocates max_num_reqs + 2 entries for query_start_loc.
+    oversized_offsets = torch.tensor([0, 2, 4, 99, 99], dtype=torch.int32)
+    seq_lens = torch.tensor([8, 12], dtype=torch.int32)
+    raw = SimpleNamespace(
+        token_to_req=torch.tensor([0, 0, 1, 1], dtype=torch.int32),
+        logical_positions=torch.tensor([6, 7, 10, 11], dtype=torch.int32),
+        seq_lens=seq_lens,
+    )
+    compressed = SimpleNamespace(
+        token_to_req=raw.token_to_req,
+        seq_lens=seq_lens,
+        query_start_loc=oversized_offsets,
+        num_actual_tokens=4,
+    )
+    main = SimpleNamespace(
+        num_actual_tokens=4,
+        max_query_len=0,
+        block_table=torch.zeros((2, 8), dtype=torch.int32),
+        qsa_request_plan=None,
+        qsa_graph_query_offsets=oversized_offsets,
+    )
+    mtp_main = SimpleNamespace(
+        num_actual_tokens=4,
+        max_query_len=0,
+        block_table=main.block_table,
+        qsa_request_plan=None,
+        qsa_graph_query_offsets=oversized_offsets,
+    )
+    metadata = {
+        target.layer_name: main,
+        mtp.layer_name: mtp_main,
+        "raw": raw,
+        "compressed": compressed,
+        "mtp_raw": raw,
+        "mtp_compressed": compressed,
+    }
+    adapter.prepare_attention_metadata(metadata, full_graph=True)
+    cu_q_ptr = main.qsa_request_cu_q.data_ptr()
+    gbsa_ptr = main.qsa_gbsa_metadata.data_ptr()
+    torch.testing.assert_close(main.qsa_request_cu_q, torch.tensor([0, 2, 4], dtype=torch.int64))
+    assert mtp_main.qsa_request_cu_q.data_ptr() == cu_q_ptr
+    assert mtp_main.qsa_gbsa_metadata.data_ptr() == gbsa_ptr
+    assert calls == {"li": 1, "gbsa": 1}
+
+    oversized_offsets[:3].copy_(torch.tensor([0, 3, 4], dtype=torch.int32))
+    adapter.prepare_attention_metadata(metadata, full_graph=True)
+    assert main.qsa_request_cu_q.data_ptr() == cu_q_ptr
+    assert main.qsa_gbsa_metadata.data_ptr() == gbsa_ptr
+    torch.testing.assert_close(main.qsa_request_cu_q, torch.tensor([0, 3, 4], dtype=torch.int64))
