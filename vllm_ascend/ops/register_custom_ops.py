@@ -8,10 +8,13 @@ from vllm.distributed import (
 )
 from vllm.forward_context import get_forward_context
 from vllm.utils.torch_utils import direct_register_custom_op
+from vllm.utils.torch_version import is_torch_equal_or_newer
 
 from vllm_ascend.ascend_forward_context import _EXTRA_CTX, MoECommType
 from vllm_ascend.ops.rotary_embedding import rope_forward_oot
 from vllm_ascend.ops.triton.muls_add import muls_add_triton
+
+_REQUIRE_FUNCTIONAL_CUSTOM_OPS = is_torch_equal_or_newer("2.14.0")
 
 
 def _get_ep_local_sizes(dp_metadata, ep_group) -> list[int] | None:
@@ -181,6 +184,18 @@ def _maybe_all_reduce_shared_expert_impl(
     return shared_output
 
 
+def _maybe_all_reduce_tensor_model_parallel_npu(states: torch.Tensor, layer_name: str) -> torch.Tensor:
+    # Keep the replay-time reduction choice and satisfy the functional schema
+    # when dispatch already reduced the tensor or the TP group has one rank.
+    result = _maybe_all_reduce_tensor_model_parallel_impl(states, layer_name)
+    return result.clone() if result is states else result
+
+
+def _maybe_all_reduce_shared_expert_npu(shared_output: torch.Tensor, layer_name: str) -> torch.Tensor:
+    result = _maybe_all_reduce_shared_expert_impl(shared_output, layer_name)
+    return result.clone() if result is shared_output else result
+
+
 def _maybe_all_gather_and_maybe_unpad_fake(x: torch.Tensor) -> torch.Tensor:
     forward_context = get_forward_context()
     ep_group = get_ep_group()
@@ -267,16 +282,24 @@ direct_register_custom_op(
 
 direct_register_custom_op(
     op_name="maybe_all_reduce_tensor_model_parallel",
-    op_func=_maybe_all_reduce_tensor_model_parallel_impl,
-    fake_impl=lambda states, layer_name: states,
+    op_func=(
+        _maybe_all_reduce_tensor_model_parallel_npu
+        if _REQUIRE_FUNCTIONAL_CUSTOM_OPS
+        else _maybe_all_reduce_tensor_model_parallel_impl
+    ),
+    fake_impl=lambda states, layer_name: torch.empty_like(states) if _REQUIRE_FUNCTIONAL_CUSTOM_OPS else states,
     mutates_args=[],
     dispatch_key="PrivateUse1",
 )
 
 direct_register_custom_op(
     op_name="maybe_all_reduce_shared_expert",
-    op_func=_maybe_all_reduce_shared_expert_impl,
-    fake_impl=lambda shared_output, layer_name: shared_output,
+    op_func=(
+        _maybe_all_reduce_shared_expert_npu if _REQUIRE_FUNCTIONAL_CUSTOM_OPS else _maybe_all_reduce_shared_expert_impl
+    ),
+    fake_impl=lambda shared_output, layer_name: (
+        torch.empty_like(shared_output) if _REQUIRE_FUNCTIONAL_CUSTOM_OPS else shared_output
+    ),
     mutates_args=[],
     dispatch_key="PrivateUse1",
 )
