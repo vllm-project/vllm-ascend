@@ -507,10 +507,6 @@ jobs:
           . /usr/local/Ascend/ascend-toolkit/set_env.sh
           if [ "${{ steps.torch-214.outcome }}" = "success" ]; then
             export ASCEND_PROCESS_LOG_PATH="$RUNNER_TEMP/torch214-cann-logs"
-            if [ "${{ contains(github.event.pull_request.labels.*.name, 'ready-precise') && !contains(github.event.pull_request.labels.*.name, 'main2main') }}" = "true" ]; then
-              export TASK_QUEUE_ENABLE=0
-              echo "Testing ACL graph capture with TASK_QUEUE_ENABLE=$TASK_QUEUE_ENABLE"
-            fi
           fi
           if [ "${{ inputs.enable-coverage }}" = "true" ]; then
             export ENABLE_COVERAGE=true
