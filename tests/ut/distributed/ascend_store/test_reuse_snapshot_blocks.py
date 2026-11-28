@@ -179,7 +179,8 @@ def test_mixed_public_and_private_pages_preserve_logical_positions():
 @pytest.mark.parametrize("owner", [True, False], ids=["writer", "replica"])
 def test_window_continuation_uses_native_full_keys_and_private_unhashed_pages(owner):
     import torch
-    from vllm.v1.kv_cache_interface import SlidingWindowSpec
+
+    from vllm_ascend.core.kv_cache_compat import SlidingWindowSpec
 
     w = worker()
     num_hashes = 32
