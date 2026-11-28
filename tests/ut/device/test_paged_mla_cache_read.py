@@ -139,15 +139,20 @@ def test_slot_reads_preserve_values_order_and_source(dtype, layout, slot_values)
 )
 def test_strided_token_reads_preserve_request_order_and_source(dtype, component, lengths, starts):
     block_size, blocks, key_dim, rope_dim = 128, 15, 512, 64
-    slot_elements = block_size * (key_dim + rope_dim)
+    row_elements = key_dim + rope_dim
+    slot_elements = block_size * row_elements
     prefix_elements = 256
     raw = torch.zeros(prefix_elements + blocks * slot_elements, dtype=dtype)
-    key = torch.as_strided(raw, (blocks, block_size, 1, key_dim), (slot_elements, key_dim, key_dim, 1), prefix_elements)
+    # Token-fused pages (`stride(1) == key_dim + rope_dim`) are strided within each
+    # block and therefore require `try_load_strided_mla_cache`.
+    key = torch.as_strided(
+        raw, (blocks, block_size, 1, key_dim), (slot_elements, row_elements, row_elements, 1), prefix_elements
+    )
     rope = torch.as_strided(
         raw,
         (blocks, block_size, 1, rope_dim),
-        (slot_elements, rope_dim, rope_dim, 1),
-        prefix_elements + block_size * key_dim,
+        (slot_elements, row_elements, row_elements, 1),
+        prefix_elements + key_dim,
     )
     key.copy_((torch.arange(key.numel()).reshape(key.shape) % 127).to(dtype))
     rope.copy_((torch.arange(rope.numel()).reshape(rope.shape) % 97 + 5).to(dtype))
@@ -196,21 +201,35 @@ def test_strided_token_reads_preserve_request_order_and_source(dtype, component,
     assert torch.equal(raw, before)
 
 
-@pytest.mark.parametrize("unsupported", ["contiguous", "nz", "heads", "int8"])
+@pytest.mark.parametrize("unsupported", ["contiguous", "component_major", "blhnc_padded", "nz", "heads", "int8"])
 def test_unaffected_layouts_keep_native_reader(unsupported):
-    cache = torch.zeros(2, 128, 1, 16, dtype=torch.bfloat16)
-    if unsupported == "int8":
-        cache = cache.to(torch.int8)
-    if unsupported != "contiguous":
-        cache = cache[..., ::2]
-    if unsupported == "heads":
-        cache = cache.expand(2, 128, 2, 8)
+    if unsupported in ("component_major", "blhnc_padded"):
+        blocks, block_size, key_dim, rope_dim = 4, 128, 512, 64
+        extra_pad = 1024 if unsupported == "blhnc_padded" else 0
+        page_elements = block_size * (key_dim + rope_dim) + extra_pad
+        raw = torch.zeros(64 + blocks * page_elements, dtype=torch.bfloat16)
+        cache_k = torch.as_strided(raw, (blocks, block_size, 1, key_dim), (page_elements, key_dim, key_dim, 1), 64)
+        cache_v = torch.as_strided(
+            raw, (blocks, block_size, 1, rope_dim), (page_elements, rope_dim, rope_dim, 1), 64 + block_size * key_dim
+        )
+        assert not cache_k.is_contiguous() and not cache_v.is_contiguous()
+    else:
+        cache = torch.zeros(2, 128, 1, 16, dtype=torch.bfloat16)
+        if unsupported == "int8":
+            cache = cache.to(torch.int8)
+        if unsupported != "contiguous":
+            cache = cache[..., ::2]
+        if unsupported == "heads":
+            cache = cache.expand(2, 128, 2, 8)
+        cache_k = cache_v = cache
 
     def forbidden_copy(*args):
         pytest.fail("Unaffected layouts must not enter the new copy path")
 
     fmt = 29 if unsupported == "nz" else 2
-    assert not load_reader(forbidden_copy, fmt)(DeviceTensor(cache), DeviceTensor(cache), None, None, None, None, None)
+    assert not load_reader(forbidden_copy, fmt)(
+        DeviceTensor(cache_k), DeviceTensor(cache_v), None, None, None, None, None
+    )
 
 
 def test_fp8_history_context_reads_only_requested_rows_from_token_interleaved_pages():
