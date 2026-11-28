@@ -15,7 +15,9 @@ import pytest
 import requests
 import torch
 import torch_npu  # noqa: F401  # registers the NPU backend
+from modelscope import snapshot_download  # type: ignore[import-untyped]
 from prometheus_client.parser import text_string_to_metric_families
+from vllm import envs
 from vllm.distributed.weight_transfer.clients import HTTPVLLMWeightSyncClient
 from vllm.distributed.weight_transfer.factory import WeightTransferTrainerFactory
 from vllm.utils.network_utils import get_ip, get_open_port
@@ -230,6 +232,9 @@ def run_draft_hccl_weight_transfer(
     torch.npu.set_device(TRAINER_DEVICE_INDEX)
     device = torch.device("npu", TRAINER_DEVICE_INDEX)
     case, draft_case = speculative_case.target, speculative_case.draft
+    # Prepare tokenizer files before the server loads from its offline cache.
+    if envs.VLLM_USE_MODELSCOPE:
+        snapshot_download(case.model, allow_file_pattern=["*.json"], local_files_only=False)
     initial_source = FixedRandomWeightSource(case, device, seed=0, draft_case=draft_case, draft_seed=0)
     first_draft_updated = FixedRandomWeightSource(case, device, seed=0, draft_case=draft_case, draft_seed=1)
     target_updated = FixedRandomWeightSource(case, device, seed=1, draft_case=draft_case, draft_seed=1)
