@@ -346,6 +346,8 @@ class AscendSFAIndexerCacheSpec(MLAAttentionSpec):
     scale_dtype: torch.dtype = torch.int8
     cache_sparse_li_c8: bool = False
     cache_sparse_li_c4: bool = False
+    # Each physical kernel page contains its K rows followed by their scales.
+    uses_packed_sfa_indexer_cache: bool = False
     cache_dtype_str: str | None = None
     sfa_dcp_replicated_indexer_size: int = 1
 
@@ -384,6 +386,7 @@ class AscendSFAIndexerCacheSpec(MLAAttentionSpec):
         scale_dtype_set = set(spec.scale_dtype for spec in specs)
         cache_sparse_li_c8_set = set(spec.cache_sparse_li_c8 for spec in specs)
         cache_sparse_li_c4_set = set(spec.cache_sparse_li_c4 for spec in specs)
+        packed_indexer_set = set(spec.uses_packed_sfa_indexer_cache for spec in specs)
         sfa_dcp_replicated_indexer_size_set = set(spec.sfa_dcp_replicated_indexer_size for spec in specs)
         assert len({spec.dcp_sharded for spec in specs}) == 1
         assert (
@@ -391,6 +394,7 @@ class AscendSFAIndexerCacheSpec(MLAAttentionSpec):
             and len(scale_dtype_set) == 1
             and len(cache_sparse_li_c8_set) == 1
             and len(cache_sparse_li_c4_set) == 1
+            and len(packed_indexer_set) == 1
             and len(sfa_dcp_replicated_indexer_size_set) == 1
         ), (
             "All SFA indexer cache layers in the same KV cache group must use "
@@ -405,6 +409,7 @@ class AscendSFAIndexerCacheSpec(MLAAttentionSpec):
             scale_dtype=scale_dtype_set.pop(),
             cache_sparse_li_c8=cache_sparse_li_c8_set.pop(),
             cache_sparse_li_c4=cache_sparse_li_c4_set.pop(),
+            uses_packed_sfa_indexer_cache=packed_indexer_set.pop(),
             sfa_dcp_replicated_indexer_size=sfa_dcp_replicated_indexer_size_set.pop(),
         )
 

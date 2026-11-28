@@ -89,6 +89,24 @@ def test_matching_ascend_mla_specs_merge():
     assert is_kv_cache_spec_uniform({"layer0": spec, "layer1": spec})
 
 
+@pytest.mark.parametrize("packed", [False, True])
+def test_indexer_merge_and_block_resize_preserve_page_format(packed):
+    spec = AscendSFAIndexerCacheSpec(
+        block_size=128,
+        num_kv_heads=1,
+        head_size=128,
+        dtype=torch.int8,
+        scale_dim=1,
+        scale_dtype=torch.float32,
+        cache_sparse_li_c8=True,
+        uses_packed_sfa_indexer_cache=packed,
+    )
+    assert AscendSFAIndexerCacheSpec.merge([spec, spec]).uses_packed_sfa_indexer_cache is packed
+    assert spec.copy_with_new_block_size(256).uses_packed_sfa_indexer_cache is packed
+    with pytest.raises(AssertionError):
+        AscendSFAIndexerCacheSpec.merge([spec, replace(spec, uses_packed_sfa_indexer_cache=not packed)])
+
+
 @pytest.mark.parametrize("draft_flags", [(False, False), (True, True), (False, True), (True, False)])
 def test_mla_merge_preserves_draft_only_ownership_without_changing_grouping(draft_flags):
     specs = [replace(_mla_spec(), is_draft=is_draft) for is_draft in draft_flags]

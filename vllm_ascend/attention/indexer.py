@@ -48,6 +48,7 @@ from vllm_ascend.attention.context_parallel.sfa_dcp_utils import (
 )
 from vllm_ascend.attention.context_parallel.sharded_indexer import use_local_topk_output
 from vllm_ascend.attention.utils import (
+    combine_cache_components,
     has_requests_to_run_as_prefill,
     split_decodes_and_prefills,
     uses_pcp_sharded_layout,
@@ -56,6 +57,7 @@ from vllm_ascend.core.kv_cache_interface import AscendSFAIndexerCacheSpec
 from vllm_ascend.device.device_op import DeviceOperator
 from vllm_ascend.device.hardware_profile import HardwareCapability, get_current_hardware_profile
 from vllm_ascend.distributed.utils import all_gather_async
+from vllm_ascend.models import glm_moe_dsa_dflash_hnd
 from vllm_ascend.ops.rotary_embedding import get_cos_and_sin_mla
 from vllm_ascend.ops.triton.rope import rope_forward_triton_siso
 from vllm_ascend.ops.triton.sfa_indexer_store import store_indexer_key_scale
@@ -529,6 +531,7 @@ class AscendSFAIndexerBackend(nn.Module, AttentionBackend):
             scale_dtype=scale_dtype,
             cache_sparse_li_c4=self.enable_sparse_li_c4,
             cache_sparse_li_c8=self.enable_sparse_li_c8,
+            uses_packed_sfa_indexer_cache=(self.enable_sparse_li_c8 and glm_moe_dsa_dflash_hnd.applies_to(vllm_config)),
             sfa_dcp_replicated_indexer_size=indexer_replicas,
         )
 
@@ -641,12 +644,77 @@ class AscendSFAIndexerBackend(nn.Module, AttentionBackend):
         return x, scale if defer_scale_cast else scale.to(self.c8_k_scale_cache_dtype)
 
     @staticmethod
+    def _try_write_paged_fp8_keys(
+        key_cache: torch.Tensor,
+        scale_cache: torch.Tensor,
+        updates: torch.Tensor,
+        slots: torch.Tensor,
+    ) -> bool:
+        """Apply the byte-row workaround to an FP8 indexer's packed key/scale pages."""
+        if (
+            key_cache.ndim != 4
+            or key_cache.dtype != torch.float8_e4m3fn
+            or updates.dtype != key_cache.dtype
+            or key_cache.is_contiguous()
+        ):
+            return False
+
+        # Both shapes use (page, token_in_page, head, value).
+        # key_cache[p, t, 0, :] is the key. scale_cache[p, t, 0, 0] is its scale.
+        #
+        # Example with 128 tokens per page, 128-byte FP8 keys, and FP32 scales:
+        #   key_cache    shape (pages, 128, 1, 128)  stride (16896, 128, 128, 1)
+        #   scale_cache  shape (pages, 128, 1,   1)  stride ( 4224,   1,   1, 1)
+        #
+        # Stride counts how many elements you move when an index increases by one.
+        #   stride(0): next page, 16896 bytes in either tensor (4224 * 4 for FP32).
+        #   stride(1): next token in the page, 128 bytes for key or 4 for scale.
+        #   stride(-1): next value in a key, 1 byte.
+        #
+        # Each page stores all keys, then all scales:
+        #   | page 0 keys | page 0 scales | page 1 keys  | page 1 scales |
+        #   | rows 0-127  | rows 128-131  | rows 132-259 | rows 260-263  |
+        # One row is key_bytes bytes. The scales fill whole rows, so
+        # logical slot 128 (the first key of page 1) lands at row 132.
+        _, keys_per_page, num_heads, key_bytes = key_cache.shape
+        if (
+            num_heads != 1
+            or scale_cache.shape != (*key_cache.shape[:-1], 1)
+            or key_cache.stride(1) != key_bytes
+            or key_cache.stride(-1) != 1
+            or scale_cache.stride(1) != 1
+            or key_cache.stride(0) % key_bytes != 0
+        ):
+            return False
+
+        try:
+            packed_cache = combine_cache_components(key_cache, scale_cache)
+        except ValueError:
+            return False
+        if not packed_cache.is_contiguous():
+            return False
+
+        # Each row holds one key. Include the actual scale bytes in the shared
+        # page view, then skip those rows when converting logical key slots.
+        byte_rows = packed_cache.view(torch.uint8).view(-1, key_bytes)
+        scale_bytes_per_page = keys_per_page * scale_cache.element_size()
+        scale_rows_per_page = scale_bytes_per_page // key_bytes
+        slots = slots.reshape(-1)
+        page_ids = slots // keys_per_page
+        row_ids = slots + page_ids * scale_rows_per_page
+        row_ids = torch.where(slots >= 0, row_ids, slots)
+        new_keys = updates.view(torch.uint8).reshape(-1, key_bytes)
+        DeviceOperator.scatter_cache(byte_rows, row_ids.view(-1, 1), new_keys)
+        return True
+
+    @staticmethod
     def _write_cache_tensor(
         cache: torch.Tensor,
         updates: torch.Tensor,
         slots: torch.Tensor,
         cache_scatter_indices: torch.Tensor | None = None,
     ) -> None:
+        """Write updates into cache at logical token slots in place."""
         if cache.is_contiguous():
             DeviceOperator.scatter_cache(cache.view(-1, *updates.shape[1:]), slots.view(-1, 1), updates)
         else:
@@ -678,12 +746,18 @@ class AscendSFAIndexerBackend(nn.Module, AttentionBackend):
         if k_li.dtype == torch_npu.float4_e2m1fn_x2:
             indexer_k_cache = indexer_k_cache.view(torch.uint8)
             k_li = k_li.view(torch.uint8)
-        self._write_cache_tensor(
-            indexer_k_cache,
-            k_li.view(-1, k_li.shape[-1]),
-            slot_mapping,
-            cache_scatter_indices,
-        )
+        key_written = False
+        if self.enable_sparse_li_c8:
+            key_written = AscendSFAIndexerBackend._try_write_paged_fp8_keys(
+                indexer_k_cache, self.k_cache.kv_cache[INDEXER_SCALE_CACHE_SLOT], k_li, slot_mapping
+            )
+        if not key_written:
+            self._write_cache_tensor(
+                indexer_k_cache,
+                k_li.view(-1, k_li.shape[-1]),
+                slot_mapping,
+                cache_scatter_indices,
+            )
         if self.enable_sparse_li_quant:
             assert k_li_scale is not None
             # C4 scale is multi-dimensional (b*s, d/64, 2); C8 is (b*s, 1).

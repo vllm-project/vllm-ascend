@@ -848,6 +848,52 @@ class TestLayerwiseAttentionSave(unittest.TestCase):
 
 
 class TestKVPPPoolWorker(unittest.TestCase):
+    def test_memcache_layerwise_missing_pcp_owner_is_a_miss(self):
+        from vllm_ascend.distributed.kv_transfer.kv_pool.ascend_store.layerwise.pool_scheduler import (
+            LayerwiseKVPoolScheduler,
+        )
+
+        with patch.dict("os.environ", {"VLLM_PP_LAYER_PARTITION": "42,36"}):
+            worker = make_worker(
+                self,
+                use_mla=True,
+                use_layerwise=True,
+                use_kvpp=True,
+                extra_config={"backend": "memcache"},
+                tp_size=4,
+                tp_rank=2,
+                pcp_size=2,
+                pcp_rank=1,
+                pp_size=2,
+                pp_rank=1,
+                pp_partition=(42, 36),
+            )
+        worker.group_num_layers = {0: 1}
+        local_layer = 70 - worker.pp_layer_offset
+        worker.physical_layer_to_group_layers = {local_layer: [(0, 0)]}
+        self.assertTrue(worker._is_layerwise_save_owner(0))
+        self.assertFalse(worker._is_layerwise_save_owner(1))
+        self.assertEqual(worker._groups_for_layerwise_transfer(local_layer), [(0, 0)])
+        self.assertEqual(worker._groups_for_layerwise_transfer(local_layer - 1), [])
+
+        scheduler = LayerwiseKVPoolScheduler.__new__(LayerwiseKVPoolScheduler)
+        scheduler.layerwise_keys = worker.layerwise_keys
+        scheduler.dspark_prefix_keys = None
+        scheduler.sharded_mamba_group_ids = set()
+        scheduler.num_mamba_speculative_blocks_by_group = {}
+        scheduler.tp_size = scheduler.put_step = 4
+        scheduler.layerwise_max_transfer_blocks = 0
+        keys = scheduler._make_layerwise_hit_check_keys(0, "hash")
+        owner_key = worker._make_layerwise_full_key(0, "hash")
+        self.assertEqual(len(set(keys)), 16)
+        self.assertEqual(owner_key, keys[8 + 6])
+        self.assertNotEqual(owner_key, f"{worker.model_name}@pp1@hash@6")
+        present = set(keys)
+        scheduler.store_scheduler = SimpleNamespace(batch_is_readable=lambda batch: [key in present for key in batch])
+        self.assertEqual(scheduler._query_layerwise_block_hits([keys]), [True])
+        present.remove(owner_key)
+        self.assertEqual(scheduler._query_layerwise_block_hits([keys]), [False])
+
     def test_load_completion_is_shared_and_reset_at_step_binding(self):
         worker = make_worker(self, tp_size=2, use_mla=True, use_kvpp=True, use_layerwise=True)
         worker._global_to_local_layer = {9: 0, 10: 1}

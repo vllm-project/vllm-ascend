@@ -94,6 +94,7 @@ from vllm_ascend.distributed.kv_transfer.sparse_kv_offload.sparse_kv_offload_man
     allocate_kv_cache_tensors_for_sparse_kv_offload,
     reshape_kv_cache_tensors_for_sparse_kv_offload,
 )
+from vllm_ascend.models import glm_moe_dsa_dflash_hnd
 from vllm_ascend.models.glm5next.cache_views import view_compressed_indexer_cache, view_kpool_tail_cache
 from vllm_ascend.models.qwen4_exp.cache_config import (
     GDN,
@@ -1005,10 +1006,12 @@ def _allocate_kv_cache(
     if KVPPConfig.from_vllm_config(vllm_config).size > 1:
         caches = allocate_kvpp_cache(vllm_config, kv_cache_config, device)
         specs = _get_layer_kv_cache_specs(kv_cache_config)
-        # Indexer reshape expects a tuple even without a quantization scale.
-        # Single-component main MLA caches still use a raw Tensor.
+        # A single raw buffer with scales uses the page-strided indexer
+        # reshape. An unquantized indexer expects a one-element tuple.
         return {
-            name: parts if isinstance(specs[name], AscendSFAIndexerCacheSpec) or len(parts) > 1 else parts[0]
+            name: parts
+            if len(parts) > 1 or (isinstance(specs[name], AscendSFAIndexerCacheSpec) and not specs[name].scale_dim)
+            else parts[0]
             for name, parts in caches.items()
         }
     # init kv cache tensors
@@ -1026,6 +1029,15 @@ def _allocate_kv_cache(
         )
 
     attn_layers: dict[str, AttentionLayerBase] | None = None
+    if glm_moe_dsa_dflash_hnd.applies_to(vllm_config):
+        if not layer_kv_cache_spec:
+            return {}
+        return allocate_cache_backing(
+            kv_cache_config,
+            layer_kv_cache_spec,
+            lambda size: _allocate_int8_cache_tensor(size, alignment, device),
+            {name: spec.page_size_bytes * kv_cache_config.num_blocks for name, spec in layer_kv_cache_spec.items()},
+        )
     # Gemma 4 full/sliding groups share one pool while retaining contiguous
     # K/V views. The worker keeps the full budget only for this V2 path.
     if not enable_sfa(vllm_config) and can_share_full_and_sliding_kv_cache(vllm_config, layer_kv_cache_spec.values()):

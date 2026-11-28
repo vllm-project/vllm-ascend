@@ -17,6 +17,7 @@
 
 import vllm_ascend.patch.platform.patch_distributed  # noqa
 import vllm_ascend.patch.platform.patch_dp_supervisor  # noqa
+import vllm_ascend.patch.platform.patch_glm_moe_dsa_hnd  # noqa
 import vllm_ascend.patch.platform.patch_kimi_k31_config  # noqa
 import vllm_ascend.patch.platform.patch_kv_cache_admission  # noqa
 import vllm_ascend.patch.platform.patch_mamba_block_aligned_split  # noqa

@@ -85,6 +85,35 @@ def test_component_sizes_and_layout(monkeypatch, packed, scale_dtype, expected_s
     assert size == total
 
 
+@pytest.mark.parametrize(
+    "model_type,method,layout,packed,parts",
+    [
+        ("glm_moe_dsa", "dflash", "LBHNC", True, (16896,)),
+        ("glm_moe_dsa", "dflash", "LBHNC", False, (16384, 512)),
+        ("glm_moe_dsa", "dflash", "BLHNC", False, (16384, 512)),
+        ("glm_moe_dsa", "dspark", "LBHNC", False, (16384, 512)),
+        ("glm5_next", "dflash", "LBHNC", False, (16384, 512)),
+        ("other_model", "other_method", "LBHNC", True, (16896,)),
+    ],
+)
+def test_kvpp_indexer_page_layout(model_type, method, layout, packed, parts):
+    config = make_kvpp_config()
+    config.model_config.hf_text_config = SimpleNamespace(model_type=model_type)
+    config.cache_config = SimpleNamespace(kv_cache_layout=layout)
+    config.speculative_config = SimpleNamespace(method=method)
+    indexer = AscendSFAIndexerCacheSpec(
+        block_size=128,
+        num_kv_heads=1,
+        head_size=128,
+        dtype=torch.int8,
+        scale_dim=1,
+        scale_dtype=torch.float32,
+        cache_sparse_li_c8=True,
+        uses_packed_sfa_indexer_cache=packed,
+    )
+    assert placement.build_kvpp_buffer_sizes(config, {"idx": indexer}) == {"idx": parts}
+
+
 def test_unquantized_indexer_and_quantized_mla_sizes(monkeypatch):
     main, indexer = layer_name(11), indexer_name(11)
     layer = MLAAttention.__new__(MLAAttention)

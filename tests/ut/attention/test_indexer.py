@@ -621,10 +621,25 @@ def test_replicated_pcp_draft_invalidates_captured_padding_when_live_prefix_shri
 @pytest.mark.parametrize("c4", [False, True])
 @pytest.mark.parametrize("c8", [False, True])
 @pytest.mark.parametrize("replicas", [1, 4])
-def test_indexer_owner_reports_data_scale_and_replication(monkeypatch, c4, c8, replicas):
+@pytest.mark.parametrize(
+    "model_type,method,layout,disable_hybrid,packed",
+    [
+        ("glm_moe_dsa", "dflash", "HND", False, True),
+        ("glm_moe_dsa", "dflash", "LBHNC", False, True),
+        ("glm_moe_dsa", "dflash", "BLHNC", False, False),
+        ("glm_moe_dsa", "dflash", "LBHNC", True, False),
+        ("glm_moe_dsa", "dspark", "LBHNC", False, False),
+        ("other_model", "dflash", "LBHNC", False, False),
+    ],
+)
+def test_indexer_owner_reports_data_scale_and_replication(
+    monkeypatch, c4, c8, replicas, model_type, method, layout, disable_hybrid, packed
+):
     config = SimpleNamespace(
-        cache_config=SimpleNamespace(block_size=128, cache_dtype="auto"),
-        model_config=SimpleNamespace(dtype=torch.bfloat16),
+        cache_config=SimpleNamespace(block_size=128, cache_dtype="auto", kv_cache_layout=layout),
+        model_config=SimpleNamespace(dtype=torch.bfloat16, hf_text_config=SimpleNamespace(model_type=model_type)),
+        speculative_config=SimpleNamespace(method=method),
+        scheduler_config=SimpleNamespace(disable_hybrid_kv_cache_manager=disable_hybrid),
         parallel_config=SimpleNamespace(decode_context_parallel_size=replicas),
         compilation_config=SimpleNamespace(static_forward_context={}),
     )
@@ -650,6 +665,7 @@ def test_indexer_owner_reports_data_scale_and_replication(monkeypatch, c4, c8, r
     assert isinstance(spec, AscendSFAIndexerCacheSpec)
     assert spec.cache_role is source.cache_role and spec.is_draft
     assert spec.sfa_dcp_replicated_indexer_size == replicas
+    assert spec.uses_packed_sfa_indexer_cache is (c8 and packed)
     assert spec.scale_dim == (4 if c4 else 1 if c8 else 0)
     assert spec.head_size == (64 if c4 else 128)
     assert spec.page_size_bytes == replicas * 128 * (68 if c4 else 130 if c8 else 256)

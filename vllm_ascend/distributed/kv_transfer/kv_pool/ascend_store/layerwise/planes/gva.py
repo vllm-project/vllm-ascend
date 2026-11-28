@@ -79,6 +79,11 @@ class GvaDataPlane(LayerwiseDataPlane):
         repoints the partial key at a fresh one.
         """
         self._prepare_load_gvas(requests)
+        if getattr(self._worker, "use_kvpp", False):
+            # The final stage-local layer can belong to a different owner.
+            self._worker._current_layerwise_last_chunk_req_ids = {
+                req.req_id for req in requests if req.is_last_chunk and req.load_spec and req.load_spec.can_load
+            }
         self._alloc_gvas_for_save(requests)
         return {}
 
@@ -499,7 +504,9 @@ class GvaDataPlane(LayerwiseDataPlane):
         public_keys: dict[str, None] = {}
         restore_previous_step = worker.layerwise_offload and request.load_spec.layerwise_previous_step
         for group_id in range(worker.num_kv_cache_groups):
-            if group_id not in worker.cacheable_group_ids:
+            if group_id not in worker.cacheable_group_ids or (
+                getattr(worker, "use_kvpp", False) and not worker.group_num_layers.get(group_id)
+            ):
                 groups.append(_LoadGroup(np.zeros(0, dtype=np.int64), [], [], False, {}))
                 continue
             group_block_size = worker.grouped_block_size[group_id]
