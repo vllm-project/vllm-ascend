@@ -81,13 +81,11 @@ def test_get_metric_provider_returns_packaged_yaml(monkeypatch):
     assert provider.handler_module_prefixes == ("vllm_ascend.observability.ms_metrics.",)
     assert provider.config_paths == tuple(sorted(provider.config_paths))
     packaged_configs = {Path(path).name for path in provider.config_paths}
-    assert {
-        "base_metrics.yaml",
-        "eplb_metrics.yaml",
-        "kvpool_metrics.yaml",
-        "runtime_guard_metrics.yaml",
-        "schedule_execute_metrics.yaml",
-    } <= packaged_configs
+    # Derive the expectation from the source tree instead of a hardcoded list:
+    # every packaged config exists in the config directory and vice versa, so
+    # provider branches never edit this shared assertion.
+    expected_configs = {path.name for path in (_PACKAGE_ROOT / "config").glob("*.yaml")}
+    assert packaged_configs == expected_configs
     assert all(Path(path).is_file() for path in provider.config_paths)
     config = _load_all_provider_configs(provider.config_paths)
     # Assert per-file and namespace invariants instead of exact totals: every
@@ -159,18 +157,16 @@ def test_provider_yaml_custom_handlers_resolve(monkeypatch):
     package = ModuleType("vllm_ascend")
     package.__path__ = [str(_REPOSITORY_ROOT / "vllm_ascend")]
     monkeypatch.setitem(sys.modules, "vllm_ascend", package)
-    for module_name in (
+    # Purge the package and every feature submodule (derived from the tree, so
+    # new handler files need no edit here) before importing the package fresh.
+    module_names = [
         "vllm_ascend.observability",
         "vllm_ascend.observability.ms_metrics",
         "vllm_ascend.observability.ms_metrics.provider",
-        "vllm_ascend.observability.ms_metrics.handlers",
-        "vllm_ascend.observability.ms_metrics.handlers.common",
-        "vllm_ascend.observability.ms_metrics.handlers.eplb",
-        "vllm_ascend.observability.ms_metrics.handlers.kvpool",
-        "vllm_ascend.observability.ms_metrics.handlers.rl_lifecycle",
-        "vllm_ascend.observability.ms_metrics.handlers.runtime_guard",
-        "vllm_ascend.observability.ms_metrics.handlers.schedule_execute",
-    ):
+        _HANDLER_PACKAGE,
+    ]
+    module_names.extend(f"{_HANDLER_PACKAGE}.{path.stem}" for path in sorted((_PACKAGE_ROOT / "handlers").glob("*.py")))
+    for module_name in module_names:
         monkeypatch.delitem(sys.modules, module_name, raising=False)
 
     handler_module = __import__(_HANDLER_PACKAGE, fromlist=["__unused__"])
