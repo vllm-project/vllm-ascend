@@ -21,6 +21,10 @@ from typing import Any
 
 from vllm.distributed.parallel_state import get_pp_group, get_tp_group
 
+from vllm_ascend.logger import init_logger_ascend
+
+logger = init_logger_ascend(__name__)
+
 
 def anomaly_check_rank_skip_reason(runner: Any) -> str | None:
     """None if this rank may run detectors; otherwise a short skip reason.
@@ -108,29 +112,60 @@ def runner_pp_rank(runner: Any) -> int | str:
         return "?"
 
 
-def runner_cp_rank(runner: Any) -> int:
-    """Combined CP rank (``pcp_rank * dcp_size + dcp_rank``) when CP is on."""
+def runner_pcp_rank(runner: Any) -> int:
+    """PCP rank for dump path tags.
+
+    Ascend / upstream runners usually keep ``pcp_rank`` on ``pcp_manager``, not
+    on the runner itself. Reading only ``runner.pcp_rank`` collapses every PCP
+    row to ``0`` and collides dump dirs (``…_pcp0_…``).
+
+    Soft-fail still returns ``0`` when nothing usable is found, but if a
+    ``pcp_manager`` is bound and still yields no rank we ``warning_once`` so
+    the collision is visible (do not warn on a legitimate PCP rank of 0).
+    """
+    manager_present = False
     try:
-        dcp = int(getattr(runner, "dcp_rank", 0) or 0)
+        pcp_manager = getattr(runner, "pcp_manager", None)
+        if pcp_manager is not None:
+            manager_present = True
+            val = getattr(pcp_manager, "pcp_rank", None)
+            if val is not None:
+                return int(val)
     except Exception:
-        dcp = 0
+        manager_present = True
     try:
-        pcp = int(getattr(runner, "pcp_rank", 0) or 0)
+        rank = int(getattr(runner, "pcp_rank", 0) or 0)
     except Exception:
-        pcp = 0
+        rank = 0
+    if manager_present:
+        # Manager was the expected source but did not yield a rank; falling
+        # back to runner.pcp_rank (often 0) recreates the dir collision.
+        logger.warning_once(
+            "[runtime_guard] pcp_manager present but pcp_rank unresolved; "
+            "dump path falling back to pcp_rank=%s (may collide across PCP ranks)",
+            rank,
+        )
+    return rank
+
+
+def runner_dcp_rank(runner: Any) -> int:
+    """DCP rank for dump path tags (0 when DCP is off)."""
     try:
-        dcp_size = int(getattr(runner, "dcp_size", 1) or 1)
+        return int(getattr(runner, "dcp_rank", 0) or 0)
     except Exception:
-        dcp_size = 1
-    if dcp_size < 1:
-        dcp_size = 1
-    return int(pcp) * int(dcp_size) + int(dcp)
+        return 0
 
 
 def dump_rank_tag(runner: Any) -> str:
-    """Directory / report tag for this worker's KV shard (dp/tp/pp/cp)."""
+    """Directory / report tag for this worker's KV shard (dp/tp/pp/pcp/dcp).
+
+    PCP and DCP are separate fields so dump paths stay unique without folding
+    them into a single ``cp`` index (``pcp_rank * dcp_size + dcp_rank``).
+    """
     return (
-        f"dp{runner_dp_rank(runner)}_tp{runner_tp_rank(runner)}_pp{runner_pp_rank(runner)}_cp{runner_cp_rank(runner)}"
+        f"dp{runner_dp_rank(runner)}_tp{runner_tp_rank(runner)}_"
+        f"pp{runner_pp_rank(runner)}_pcp{runner_pcp_rank(runner)}_"
+        f"dcp{runner_dcp_rank(runner)}"
     )
 
 

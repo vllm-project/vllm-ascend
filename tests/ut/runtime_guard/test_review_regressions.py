@@ -2007,12 +2007,68 @@ def test_v25b_dump_rank_tag_uses_global_dp_rank(monkeypatch):
     assert rank_gate.runner_dp_rank(runner) == 1
     assert rank_gate.dump_rank_tag(runner).startswith("dp1_tp")
 
+
+def test_v25c_dump_rank_tag_reads_pcp_manager_rank(monkeypatch):
+    """PCP rank lives on pcp_manager; runner.pcp_rank is usually unset."""
+    import vllm_ascend.observability.runtime_guard.rank_gate as rank_gate
+
+    monkeypatch.setattr(
+        rank_gate,
+        "get_tp_group",
+        lambda: SimpleNamespace(rank_in_group=0, world_size=1),
+    )
+    monkeypatch.setattr(
+        rank_gate,
+        "get_pp_group",
+        lambda: SimpleNamespace(rank_in_group=0, is_last_rank=True),
+    )
+    runner = SimpleNamespace(
+        dp_rank=0,
+        dcp_rank=1,
+        dcp_size=2,
+        pcp_manager=SimpleNamespace(pcp_rank=3),
+    )
+    assert rank_gate.runner_pcp_rank(runner) == 3
+    assert rank_gate.runner_dcp_rank(runner) == 1
+    assert rank_gate.dump_rank_tag(runner) == "dp0_tp0_pp0_pcp3_dcp1"
+
     monkeypatch.setattr(rank_gate, "get_tp_group", lambda: SimpleNamespace(rank_in_group=0, world_size=2))
     runner0 = SimpleNamespace(use_async_scheduling=True, tp_rank=0, tp_size=2)
     assert rank_gate.anomaly_check_rank_skip_reason(runner0) is None
 
     monkeypatch.setattr(rank_gate, "get_pp_group", lambda: SimpleNamespace(is_last_rank=False))
     assert rank_gate.anomaly_check_rank_skip_reason(runner0) == "not last PP rank"
+
+
+def test_v25d_pcp_manager_without_rank_warns_once(monkeypatch):
+    """Manager present but no pcp_rank must not silently collide without a log."""
+    import vllm_ascend.observability.runtime_guard.rank_gate as rank_gate
+
+    calls: list[tuple] = []
+    monkeypatch.setattr(rank_gate.logger, "warning_once", lambda *a, **_k: calls.append(a))
+    monkeypatch.setattr(
+        rank_gate,
+        "get_tp_group",
+        lambda: SimpleNamespace(rank_in_group=0, world_size=1),
+    )
+    monkeypatch.setattr(
+        rank_gate,
+        "get_pp_group",
+        lambda: SimpleNamespace(rank_in_group=0, is_last_rank=True),
+    )
+
+    # Legitimate PCP rank 0 on the manager — no warning.
+    assert rank_gate.runner_pcp_rank(SimpleNamespace(pcp_manager=SimpleNamespace(pcp_rank=0))) == 0
+    assert calls == []
+
+    # Manager bound but attribute missing → soft-fail 0 + warning_once.
+    assert rank_gate.runner_pcp_rank(SimpleNamespace(pcp_manager=SimpleNamespace())) == 0
+    assert calls and "pcp_manager present but pcp_rank unresolved" in calls[0][0]
+
+    # PCP off (no manager) → 0 without warning.
+    calls.clear()
+    assert rank_gate.runner_pcp_rank(SimpleNamespace()) == 0
+    assert calls == []
 
 
 def test_v25b_manager_skips_when_gated(tmp_path, monkeypatch):

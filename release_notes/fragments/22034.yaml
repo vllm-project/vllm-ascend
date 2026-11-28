@@ -1,0 +1,14 @@
+pr: 22034
+entries:
+  - category: bugfix
+    text: >-
+      Fixed Runtime Guard `dump_kv` path tags under prefill context parallelism:
+      dumps now write one directory per PCP×DCP rank (`dp*_tp*_pp*_pcp*_dcp*`)
+      instead of collapsing every PCP rank into a single `..._cp0` folder and
+      overwriting shards.
+  - category: breaking
+    text: >-
+      Runtime Guard KV dump directory layout changed from `dp*_tp*_pp*_cp*` to
+      `dp*_tp*_pp*_pcp*_dcp*`, and each `.pt` payload now carries `pcp_rank` and
+      `dcp_rank` instead of the old composite `cp_rank`. Update any out-of-repo
+      dump parsers or collectors that matched the previous path or field name.
