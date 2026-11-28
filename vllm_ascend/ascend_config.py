@@ -279,18 +279,24 @@ class AscendWarmupConfig:
 
 @config
 class EplbConfig:
-    """Ascend extensions to the upstream Model Runner V2 EPLB configuration."""
+    """Ascend extensions to the upstream EPLB configuration."""
 
-    # Model Runner V2 only. Restricts which batch phase contributes to the
-    # upstream EPLB expert-load window; any prefill request marks the batch
-    # as prefill.
+    # Restricts which batch phase contributes to the upstream EPLB expert-load
+    # window; any prefill request marks the batch as prefill.
     load_collection_phase: str = "all"
     stair_config: StairConfig = dataclasses.field(default_factory=StairConfig)
+    expert_placement_path: str | None = None
 
     @model_validator(mode="after")
     def _validate_config(self):
         if self.load_collection_phase not in ["all", "prefill", "decode"]:
             raise ValueError('load_collection_phase must be one of ["all", "prefill", "decode"]')
+        if self.expert_placement_path is not None:
+            normalized = self.expert_placement_path.strip()
+            basename = os.path.basename(normalized)
+            if not normalized or not basename.endswith(".json") or basename == ".json" or os.path.isdir(normalized):
+                raise ValueError("eplb_config.expert_placement_path must point to a .json file")
+            self.expert_placement_path = normalized
 
         return self
 
