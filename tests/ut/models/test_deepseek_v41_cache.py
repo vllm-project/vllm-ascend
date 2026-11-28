@@ -1499,7 +1499,9 @@ def _cp_common():
     )
 
 
-def test_dspark_v41_indices_keep_capture_addresses(runtime):
+def test_dspark_v41_indices_keep_capture_addresses(runtime, monkeypatch):
+    from vllm_ascend.attention import dsa_v1
+
     runtime.speculative_config = SimpleNamespace(num_speculative_tokens=3)
     spec = AscendSlidingWindowMLASpec(
         block_size=128,
@@ -1511,6 +1513,22 @@ def test_dspark_v41_indices_keep_capture_addresses(runtime):
         model_version="deepseek_v41",
     )
     builder = AscendDSAV41MetadataBuilder(spec, [], runtime, torch.device("cpu"))
+    calls = []
+
+    def fake_triton(_bt, _spec, window_size, _bs, qsl, seq_lens, **kw):
+        n, w = kw["num_decode_tokens"], kw["index_width"]
+        indices_output, lens_output = kw["indices_output"], kw["lens_output"]
+        calls.append((kw["output_mode"], n, indices_output, lens_output))
+        q_lens = qsl[1:] - qsl[:-1]
+        start_pos = (seq_lens - q_lens - window_size).clamp(min=0)
+        vis = seq_lens - start_pos
+        cols = torch.arange(w, dtype=torch.int32)
+        slots = torch.where(cols[None, :] < vis[:, None], (start_pos[:, None] + cols[None, :]).to(torch.int32), -1)
+        indices_output[:n].copy_(torch.repeat_interleave(slots, q_lens, dim=0).unsqueeze(1))
+        lens_output[:n, 0].copy_(torch.repeat_interleave(vis, q_lens, dim=0).int())
+        return indices_output[:n], lens_output[:n]
+
+    monkeypatch.setattr(dsa_v1, "build_dspark_swa_indices_triton", fake_triton)
     common = _cp_common().replace(causal=False)
     first = builder.build_for_drafting(common, 1)
     indices_ptr = first.ori_sparse_indices.data_ptr()
@@ -1522,11 +1540,15 @@ def test_dspark_v41_indices_keep_capture_addresses(runtime):
         max_seq_len=260,
     )
     second = builder.build_for_drafting(common, 1)
+    assert calls == [
+        ("logical", 4, builder._dspark_swa_indices, builder._dspark_swa_lengths),
+        ("logical", 4, builder._dspark_swa_indices, builder._dspark_swa_lengths),
+    ]
     assert second.ori_sparse_indices.data_ptr() == indices_ptr
     assert second.ori_topk_length.data_ptr() == lengths_ptr
     assert not torch.equal(old_indices, second.ori_sparse_indices)
     assert second.ori_sparse_indices[0, 0, 0] == 129
-    assert first.ori_topk_length.tolist() == [131, 131, 131, 5]
+    assert first.ori_topk_length.tolist() == [[131], [131], [131], [5]]
 
 
 # --- SWA bounded replay: the read side's floor (vLLM #56227) ------------------

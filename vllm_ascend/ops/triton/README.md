@@ -90,7 +90,7 @@ configuration rather than the runner input or sampling interface.
 | [dcp/sfa_dcp_exchange.py](dcp/sfa_dcp_exchange.py) | Model/attention primitive or shared utility |
 | [dcp/sfa_dcp_merge.py](dcp/sfa_dcp_merge.py) | Model/attention primitive or shared utility |
 | [sharded_indexer.py](sharded_indexer.py) | DCP candidate transport and causal metadata |
-| [dspark_swa_indices.py](dspark_swa_indices.py) | Model/attention primitive or shared utility |
+| [dspark_swa_indices.py](dspark_swa_indices.py) | Unified DSpark SWA physical/logical index construction; see [operator documentation](docs/dspark_swa_indices.md). |
 | [engram_gate.py](engram_gate.py) | Model/attention primitive or shared utility |
 | [engram_hash.py](engram_hash.py) | Model/attention primitive or shared utility |
 | [engram_lookup.py](engram_lookup.py) | Model/attention primitive or shared utility |
@@ -161,7 +161,6 @@ configuration rather than the runner input or sampling interface.
 | [rope.py](rope.py) | Model/attention primitive or shared utility |
 | [sfa_indexer_store.py](sfa_indexer_store.py) | Indexer cache publication; see [operator documentation](docs/sfa_indexer_store.md). |
 | [sparse_index_remap.py](sparse_index_remap.py) | Model/attention primitive or shared utility |
-| [spec_decode/dspark_swa_indices.py](spec_decode/dspark_swa_indices.py) | Model attention indices |
 | [step5/fused_add_rms_norm.py](step5/fused_add_rms_norm.py) | Fused optional FP32 residual add, RMSNorm, and BF16 output cast. [Operator documentation](docs/fused_add_rms_norm_cast.md) |
 | [step5/fused_qknorm_rope.py](step5/fused_qknorm_rope.py) | Step5 fused QK RMSNorm + NeoX RoPE with V passthrough. [Operator documentation](docs/step5_fused_qknorm_rope.md) |
 | [step5/gated_scale.py](step5/gated_scale.py) | Step5 head-wise attention gate: sigmoid + broadcast multiply fused on the caller's offset-0 gate base. [Operator documentation](docs/step5_gated_scale.md) |

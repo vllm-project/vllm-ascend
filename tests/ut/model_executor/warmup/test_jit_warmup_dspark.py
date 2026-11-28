@@ -27,14 +27,29 @@ def test_single_key_pinned_by_deployment_config():
     assert key.block_size == 128
     assert key.index_w == 4608
     assert key.block_w == 1024
-    assert key.row_pow2 == 1024
+    assert key.bt_win_pow2 == 16
     assert key.q_pow2 == 4
+    assert key.use_logical_indices is False
+    assert key.lens_dtype == torch.int64
     # 1024 is divisible by 16: representative of the stride's div-16 class.
     assert key.bt_stride == 16
 
     inputs = ds._DSPARK_SWA_INDICES_KERNEL.warmup_inputs(key)
     assert inputs["out_slots"].shape == (1, 1, 4608)
+    assert inputs["out_lens"].shape == (1,)
     assert inputs["out_lens"].dtype == torch.int64
+    assert inputs["BT_WIN_POW2"] == 16
+    assert inputs["USE_LOGICAL_INDICES"] is False
+
+
+def test_logical_mode_key_and_warmup_inputs():
+    kw = dict(window_size=4096, block_size=1, index_width=4608, block_table_width=1, num_speculative_tokens=3)
+    (key,) = ds._DSPARK_SWA_INDICES_KERNEL.get_warmup_keys(**kw, output_mode=ds.OUTPUT_MODE_LOGICAL)
+    assert (key.block_size, key.bt_win_pow2, key.bt_stride, key.use_logical_indices) == (1, 1, 1, True)
+    assert key.lens_dtype == torch.int32
+    inputs = ds._DSPARK_SWA_INDICES_KERNEL.warmup_inputs(key)
+    assert inputs["out_lens"].shape == (1, 1) and inputs["out_lens"].dtype == torch.int32
+    assert inputs["USE_LOGICAL_INDICES"] is True
 
 
 def test_warmup_inputs_reproduce_pointer_specialization():
@@ -55,12 +70,12 @@ def test_warmup_inputs_reproduce_pointer_specialization():
 def test_register_respects_supported_gate_and_window():
     registry = make_registry(None)
 
-    # Unsupported geometry is refused even inside a window.
+    # Unsupported geometry (block_size <= 0) is refused even inside a window.
     with registry.activate():
         assert (
             ds.register_dspark_swa_indices_warmup(
                 window_size=4096,
-                block_size=100,
+                block_size=0,
                 index_width=4608,
                 block_table_width=1024,
                 num_speculative_tokens=3,
@@ -69,13 +84,14 @@ def test_register_respects_supported_gate_and_window():
         )
     assert len(registry) == 0
 
+    # Non-pow2 block size and wide block tables (> 8192) are now supported.
     with registry.activate():
         assert (
             ds.register_dspark_swa_indices_warmup(
                 window_size=4096,
-                block_size=128,
+                block_size=100,
                 index_width=4608,
-                block_table_width=1024,
+                block_table_width=16384,
                 num_speculative_tokens=3,
             )
             is True

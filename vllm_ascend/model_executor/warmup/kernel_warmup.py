@@ -74,7 +74,12 @@ def _register_dspark_swa_indices_warmup(worker: NPUWorker) -> int:
     if not hasattr(runner, "jit_warmup_registry"):
         return 0
 
-    from vllm_ascend.attention.dsa_v1 import AscendDSAMetadataBuilder
+    from vllm_ascend.attention.dsa_v1 import (
+        DSPARK_SWA_OUTPUT_MODE_LOGICAL,
+        AscendDSAMetadataBuilder,
+        _aligned_dspark_index_width,
+    )
+    from vllm_ascend.attention.dsa_v41 import AscendDSAV41MetadataBuilder
     from vllm_ascend.ops.triton.dspark_swa_indices import (
         register_dspark_swa_indices_warmup,
     )
@@ -83,6 +88,27 @@ def _register_dspark_swa_indices_warmup(worker: NPUWorker) -> int:
     with runner.jit_warmup_registry.activate():
         for adapter, attn_group in _iter_dspark_draft_groups(runner):
             builder = attn_group.get_metadata_builder()
+            if isinstance(builder, AscendDSAV41MetadataBuilder):
+                if not getattr(builder, "_supports_device_ops", False):
+                    continue
+                if getattr(builder, "_cache_kind", None) != "swa":
+                    continue
+                window_size = getattr(builder, "_window_size", 0)
+                spec_cfg = getattr(getattr(builder, "vllm_config", None), "speculative_config", None)
+                if window_size <= 0 or spec_cfg is None or getattr(spec_cfg, "method", None) != "dspark":
+                    continue
+                num_spec_tokens = int(spec_cfg.num_speculative_tokens)
+                registered += int(
+                    register_dspark_swa_indices_warmup(
+                        window_size=window_size,
+                        block_size=1,
+                        index_width=_aligned_dspark_index_width(window_size, num_spec_tokens),
+                        block_table_width=1,
+                        num_speculative_tokens=num_spec_tokens,
+                        output_mode=DSPARK_SWA_OUTPUT_MODE_LOGICAL,
+                    )
+                )
+                continue
             if not isinstance(builder, AscendDSAMetadataBuilder):
                 continue
             # Only the device-metadata (graph-capture) path needs pre-capture

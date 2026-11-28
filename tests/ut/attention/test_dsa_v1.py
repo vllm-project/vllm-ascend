@@ -31,6 +31,7 @@ from vllm_ascend.attention.context_parallel.dsa_cp import (
 )
 from vllm_ascend.attention.dsa_v1 import (
     _WO_A_SMALL_M_LIMIT,
+    DSPARK_SWA_OUTPUT_MODE_PHYSICAL,
     QLI_METADATA_BUFFER_SIZE,
     SAS_METADATA_BUFFER_SIZE,
     AscendDSABackend,
@@ -127,6 +128,24 @@ def test_build_vision_bidirectional_swa_indices_rejects_oversized_span():
         )
 
 
+def _dspark_swa_indices_ref(_bt, num_spec, window_size, _bs, qsl, seq_lens, **kw) -> tuple[torch.Tensor, torch.Tensor]:
+    eff_w = kw.get("index_width") or ((int(window_size) + int(num_spec) + 127) // 128) * 128
+    num_rows = int(kw["num_decode_tokens"]) if kw.get("num_decode_tokens") is not None else int(qsl[-1].item())
+    q_lens = qsl[1:] - qsl[:-1]
+    vis = seq_lens - (seq_lens - q_lens - int(window_size)).clamp(min=0)
+    cols = torch.arange(eff_w, device=seq_lens.device)
+    slot_ids = torch.where(cols[None, :] < vis[:, None], cols[None, :].to(torch.int32), -1)
+    repeats = q_lens.clone()
+    repeats[-1] += max(0, num_rows - int(qsl[-1].item()))
+    valid = torch.arange(num_rows, device=qsl.device) < int(qsl[-1].item())
+    slots = torch.repeat_interleave(slot_ids, repeats, dim=0, output_size=num_rows).unsqueeze(1)
+    slots = slots.masked_fill(~valid[:, None, None], -1)
+    if kw.get("indices_output") is not None:
+        kw["indices_output"][:num_rows].copy_(slots)
+        slots = kw["indices_output"][:num_rows]
+    return slots, torch.zeros((num_rows,), dtype=torch.int64, device=seq_lens.device)
+
+
 @pytest.mark.parametrize("output_arg", ["buffer", "indices_output"])
 @pytest.mark.parametrize(
     ("query_start_loc", "num_decode_tokens"),
@@ -136,32 +155,63 @@ def test_build_vision_bidirectional_swa_indices_rejects_oversized_span():
 def test_build_dspark_swa_indices_preserves_graph_padding(output_arg, query_start_loc, num_decode_tokens):
     output_rows = num_decode_tokens + 2 if output_arg == "buffer" else num_decode_tokens
     output = torch.full((output_rows, 1, 5), 99, dtype=torch.int32)
-    indices, lengths = build_dspark_swa_indices(
-        block_table=torch.tensor([[3, 5], [7, 8]], dtype=torch.int32),
-        num_speculative_tokens=3,
-        window_size=2,
-        block_size=4,
-        query_start_loc=torch.tensor(query_start_loc, dtype=torch.int32),
-        seq_lens=torch.tensor([6, 3], dtype=torch.int32),
-        num_decode_tokens=num_decode_tokens,
-        index_width=5,
-        **{output_arg: output},
-    )
-
-    active_rows = query_start_loc[-1]
-    expected_indices = torch.full((num_decode_tokens, 1, 5), -1, dtype=torch.int32)
-    expected_lengths = torch.zeros(num_decode_tokens, dtype=torch.int32)
-    if active_rows:
-        expected_indices[:3, 0] = torch.tensor(
-            [[14, 15, 20, 21, -1], [14, 15, 20, 21, -1], [28, 29, 30, -1, -1]], dtype=torch.int32
+    ref = _dspark_swa_indices_ref
+    with patch("vllm_ascend.attention.dsa_v1.build_dspark_swa_indices_triton", side_effect=ref) as m:
+        indices, lengths = build_dspark_swa_indices(
+            block_table=torch.tensor([[3, 5], [7, 8]], dtype=torch.int32),
+            num_speculative_tokens=3,
+            window_size=2,
+            block_size=4,
+            query_start_loc=torch.tensor(query_start_loc, dtype=torch.int32),
+            seq_lens=torch.tensor([6, 3], dtype=torch.int32),
+            num_decode_tokens=num_decode_tokens,
+            index_width=5,
+            **{output_arg: output},
         )
-        expected_lengths[:3] = torch.tensor([4, 4, 3], dtype=torch.int32)
 
-    torch.testing.assert_close(indices, expected_indices)
-    torch.testing.assert_close(lengths, expected_lengths)
+    m.assert_called_once()
+    kw = m.call_args.kwargs
+    assert kw["indices_output"] is output and kw["num_decode_tokens"] == num_decode_tokens
+    assert kw["index_width"] == 5 and kw["output_mode"] == DSPARK_SWA_OUTPUT_MODE_PHYSICAL
     assert indices.data_ptr() == output.data_ptr()
+    assert indices.shape == (num_decode_tokens, 1, 5) and lengths.shape == (num_decode_tokens,)
     if output_arg == "buffer":
         assert torch.all(output[num_decode_tokens:] == 99)
+
+
+def test_build_dspark_swa_indices_mode_validation_and_npu_dispatch():
+    qsl, seq_lens = torch.tensor([0, 4], dtype=torch.int32), torch.tensor([10], dtype=torch.int32)
+    bt, buf = torch.ones((1, 2), dtype=torch.int32), torch.empty((4, 1, 128), dtype=torch.int32)
+    for kw, msg in (
+        ({"output_mode": "invalid"}, "Unsupported DSpark SWA output_mode"),
+        ({"output_mode": "physical", "use_logical_indices": True}, "Conflicting DSpark SWA mode arguments"),
+        ({"indices_output": buf, "buffer": buf}, "cannot accept both indices_output and buffer"),
+    ):
+        with pytest.raises(ValueError, match=msg):
+            build_dspark_swa_indices(bt, 3, 4, 48, qsl, seq_lens, **kw)
+    lens_buf = torch.empty((12, 1), dtype=torch.int32)
+    sentinel = (torch.empty((4, 1, 128), dtype=torch.int32), torch.empty((4, 1), dtype=torch.int32))
+    call_kw: dict[str, Any] = {"num_decode_tokens": 4, "index_width": 128, "indices_output": buf}
+    call_kw |= {"lens_output": lens_buf, "max_num_reqs": 3, "num_query_per_req": 4, "output_mode": "logical"}
+    with patch("vllm_ascend.attention.dsa_v1.build_dspark_swa_indices_triton", return_value=sentinel) as m:
+        out = build_dspark_swa_indices(bt, 3, 16, 96, qsl, seq_lens, **call_kw)
+    assert out is sentinel and m.call_args.kwargs == call_kw
+    with patch("vllm_ascend.attention.dsa_v1.build_dspark_swa_indices_triton", None), pytest.raises(RuntimeError):
+        build_dspark_swa_indices(bt, 3, 16, 96, qsl, seq_lens, num_decode_tokens=4)
+
+
+def test_max_num_reqs_for_dspark_includes_fia_dummy_under_cudagraph():
+    config = _make_vllm_config(num_speculative_tokens=3)
+    config.compilation_config = SimpleNamespace(
+        cudagraph_mode=CUDAGraphMode.FULL_DECODE_ONLY,
+        cudagraph_capture_sizes=[8, 16],
+        max_cudagraph_capture_size=16,
+    )
+    with patch(f"{__name__}._make_vllm_config", return_value=config):
+        builder = _make_builder(compressor_ratio=1, num_speculative_tokens=3)
+    assert builder.max_num_reqs_for_dspark() == 17
+    assert builder.dspark_swa_indices_buffer is not None
+    assert builder.dspark_swa_indices_buffer.shape[0] == 17 * 4
 
 
 def _mock_dsa_kv_plan(**method_returns) -> MagicMock:
@@ -329,6 +379,10 @@ def test_draft_swa_and_sas_share_attention_task():
         ),
         patch.object(DeviceOperator, "get_dsa_decode_cu_seqlens_cmp_kv", return_value=None),
         patch("vllm_ascend.attention.dsa_v1.get_dsa_attn_kv_plan", return_value=plan),
+        patch(
+            "vllm_ascend.attention.dsa_v1.build_dspark_swa_indices_triton",
+            side_effect=_dspark_swa_indices_ref,
+        ) as triton_op,
     ):
         metadata = _build_draft_req_metadata(
             builder,
@@ -338,6 +392,7 @@ def test_draft_swa_and_sas_share_attention_task():
         )
         task = builder.take_device_metadata_tasks()
         metadata_op.assert_not_called()
+        triton_op.assert_not_called()
         assert metadata.dspark_swa_indices.data_ptr() == builder.dspark_swa_indices_buffer.data_ptr()
         assert task[0].stage == DeviceMetadataStage.ATTENTION
         assert task[0].group_id == id(metadata.sas_metadata)
@@ -355,6 +410,16 @@ def test_draft_swa_and_sas_share_attention_task():
         assert next_metadata.dspark_swa_indices.data_ptr() == metadata.dspark_swa_indices.data_ptr()
         next_task[0].run()
 
+    assert triton_op.call_count == 2
+    for call in triton_op.call_args_list:
+        kw = call.kwargs
+        assert kw["indices_output"] is builder.dspark_swa_indices_buffer
+        assert kw["lens_output"] is builder.dspark_lens_scratch
+        assert (kw["max_num_reqs"], kw["num_query_per_req"], kw["output_mode"]) == (
+            builder.max_num_reqs_for_dspark(),
+            builder.dspark_num_query_per_req(),
+            DSPARK_SWA_OUTPUT_MODE_PHYSICAL,
+        )
     assert metadata_op.call_count == 2
     assert not torch.equal(next_metadata.dspark_swa_indices, first_indices[:3])
     assert torch.equal(metadata.sas_metadata, sas_result)
@@ -733,6 +798,9 @@ def test_build_req_metadata_uses_execution_window_for_sas(deferred: bool, causal
     with (
         patch("vllm_ascend.attention.dsa_v1.get_dsa_attn_kv_plan", return_value=plan),
         patch("vllm_ascend.attention.dsa_v1.get_tensor_model_parallel_world_size", return_value=1),
+        patch(
+            "vllm_ascend.attention.dsa_v1.build_dspark_swa_indices_triton", side_effect=_dspark_swa_indices_ref
+        ) as triton_op,
     ):
         metadata = builder.build_req_metadata(
             common_attn_metadata=common,
@@ -753,6 +821,7 @@ def test_build_req_metadata_uses_execution_window_for_sas(deferred: bool, causal
     assert metadata_op.call_args.kwargs["ori_mask_mode"] == (4 if causal else 0)
     expected_visible = seq_len if causal else min(seq_len, 133)
     assert metadata_op.call_args.kwargs["seqused_kv"].tolist() == [expected_visible]
+    assert triton_op.call_count == (0 if causal else 1)
     if not causal:
         assert (metadata.dspark_swa_indices >= 0).sum(-1).tolist() == [[expected_visible]] * 5
 
@@ -771,7 +840,12 @@ def test_build_draft_req_metadata_plans_shared_visible_kv(deferred: bool, seq_le
         get_dsa_sparse_attn_metadata_op=metadata_op,
         get_dsa_sparse_attn_metadata_kwargs={},
     )
-    with patch("vllm_ascend.attention.dsa_v1.get_dsa_attn_kv_plan", return_value=plan):
+    with (
+        patch("vllm_ascend.attention.dsa_v1.get_dsa_attn_kv_plan", return_value=plan),
+        patch(
+            "vllm_ascend.attention.dsa_v1.build_dspark_swa_indices_triton", side_effect=_dspark_swa_indices_ref
+        ) as triton_op,
+    ):
         metadata = _build_draft_req_metadata(
             builder,
             torch.tensor([seq_len], dtype=torch.int32),
@@ -780,8 +854,12 @@ def test_build_draft_req_metadata_plans_shared_visible_kv(deferred: bool, seq_le
         )
         if deferred:
             metadata_op.assert_not_called()
+            triton_op.assert_not_called()
             for task in builder.take_device_metadata_tasks():
                 task.run()
+    triton_op.assert_called_once()
+    assert triton_op.call_args.kwargs["lens_output"] is (builder.dspark_lens_scratch if deferred else None)
+    assert triton_op.call_args.kwargs["output_mode"] == DSPARK_SWA_OUTPUT_MODE_PHYSICAL
     metadata_op.assert_called_once()
     expected_visible = min(seq_len, 133)
     assert metadata_op.call_args.kwargs["ori_mask_mode"] == 0
@@ -3065,6 +3143,9 @@ def test_dspark_compressed_tq_metadata_keeps_full_context(use_tq, ratio, deferre
         patch("vllm_ascend.attention.dsa_v1.get_tensor_model_parallel_world_size", return_value=1),
         patch("vllm_ascend.attention.dsa_v1.get_full_cos_and_sin_dsa", return_value=(None, None)),
         patch("vllm_ascend.attention.dsa_v1.build_compressor_metadata_out"),
+        patch(
+            "vllm_ascend.attention.dsa_v1.build_dspark_swa_indices_triton", side_effect=_dspark_swa_indices_ref
+        ) as triton_op,
     ):
         metadata = builder.build_req_metadata(
             common_attn_metadata=common,
@@ -3078,6 +3159,7 @@ def test_dspark_compressed_tq_metadata_keeps_full_context(use_tq, ratio, deferre
             for task in builder.take_device_metadata_tasks():
                 task.run()
     compressed_tq = use_tq and ratio > 1
+    assert triton_op.call_count == (0 if compressed_tq else 1)
     assert metadata_op.call_args.kwargs["seqused_kv"].tolist() == [261 if compressed_tq else 133]
     assert (metadata.dspark_swa_indices is None) == compressed_tq
     assert metadata.ori_win_left == (127 if compressed_tq else 132)
