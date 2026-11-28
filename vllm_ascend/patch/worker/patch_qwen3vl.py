@@ -108,7 +108,7 @@ patch_qwen3_vl_moe_pp_layer_range()
 
 
 if HAS_TRITON:
-    from vllm_ascend.ops.triton.qwen_prefill import vision_add_norm, vision_qk_rope
+    from vllm_ascend.ops.triton.qwen_prefill import vision_add_norm
 
     _original_vision_block = Qwen3_VisionBlock.forward
 
@@ -117,7 +117,6 @@ if HAS_TRITON:
     ):
         cos, sin = rotary_pos_emb_cos, rotary_pos_emb_sin
         attention = self.attn
-        heads = attention.num_attention_heads_per_partition
         dim = attention.hidden_size_per_attention_head
         if not (
             x.device.type == "npu"
@@ -144,18 +143,14 @@ if HAS_TRITON:
         ):
             return _original_vision_block(self, x, cu_seqlens, cos, sin, max_seqlen, sequence_lengths)
 
-        packed, _ = attention.qkv(self.norm1(x))
-        packed = packed.reshape(x.size(0), 3, heads, dim).contiguous()
-        q, k = vision_qk_rope(packed, cos, sin)
-        context = attention.attn(
-            query=q,
-            key=k,
-            value=packed[:, 2].unsqueeze(0),
+        projected = attention(
+            self.norm1(x),
             cu_seqlens=cu_seqlens,
+            rotary_pos_emb_cos=cos,
+            rotary_pos_emb_sin=sin,
             max_seqlen=max_seqlen,
             sequence_lengths=sequence_lengths,
         )
-        projected, _ = attention.proj(context.reshape(x.size(0), 1, heads * dim))
         residual, normalized = vision_add_norm(x, projected.contiguous(), self.norm2)
         return residual + self.mlp(normalized)
 

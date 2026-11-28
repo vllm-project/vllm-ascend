@@ -22,32 +22,6 @@ def split_packed_qkvz(src, qkv_width):
     return qkv, z
 
 
-@triton.jit
-def _vision_rope(src, cos, sin, dst, heads: tl.constexpr, dim: tl.constexpr, tokens, TILE: tl.constexpr):
-    token = tl.program_id(0).to(tl.int64)
-    plane = tl.program_id(1)
-    i = tl.arange(0, TILE)
-    half = dim // 2
-    mask = i < heads * half
-    lane = i % half
-    offset = (i // half) * dim + lane
-    x = src + ((token * 3 + plane) * heads * dim) + offset
-    y = dst + ((plane * tokens + token) * heads * dim) + offset
-    a = tl.load(x, mask, other=0).to(tl.float32)
-    b = tl.load(x + half, mask, other=0).to(tl.float32)
-    c = tl.load(cos + token * half + lane).to(tl.float32)
-    s = tl.load(sin + token * half + lane).to(tl.float32)
-    tl.store(y, a * c - b * s, mask)
-    tl.store(y + half, b * c + a * s, mask)
-
-
-def vision_qk_rope(qkv, cos, sin):
-    tokens, _, heads, dim = qkv.shape
-    out = torch.empty((2, 1, tokens, heads, dim), device=qkv.device, dtype=qkv.dtype)
-    _vision_rope[(tokens, 2)](qkv, cos, sin, out, heads, dim, tokens, triton.next_power_of_2(heads * dim // 2))
-    return out.unbind(0)
-
-
 def vision_add_norm(x, attn, norm):
     normalized, _, _, residual = torch.ops.npu.npu_add_layer_norm(
         x, attn, norm.weight, norm.bias, epsilon=norm.eps, additional_output=True

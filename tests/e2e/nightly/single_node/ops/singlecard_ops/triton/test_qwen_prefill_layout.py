@@ -3,7 +3,7 @@ import pytest
 import torch
 
 from vllm_ascend.ops.triton.linearnorm.split_qkv_rmsnorm_mrope import triton_split_qkv_rmsnorm_mrope
-from vllm_ascend.ops.triton.qwen_prefill import split_packed_qkvz, vision_add_norm, vision_qk_rope
+from vllm_ascend.ops.triton.qwen_prefill import split_packed_qkvz, vision_add_norm
 from vllm_ascend.ops.triton.triton_utils import init_device_properties_triton
 
 
@@ -13,17 +13,6 @@ def test_gdn_split():
     assert qkv.is_contiguous() and z.is_contiguous()
     assert torch.equal(qkv, packed[:, :8192])
     assert torch.equal(z, packed[:, 8192:])
-
-
-def test_vision_prefill():
-    params = dict(device="npu", dtype=torch.bfloat16)
-    packed = torch.randn(11, 3, 16, 72, **params)
-    cos, sin = torch.randn(2, 11, 36, **params).unbind()
-    for i, result in enumerate(vision_qk_rope(packed, cos, sin)):
-        left, right = packed[:, i].float().chunk(2, dim=-1)
-        c, s = cos[:, None].float(), sin[:, None].float()
-        ref = torch.cat((left * c - right * s, right * c + left * s), dim=-1)
-        torch.testing.assert_close(result[0], ref.bfloat16(), atol=0.03125, rtol=0.01)
 
 
 @pytest.mark.parametrize("tokens", [11, 20048, 37836])
