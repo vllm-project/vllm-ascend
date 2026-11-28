@@ -90,6 +90,20 @@ The following table lists additional configuration options available in vLLM Asc
 
 The details of each configuration option are as follows:
 
+<span id="a3_megamoe"></span>**MegaMoE on A3**
+
+`enable_fused_mc2=2` selects CANN MegaMoE when the operator package and the
+remaining model and expert-parallel checks pass. The A3 configuration check
+accepts expert intermediate widths in `[512, 3072]`, aligned to 128. This
+includes width 640 with a compatible A3 operator package that supports
+128-element tails. The A5 configuration range remains `[256, 4096]`, aligned
+to 128.
+
+Install and load the compatible A3 `cann_ops_transformer` package before
+starting the service. Package importability does not verify its supported
+shapes; this configuration check does not detect or upgrade an older operator
+package. Confirm the package's shape support before enabling MegaMoE.
+
 <span id="runtime_guard"></span>**runtime_guard**
 
 Runtime Guard provides online anomaly detection, structured incident reports, and optional native KV cache dump. See the [Runtime Guard feature guide](../feature_guide/runtime_guard.md) for usage and the [runtime_config reference](./runtime_config.md) for JSON fields.
