@@ -123,6 +123,7 @@ vLLM-Ascend exposes the following Ascend-specific weight-transfer backends:
 | --- | --- | --- |
 | `ipc` | Trainer and rollout engine use the same physical NPU | NPU IPC handles |
 | `hccl` | Trainer and rollout engine use separate NPUs | HCCL collectives |
+| `hccl_m2n` | Redistribute training shards to a different rollout layout on separate NPUs | HCCL batched point-to-point |
 | `sparse_hccl` | Replace selected checkpoint weight values on separate NPUs | HCCL collectives |
 
 The table describes transport choices. Sparse transfer requires the trainer and
@@ -217,6 +218,74 @@ For packed IPC on shared NPUs, size the trainer's `packed_buffer_size_bytes`
 to fit the largest checkpoint tensor. Leave additional NPU memory for the
 trainer to stage an input tensor. If memory is tight, use unpacked IPC or move
 the trainer to a separate NPU and use HCCL.
+
+#### HCCL M2N
+
+Select `--weight-transfer-config '{"backend": "hccl_m2n"}'` and enable RL
+mode. On the trainer, load the Ascend general plugins before creating the
+transfer engine. Every trainer rank initializes the engine and calls
+`send_weights()`. Trainer rank 0 drives the inference RPCs.
+
+```python
+from vllm.distributed.weight_transfer import (
+    HTTPVLLMWeightSyncClient,
+    ModuleSource,
+    WeightTransferTrainerFactory,
+)
+from vllm.plugins import load_general_plugins
+
+from vllm_ascend.distributed.weight_transfer.hccl_m2n_engine import (
+    HCCLM2NTrainerInitInfo,
+)
+
+load_general_plugins()
+engine = WeightTransferTrainerFactory.trainer_init(
+    init_info=HCCLM2NTrainerInitInfo(
+        master_address=trainer_master_address,
+        master_port=transfer_port,
+        rank=trainer_rank,
+        num_trainer_ranks=num_trainers,
+        world_size=num_trainers + rollout_dp * rollout_tp,
+        dst_mesh_dims=(rollout_dp, rollout_tp),
+    ),
+    client=HTTPVLLMWeightSyncClient(rollout_url),
+    source=ModuleSource(training_model),
+)
+
+# Call on every trainer rank while rollout generation is paused.
+engine.send_weights()
+```
+
+The implementation supports ND weights across the dtypes supported by both
+upstream M2N and HCCL (such as FP16, BF16, FP32, FP64, INT8, UINT8, INT32, and
+INT64), following the upstream M2N layout rules for uniformly sharded tensors
+of up to three dimensions. Use disjoint trainer and rollout NPUs and a CANN
+build with `HcclBatchSendRecv` support. The trainer and rollout must use the
+same parameter names and checkpoint semantics.
+
+Workers use upstream destination resolution to select eligible direct targets
+automatically for dense, unquantized TP/DP rollouts. Remaining weights—as well
+as PP, MoE, quantized, or sleep-mode rollouts—are reconstructed and passed
+through the model loader. Modules with precomputed FP32 weight copies or a
+direct target that fails the NPU ND format check fall back to the loader at
+module granularity without forcing unrelated modules off the direct path. Set
+`direct_write=False` in `HCCLM2NTrainerInitInfo` to use the loader for all
+parameters.
+
+Set `packed_buffer_size_bytes=128 * 1024 * 1024` in
+`HCCLM2NTrainerInitInfo` to enable experimental cross-parameter batching.
+The limit is based on logical checkpoint bytes per batch and merges consecutive
+parameters across dtypes into aligned `uint8` per-peer buffers. A parameter
+larger than the limit uses the single-parameter path. All trainer ranks must
+use the same settings. Keep the contents of each tensor yielded by
+`iter_local()` unchanged until `send_weights()` returns when using batching.
+
+Packed transfer uses PyTorch `copy_()` to pack and unpack weight slices in
+per-peer staging buffers. It works with both direct and loader destinations.
+The default `packed_buffer_size_bytes=0` uses single-parameter transfers.
+
+After an update failure, restart the affected trainer and rollout session
+before resuming generation. A partial update may already have changed weights.
 
 #### Sparse HCCL
 

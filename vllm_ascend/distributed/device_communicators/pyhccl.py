@@ -16,6 +16,9 @@
 #
 
 
+from collections.abc import Sequence
+from enum import IntEnum
+
 import torch
 import torch.distributed as dist
 from torch.distributed import ProcessGroup, ReduceOp
@@ -24,6 +27,7 @@ from vllm.logger import logger
 
 from vllm_ascend.distributed.device_communicators.pyhccl_wrapper import (
     HCCLLibrary,
+    HcclSendRecvItem,
     aclrtStream_t,
     buffer_type,
     hcclComm_t,
@@ -32,6 +36,11 @@ from vllm_ascend.distributed.device_communicators.pyhccl_wrapper import (
     hcclUniqueId,
 )
 from vllm_ascend.utils import current_stream
+
+
+class HcclSendRecvType(IntEnum):
+    SEND = 0
+    RECV = 1
 
 
 class PyHcclCommunicator:
@@ -183,3 +192,28 @@ class PyHcclCommunicator:
             self.comm,
             aclrtStream_t(stream.npu_stream),
         )
+
+    def batch_send_recv(
+        self,
+        buffers: Sequence[tuple[int, torch.Tensor]],
+        *,
+        send: bool,
+        stream: "torch.npu.Stream",
+    ) -> None:
+        """Enqueue one contiguous buffer per peer. The caller owns buffer lifetime."""
+        if not self.available or self.disabled:
+            raise RuntimeError("HCCL communicator is unavailable")
+        op = HcclSendRecvType.SEND if send else HcclSendRecvType.RECV
+        items = []
+        peers = set()
+        for peer, tensor in buffers:
+            if not 0 <= peer < self.world_size or peer == self.rank or peer in peers:
+                raise ValueError(f"Invalid or duplicate HCCL peer rank: {peer}")
+            if tensor.device != self.device or not tensor.is_contiguous() or tensor.numel() == 0:
+                raise ValueError("HCCL P2P buffers must be nonempty contiguous tensors on the communicator device")
+            peers.add(peer)
+            items.append(
+                HcclSendRecvItem(op, tensor.data_ptr(), tensor.numel(), hcclDataTypeEnum.from_torch(tensor.dtype), peer)
+            )
+        if items:
+            self.hccl.hcclBatchSendRecv(items, self.comm, aclrtStream_t(stream.npu_stream))
