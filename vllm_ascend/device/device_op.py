@@ -1078,8 +1078,22 @@ class BaseDeviceAdaptor:
         return output, final_state
 
     @staticmethod
-    def fused_gdn_gating(A_log: torch.Tensor, a: torch.Tensor, b: torch.Tensor, dt_bias: torch.Tensor):
-        return fused_gdn_gating_patch(A_log, a, b, dt_bias)
+    def fused_gdn_gating(
+        A_log: torch.Tensor,
+        a: torch.Tensor,
+        b: torch.Tensor,
+        dt_bias: torch.Tensor,
+        output_head_major: bool = False,
+        output_raw_beta: bool = False,
+    ):
+        return fused_gdn_gating_patch(
+            A_log,
+            a,
+            b,
+            dt_bias,
+            output_head_major=output_head_major,
+            output_raw_beta=output_raw_beta,
+        )
 
     @staticmethod
     def split_qkv_rmsnorm_rope(
@@ -2140,6 +2154,9 @@ class A5DeviceAdaptor(BaseDeviceAdaptor):
             use_exp2=use_exp2,
             use_qk_l2norm_in_kernel=True,
             use_beta_sigmoid_in_kernel=use_chunk32,
+            # Inference consumes only output and final_state. Avoid exporting
+            # beta_eff, which otherwise adds a BHT -> BTH transpose per layer.
+            output_beta_eff=False,
             allow_neg_eigval=False,
             disable_recompute=disable_recompute,
             state_v_first=True,
@@ -2151,8 +2168,22 @@ class A5DeviceAdaptor(BaseDeviceAdaptor):
         return output, final_state
 
     @staticmethod
-    def fused_gdn_gating(A_log: torch.Tensor, a: torch.Tensor, b: torch.Tensor, dt_bias: torch.Tensor):
-        return fused_gdn_gating_patch(A_log, a, b, dt_bias)
+    def fused_gdn_gating(
+        A_log: torch.Tensor,
+        a: torch.Tensor,
+        b: torch.Tensor,
+        dt_bias: torch.Tensor,
+        output_head_major: bool = False,
+        output_raw_beta: bool = False,
+    ):
+        return fused_gdn_gating_patch(
+            A_log,
+            a,
+            b,
+            dt_bias,
+            output_head_major=output_head_major,
+            output_raw_beta=output_raw_beta,
+        )
 
     @staticmethod
     def split_qkv_rmsnorm_rope(

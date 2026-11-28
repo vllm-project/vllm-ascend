@@ -191,6 +191,29 @@ def test_RMSNormGated_forwards_activation(default_vllm_config, activation):
     assert apply.call_args.args[-1] == activation
 
 
+def test_RMSNormGated_writes_directly_to_output(default_vllm_config):
+    layer = AscendRMSNormGated(
+        hidden_size=8,
+        eps=1e-6,
+        norm_before_gate=True,
+        activation="sigmoid",
+    )
+    x = torch.randn(2, 3, 8)
+    z = torch.randn_like(x)
+    out = torch.empty_like(x)
+    rstd = torch.ones(6)
+
+    with patch(
+        "vllm_ascend.ops.layernorm.layer_norm_fwd_npu",
+        return_value=(out.view(-1, 8), None, rstd),
+    ) as npu_kernel:
+        actual = layer.forward_oot(x, z, out=out)
+
+    assert actual.data_ptr() == out.data_ptr()
+    assert npu_kernel.call_args.kwargs["out"].data_ptr() == out.data_ptr()
+    assert npu_kernel.call_args.kwargs["activation"] == "sigmoid"
+
+
 def test_LayerNormFn_forwards_sigmoid_to_npu_kernel(default_vllm_config):
     x = torch.randn(2, 8)
     z = torch.randn_like(x)

@@ -59,3 +59,33 @@ def test_ple_construction_and_registration(monkeypatch, dp, pcp, expected):
     assert calls == expected
     assert registry[prefix] is backbone.layers[0].ple
     assert backbone.layers[1].ple is None
+
+
+def test_qwen4_exp_prepares_causal_conv_indices_once(monkeypatch):
+    text = SimpleNamespace(linear_num_key_heads=16, linear_num_value_heads=24)
+    config = SimpleNamespace(
+        model_config=SimpleNamespace(hf_text_config=text),
+        parallel_config=SimpleNamespace(
+            use_ubatching=False,
+            data_parallel_size=1,
+            prefill_context_parallel_size=1,
+            tensor_parallel_size=1,
+            decode_context_parallel_size=1,
+        ),
+        compilation_config=SimpleNamespace(static_forward_context={}),
+    )
+    linear_attn = SimpleNamespace()
+
+    def init_decoder(self, *, vllm_config, prefix):
+        torch.nn.Module.__init__(self)
+        self.config = text
+        self.layers = [
+            SimpleNamespace(linear_attn=linear_attn, ple=None),
+            SimpleNamespace(ple=None),
+        ]
+        self.start_layer, self.end_layer = 0, len(self.layers)
+
+    monkeypatch.setattr(model.AscendQwen4ExpModel.__bases__[0], "__init__", init_decoder)
+    model.AscendQwen4ExpModel(vllm_config=config, prefix="model")
+
+    assert linear_attn.use_contiguous_conv_indices is True

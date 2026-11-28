@@ -39,6 +39,12 @@ def qsa_select_paged_tokens_lightning_v2(
     token_topk: int,
     compress_ratio: int,
     out: torch.Tensor | None = None,
+    *,
+    main_key: torch.Tensor | None = None,
+    main_value: torch.Tensor | None = None,
+    main_key_cache: torch.Tensor | None = None,
+    main_value_cache: torch.Tensor | None = None,
+    main_slot_mapping: torch.Tensor | None = None,
 ) -> torch.Tensor:
     """Select QSA groups with native request-batched LightningIndexerV2.
 
@@ -72,6 +78,10 @@ def qsa_select_paged_tokens_lightning_v2(
     output_width = token_topk + compress_ratio - 1
     if out is None:
         out = torch.empty((rows, output_width), dtype=torch.int32, device=query.device)
+    # Packing only writes the entries that are visible for each query row.
+    # Reset the rest before every real selection so stale/empty values cannot
+    # be interpreted as GBSA block indices.  MTP reuse bypasses this function
+    # through ``skip_topk`` and therefore keeps the step-0 selection intact.
     out.fill_(-1)
     if not rows:
         return out
@@ -82,10 +92,20 @@ def qsa_select_paged_tokens_lightning_v2(
     # Metadata uses original-token lengths. Only request-sized arrays are
     # materialized; there is no token-wise length or page-table gather.
     lengths = attn_metadata.seq_lens[:requests]
-    compressed_lengths = lengths.floor_divide(compress_ratio)
-    residual_lengths = lengths.remainder(compress_ratio)
+    compressed_lengths = getattr(attn_metadata, "qsa_compressed_lengths", None)
+    residual_lengths = getattr(attn_metadata, "qsa_residual_lengths", None)
+    cu_seqlens_q = getattr(attn_metadata, "qsa_cu_seqlens_q", None)
+    prepared_rows = int(getattr(attn_metadata, "qsa_num_live_tokens", attn_metadata.num_actual_tokens))
+    if compressed_lengths is None or residual_lengths is None or cu_seqlens_q is None or rows != prepared_rows:
+        compressed_lengths = lengths.floor_divide(compress_ratio)
+        residual_lengths = lengths.remainder(compress_ratio)
+        cu_seqlens_q = attn_metadata.query_start_loc[: requests + 1].clamp_max(rows)
+    else:
+        compressed_lengths = compressed_lengths[:requests]
+        residual_lengths = residual_lengths[:requests]
+        cu_seqlens_q = cu_seqlens_q[: requests + 1]
     common = dict(
-        cu_seqlens_q=attn_metadata.query_start_loc[: requests + 1].clamp_max(rows),
+        cu_seqlens_q=cu_seqlens_q,
         seqused_k=compressed_lengths,
         cmp_residual_k=residual_lengths,
         layout_q="TND",
@@ -97,7 +117,7 @@ def qsa_select_paged_tokens_lightning_v2(
     # MRV2 prepares one schedule outside the layer loop. A caller that trims
     # the query further must regenerate it for the new boundary instead.
     metadata = getattr(attn_metadata, "qsa_lightning_v2_metadata", None)
-    if metadata is None or rows != attn_metadata.num_actual_tokens:
+    if metadata is None or rows != prepared_rows:
         metadata = torch.ops.cann_ops_transformer.lightning_indexer_metadata(
             query.shape[1],
             1,
@@ -112,12 +132,16 @@ def qsa_select_paged_tokens_lightning_v2(
         round(math.ldexp(1.0 / math.sqrt(_HEAD_DIM), _LI_V2_WEIGHT_FRACTION_BITS)),
         -_LI_V2_WEIGHT_FRACTION_BITS,
     )
-    weights = torch.full(
-        (rows, query.shape[1]),
-        score_weight,
-        dtype=torch.float32,
-        device=query.device,
-    )
+    weights = getattr(attn_metadata, "qsa_score_weights", None)
+    if weights is None:
+        weights = torch.full(
+            (rows, query.shape[1]),
+            score_weight,
+            dtype=torch.float32,
+            device=query.device,
+        )
+    else:
+        weights = weights[:rows, : query.shape[1]]
     groups, _ = torch.ops.cann_ops_transformer.lightning_indexer(
         query,
         compressed_key_cache,
@@ -129,7 +153,7 @@ def qsa_select_paged_tokens_lightning_v2(
         **common,
     )
     packed_width = block_topk + compress_ratio - 1
-    pack_qsa_group_indices_npu(
+    pack_args = (
         groups.squeeze(1),
         attn_metadata.logical_positions[:rows],
         lengths,
@@ -138,4 +162,15 @@ def qsa_select_paged_tokens_lightning_v2(
         token_topk,
         out[:rows, :packed_width],
     )
+    if main_key is None:
+        pack_qsa_group_indices_npu(*pack_args)
+    else:
+        pack_qsa_group_indices_npu(
+            *pack_args,
+            key=main_key,
+            value=main_value,
+            key_cache=main_key_cache,
+            value_cache=main_value_cache,
+            slot_mapping=main_slot_mapping,
+        )
     return out

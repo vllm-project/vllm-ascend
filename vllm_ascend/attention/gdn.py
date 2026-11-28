@@ -34,6 +34,7 @@ from vllm.model_executor.utils import replace_parameter
 from vllm.third_party.flash_linear_attention.ops.fused_recurrent import fused_recurrent_gated_delta_rule
 from vllm.third_party.flash_linear_attention.ops.l2norm import l2norm_fwd
 from vllm.triton_utils import triton
+from vllm.utils.torch_utils import direct_register_custom_op
 from vllm.v1.attention.backend import AttentionBackend, AttentionMetadata  # type: ignore
 from vllm.v1.attention.backends.gdn_attn import GDNAttentionMetadata
 from vllm.v1.attention.backends.utils import PAD_SLOT_ID
@@ -52,6 +53,7 @@ from vllm_ascend.device.hardware_profile import (
 from vllm_ascend.distributed.kv_transfer.kv_pool.ascend_store.attention_fence import record_attention_compute_start
 from vllm_ascend.ops.gdn_checkpoint import ensure_gdn_checkpoint_workspace, run_gdn_checkpoint_prefill
 from vllm_ascend.ops.triton.fla.chunk import chunk_gated_delta_rule
+from vllm_ascend.ops.triton.fla.fused_gdn_prepare import fused_gdn_prepare
 from vllm_ascend.ops.triton.fla.fused_qkvzba_split_reshape import fused_qkvzba_split_reshape_cat
 from vllm_ascend.ops.triton.fla.utils import clear_ssm_states
 from vllm_ascend.ops.triton.gdn.gdn_recoverssm_verify import gdn_recoverssm_verify
@@ -255,8 +257,28 @@ def _split_head_first_conv_output(
     Keep the common attention interface [1, T, H, D] for mixed batches,
     the A5 BSND kernel, and fallback backends. These are views, not copies.
     """
-    q, k, v = output.split((num_k_heads, num_k_heads, num_v_heads), dim=0)
-    return tuple(part.transpose(0, 1).unsqueeze(0) for part in (q, k, v))
+    total_heads = 2 * num_k_heads + num_v_heads
+    if output.ndim != 3 or output.shape[0] != total_heads:
+        raise ValueError(f"Expected convolution output [{total_heads}, T, D], got {tuple(output.shape)}")
+
+    # ``torch.split`` lowers to three Slice kernels on NPU.  These outputs
+    # only alias contiguous head ranges, so expose them as storage views.
+    stride = output.stride()
+    base_offset = output.storage_offset()
+
+    def head_view(start: int, count: int) -> torch.Tensor:
+        part = output.as_strided(
+            (count, output.shape[1], output.shape[2]),
+            stride,
+            base_offset + start * stride[0],
+        )
+        return part.transpose(0, 1).unsqueeze(0)
+
+    return (
+        head_view(0, num_k_heads),
+        head_view(num_k_heads, num_k_heads),
+        head_view(2 * num_k_heads, num_v_heads),
+    )
 
 
 def _rearrange_decode_qkv(
@@ -459,6 +481,9 @@ class AscendGatedDeltaNetAttention(GatedDeltaNetAttention):
         if pcp_group is not None:
             hidden_states = torch.ops.vllm.pcp_gather_tokens(hidden_states, pcp_group.world_size, self.prefix)
         num_tokens = hidden_states.size(0)
+        core_attn_out = None
+        packed_qkvz = None
+        packed_ba = None
         if hasattr(self, "in_proj_qkv"):
             mixed_qkv, _ = self.in_proj_qkv(hidden_states)
             ba, _ = self.in_proj_ba(hidden_states)
@@ -469,17 +494,9 @@ class AscendGatedDeltaNetAttention(GatedDeltaNetAttention):
             a = a.contiguous()
         else:
             if not self.gqa_interleaved_layout:
-                mixed_qkvz, _ = self.in_proj_qkvz(hidden_states)
-                num_tokens = mixed_qkvz.size(0)
-                qkv_size = (self.key_dim * 2 + self.value_dim) // self.tp_size
-                z_size = self.value_dim // self.tp_size
-                mixed_qkv, z = mixed_qkvz.split([qkv_size, z_size], dim=-1)
-                z = z.reshape(z.size(0), -1, self.head_v_dim)
-                ba, _ = self.in_proj_ba(hidden_states)
-                b, a = self._split_ba_for_tp(ba)
-
-                b = b.contiguous()
-                a = a.contiguous()
+                packed_qkvz, _ = self.in_proj_qkvz(hidden_states)
+                packed_ba, _ = self.in_proj_ba(hidden_states)
+                num_tokens = packed_qkvz.size(0)
             else:
                 projected_states_qkvz, _ = self.in_proj_qkvz(hidden_states)
                 projected_states_ba, _ = self.in_proj_ba(hidden_states)
@@ -497,32 +514,47 @@ class AscendGatedDeltaNetAttention(GatedDeltaNetAttention):
         # ============================================================
         # Part 2: Core Attention (Custom Op)
         # ============================================================
-        # Note: we should not use torch.empty here like other attention backends,
-        # see discussions in https://github.com/vllm-project/vllm/pull/28182
-        core_attn_out = torch.zeros(
-            (num_tokens, self.num_v_heads // self.tp_size, self.head_v_dim),
-            dtype=hidden_states.dtype,
-            device=hidden_states.device,
-        )
-
-        torch.ops.vllm.qwen_gdn_attention_core(
-            mixed_qkv,
-            b,
-            a,
-            core_attn_out,
-            self.prefix,
-            False,
-        )
+        if packed_qkvz is not None:
+            assert packed_ba is not None
+            # The packed custom op initializes every row in this buffer before
+            # recurrent GDN writes the live rows, so graph padding remains
+            # deterministic without a separate zero-fill launch.
+            core_attn_out = torch.empty(
+                (num_tokens, self.num_v_heads // self.tp_size, self.head_v_dim),
+                dtype=hidden_states.dtype,
+                device=hidden_states.device,
+            )
+            torch.ops.vllm.qwen_gdn_packed_attention_core_norm_with_output(
+                packed_qkvz,
+                packed_ba,
+                core_attn_out,
+                self.prefix,
+                False,
+            )
+        else:
+            core_attn_out = torch.zeros(
+                (num_tokens, self.num_v_heads // self.tp_size, self.head_v_dim),
+                dtype=hidden_states.dtype,
+                device=hidden_states.device,
+            )
+            torch.ops.vllm.qwen_gdn_attention_core_norm_with_output(
+                mixed_qkv,
+                b,
+                a,
+                z,
+                core_attn_out,
+                self.prefix,
+                False,
+            )
 
         # ============================================================
         # Part 3: Output Projection
         # ============================================================
-        z_shape_og = z.shape
-        # Reshape input data into 2D tensor
-        core_attn_out = core_attn_out.reshape(-1, core_attn_out.shape[-1])
-        z = z.reshape(-1, z.shape[-1])
-        core_attn_out = self.norm(core_attn_out, z)
-        core_attn_out = core_attn_out.reshape(z_shape_og)
+        core_attn_out = core_attn_out.reshape(
+            num_tokens,
+            self.num_v_heads // self.tp_size,
+            self.head_v_dim,
+        )
         core_attn_out = rearrange(core_attn_out, "... h d -> ... (h d)")
         out, _ = self.out_proj(core_attn_out)
         if pcp_group is not None:
@@ -537,6 +569,7 @@ class AscendGatedDeltaNetAttention(GatedDeltaNetAttention):
         b: torch.Tensor,
         a: torch.Tensor,
         core_attn_out: torch.Tensor,
+        z: torch.Tensor | None = None,
     ):
         """
         Core attention computation (called by custom op).
@@ -787,6 +820,15 @@ class AscendGatedDeltaNetAttention(GatedDeltaNetAttention):
         has_non_spec_tokens = attn_metadata.num_prefills > 0 or attn_metadata.num_decodes > 0
         is_mixed_batch = has_spec_decode and has_non_spec_tokens
 
+        if has_spec_decode:
+            if is_mixed_batch:
+                a_non_spec = a.index_select(0, non_spec_token_indx)
+                b_non_spec = b.index_select(0, non_spec_token_indx)
+            else:
+                a_non_spec = b_non_spec = None
+        else:
+            a_non_spec, b_non_spec = a, b
+
         a_spec = b_spec = None
         g_spec = beta_spec = None
         g_non_spec = beta_non_spec = None
@@ -803,7 +845,7 @@ class AscendGatedDeltaNetAttention(GatedDeltaNetAttention):
                     b.index_select(0, non_spec_token_indx),
                     self.dt_bias,
                 )
-        else:
+        elif has_spec_decode or attn_metadata.num_decodes > 0:
             g, beta = DeviceOperator.fused_gdn_gating(self.A_log, a, b, self.dt_bias)
             if is_mixed_batch:
                 g_spec = g.index_select(1, spec_token_indx)
@@ -920,15 +962,15 @@ class AscendGatedDeltaNetAttention(GatedDeltaNetAttention):
             assert prefill_query_start_loc is not None
             assert prefill_state_indices is not None
             assert prefill_has_initial_state is not None
-            assert g_non_spec is not None
-            assert beta_non_spec is not None
+            assert a_non_spec is not None
+            assert b_non_spec is not None
             if split_non_spec:
                 if not split_conv:
                     query_non_spec = query_non_spec[:, num_decode_tokens:]
                     key_non_spec = key_non_spec[:, num_decode_tokens:]
                     value_non_spec = value_non_spec[:, num_decode_tokens:]
-                g_non_spec = g_non_spec[:, num_decode_tokens:]
-                beta_non_spec = beta_non_spec[:, num_decode_tokens:]
+                a_non_spec = a_non_spec[num_decode_tokens:]
+                b_non_spec = b_non_spec[num_decode_tokens:]
 
             # Both fused prefill kernels (torch_npu.npu_chunk_gated_delta_rule and
             # fla_npu's chunk_gated_delta_rule_fwd) only support bfloat16 inputs.
@@ -946,6 +988,22 @@ class AscendGatedDeltaNetAttention(GatedDeltaNetAttention):
                 HardwareCapability.FLA_GDN_PREFILL
             )
             fla_gdn_prefill_op = _get_fla_gdn_prefill_op() if use_fla_gdn_prefill else None
+            use_chunk32_head_major = (
+                fla_gdn_prefill_op is not None
+                and get_current_hardware_profile().supports(HardwareCapability.FLA_GDN_PREFILL_CHUNK32)
+                # The ACLNN ABI has no layout attribute for g/beta. Prefer the
+                # legacy BTH interpretation when T == H because shape alone
+                # cannot distinguish BTH from BHT.
+                and a_non_spec.shape[0] != a_non_spec.shape[1]
+            )
+            g_non_spec, beta_non_spec = DeviceOperator.fused_gdn_gating(
+                self.A_log,
+                a_non_spec.contiguous(),
+                b_non_spec.contiguous(),
+                self.dt_bias,
+                output_head_major=use_chunk32_head_major,
+                output_raw_beta=use_chunk32_head_major,
+            )
             # The built-in fused operator is NPU-only. Keep CPU/unit-test
             # dispatch on the Triton-compatible path even when its availability
             # probe was cached globally.
@@ -977,12 +1035,13 @@ class AscendGatedDeltaNetAttention(GatedDeltaNetAttention):
                     prefill_state_indices,
                     prefill_has_initial_state,
                 )
-                # The A5 chunk32 kernel applies sigmoid internally: pass raw b,
-                # while decode and other prefill routes keep the processed beta.
-                # beta = sigmoid(b); dt_bias belongs only to the decay gate
-                # g = -exp(A_log) * softplus(a + dt_bias), computed above.
                 beta_fla = beta_non_spec
-                if get_current_hardware_profile().supports(HardwareCapability.FLA_GDN_PREFILL_CHUNK32):
+                if (
+                    get_current_hardware_profile().supports(HardwareCapability.FLA_GDN_PREFILL_CHUNK32)
+                    and not use_chunk32_head_major
+                ):
+                    # Ambiguous square shapes retain the legacy BTH/raw-beta
+                    # route. The chunk32 kernel applies sigmoid internally.
                     beta_fla = b.unsqueeze(0)
                     if has_spec_decode:
                         beta_fla = beta_fla.index_select(1, non_spec_token_indx)
@@ -1099,9 +1158,92 @@ class AscendGatedDeltaNetAttention(GatedDeltaNetAttention):
             )
             merged_out.index_copy_(1, spec_token_indx, core_attn_out_spec)
             merged_out.index_copy_(1, non_spec_token_indx, core_attn_out_non_spec)
-            core_attn_out[:num_actual_tokens] = merged_out.squeeze(0)
+            recurrent_out = merged_out.squeeze(0)
         elif has_spec_decode:
-            core_attn_out[:num_actual_tokens] = core_attn_out_spec.squeeze(0)
+            recurrent_out = core_attn_out_spec.squeeze(0)
         else:
-            core_attn_out[:num_actual_tokens] = core_attn_out_non_spec.squeeze(0)
+            recurrent_out = core_attn_out_non_spec.squeeze(0)
+        if z is None:
+            core_attn_out[:num_actual_tokens] = recurrent_out
+        else:
+            # Write the final gated RMSNorm result directly into the stable
+            # graph output. This removes the recurrent-output materialization
+            # while retaining the zero-filled padded tail.
+            self.norm.forward_oot(
+                recurrent_out,
+                z[:num_actual_tokens],
+                out=core_attn_out[:num_actual_tokens],
+            )
         maybe_save_kv_layer_to_connector(self.prefix, [])
+
+
+def qwen_gdn_attention_core_norm_with_output(
+    mixed_qkv: torch.Tensor,
+    b: torch.Tensor,
+    a: torch.Tensor,
+    z: torch.Tensor,
+    core_attn_out: torch.Tensor,
+    layer_name: str,
+    is_prefill: bool,
+) -> None:
+    layer = get_forward_context().no_compile_layers[layer_name]
+    layer._forward_core(mixed_qkv, b, a, core_attn_out, z=z)
+
+
+def qwen_gdn_attention_core_norm_with_output_fake(
+    mixed_qkv: torch.Tensor,
+    b: torch.Tensor,
+    a: torch.Tensor,
+    z: torch.Tensor,
+    core_attn_out: torch.Tensor,
+    layer_name: str,
+    is_prefill: bool,
+) -> None:
+    return None
+
+
+def qwen_gdn_packed_attention_core_norm_with_output(
+    mixed_qkvz: torch.Tensor,
+    mixed_ba: torch.Tensor,
+    core_attn_out: torch.Tensor,
+    layer_name: str,
+    is_prefill: bool,
+) -> None:
+    layer = get_forward_context().no_compile_layers[layer_name]
+    qkv_width = (layer.key_dim * 2 + layer.value_dim) // layer.tp_size
+    mixed_qkv, z, b, a, _ = fused_gdn_prepare(
+        mixed_qkvz,
+        mixed_ba,
+        qkv_width,
+        layer.num_v_heads // layer.tp_size,
+        layer.head_v_dim,
+        core_attn_out=core_attn_out,
+    )
+    layer._forward_core(mixed_qkv, b, a, core_attn_out, z=z)
+
+
+def qwen_gdn_packed_attention_core_norm_with_output_fake(
+    mixed_qkvz: torch.Tensor,
+    mixed_ba: torch.Tensor,
+    core_attn_out: torch.Tensor,
+    layer_name: str,
+    is_prefill: bool,
+) -> None:
+    return None
+
+
+direct_register_custom_op(
+    op_name="qwen_gdn_attention_core_norm_with_output",
+    op_func=qwen_gdn_attention_core_norm_with_output,
+    fake_impl=qwen_gdn_attention_core_norm_with_output_fake,
+    mutates_args=["core_attn_out"],
+    dispatch_key="PrivateUse1",
+)
+
+direct_register_custom_op(
+    op_name="qwen_gdn_packed_attention_core_norm_with_output",
+    op_func=qwen_gdn_packed_attention_core_norm_with_output,
+    fake_impl=qwen_gdn_packed_attention_core_norm_with_output_fake,
+    mutates_args=["core_attn_out"],
+    dispatch_key="PrivateUse1",
+)

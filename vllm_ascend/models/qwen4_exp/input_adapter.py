@@ -263,14 +263,23 @@ class Qwen4ExpPreparedInputAdapter:
     ) -> None:
         # QSA forward slices query rows to this existing metadata field.
         # Keep padded request capacity and use the same device boundaries as LI.
-        rows = metadata.num_actual_tokens
+        rows = int(getattr(metadata, "qsa_num_live_tokens", metadata.num_actual_tokens))
         requests = metadata.seq_lens.shape[0]
         lengths = metadata.seq_lens[:requests]
         query_start_loc = metadata.query_start_loc[: requests + 1]
-        compressed_lengths = lengths.floor_divide(GBSA_COMPRESS_RATIO)
-        residual_lengths = lengths.remainder(GBSA_COMPRESS_RATIO)
+        compressed_lengths = getattr(metadata, "qsa_compressed_lengths", None)
+        residual_lengths = getattr(metadata, "qsa_residual_lengths", None)
+        cu_seqlens_q = getattr(metadata, "qsa_cu_seqlens_q", None)
+        if compressed_lengths is None or residual_lengths is None or cu_seqlens_q is None:
+            compressed_lengths = lengths.floor_divide(GBSA_COMPRESS_RATIO)
+            residual_lengths = lengths.remainder(GBSA_COMPRESS_RATIO)
+            cu_seqlens_q = query_start_loc.clamp_max(rows)
+        else:
+            compressed_lengths = compressed_lengths[:requests]
+            residual_lengths = residual_lengths[:requests]
+            cu_seqlens_q = cu_seqlens_q[: requests + 1]
         common = dict(
-            cu_seqlens_q=query_start_loc.clamp_max(rows),
+            cu_seqlens_q=cu_seqlens_q,
             seqused_k=compressed_lengths,
             cmp_residual_k=residual_lengths,
             layout_q="TND",

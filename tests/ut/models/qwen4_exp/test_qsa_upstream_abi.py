@@ -34,9 +34,8 @@ def test_replicated_qsa_draft_passes_pcp_compatibility(monkeypatch) -> None:
     cp_utils.check_attention_cp_compatibility(config, target_layer_names=set())
 
 
-def test_main_and_draft_qkv_projection_use_upstream_path() -> None:
-    assert "_project_qkv_gate" not in qsa.AscendQwen4ExpQSAAttention.__dict__
-    assert qsa.AscendQwen4ExpQSAAttention._project_qkv_gate is qsa.upstream_qsa.Qwen4ExpQSAAttention._project_qkv_gate
+def test_main_qkv_projection_restores_fused_ascend_path() -> None:
+    assert "_project_qkv_gate" in qsa.AscendQwen4ExpQSAAttention.__dict__
 
 
 def test_indexer_accepts_main_packed_inputs_without_fused_preparation() -> None:
@@ -77,7 +76,7 @@ def test_indexer_accepts_main_packed_inputs_without_fused_preparation() -> None:
 
 
 @pytest.mark.parametrize("axes", [1, 3])
-def test_indexer_rotary_gathers_clamped_cache_before_kernel(monkeypatch, axes) -> None:
+def test_indexer_rotary_passes_cache_and_positions_to_kernel(monkeypatch, axes) -> None:
     layer = qsa.AscendQSAIndexer.__new__(qsa.AscendQSAIndexer)
     torch.nn.Module.__init__(layer)
     cache = torch.arange(5 * 64, dtype=torch.float32).reshape(5, 64)
@@ -97,10 +96,10 @@ def test_indexer_rotary_gathers_clamped_cache_before_kernel(monkeypatch, axes) -
     assert layer._fused_norm_rope(tensor, norm, positions) is tensor
 
     arguments = kernel.call_args.kwargs
-    torch.testing.assert_close(arguments["cos_sin"], cache[positions.clamp(0, 4)])
+    torch.testing.assert_close(arguments["cos_sin"], cache)
+    torch.testing.assert_close(arguments["positions"], positions)
     assert arguments["tensor"] is tensor
     assert arguments["weight"] is norm.weight
-    assert "positions" not in arguments
 
 
 def test_main_falls_back_when_fused_projection_abi_is_not_satisfied(monkeypatch) -> None:
@@ -186,7 +185,8 @@ def test_text_only_indexer_uses_fused_rope_without_mrope_sections(monkeypatch) -
     assert fused.call_count == 2
     for call in fused.call_args_list:
         assert call.kwargs["mrope_section"] == []
-        torch.testing.assert_close(call.kwargs["cos_sin"], cache[positions])
+        torch.testing.assert_close(call.kwargs["cos_sin"], cache)
+        torch.testing.assert_close(call.kwargs["positions"], positions)
 
 
 @pytest.mark.parametrize("pcp", [False, True])
@@ -244,7 +244,15 @@ def test_fused_prepare_upstream_abi_materializes_qkv_and_gate(monkeypatch, pcp) 
     projected_k = torch.arange(8, dtype=torch.float32).reshape(2, 4)
     projected_v = projected_k + 10
     projected_gate = projected_q + 20
-    layer._project_qkv_gate = Mock(return_value=(projected_q, projected_k, projected_v, projected_gate))
+
+    def project_into_gate(qkv_arg, positions_arg, gate_out=None):
+        assert qkv_arg is qkv
+        assert positions_arg is positions
+        assert gate_out is not None
+        gate_out.copy_(projected_gate.view_as(gate_out))
+        return projected_q, projected_k, projected_v, gate_out.view(2, 8)
+
+    layer._project_qkv_gate = Mock(side_effect=project_into_gate)
 
     hidden_states = torch.empty((2, 8))
     positions = torch.arange(2)
@@ -263,7 +271,7 @@ def test_fused_prepare_upstream_abi_materializes_qkv_and_gate(monkeypatch, pcp) 
         gate=gate,
     )
 
-    layer._project_qkv_gate.assert_called_once_with(qkv, positions)
+    layer._project_qkv_gate.assert_called_once_with(qkv, positions, gate_out=gate)
     torch.testing.assert_close(gate, projected_gate.view_as(gate))
     layer.impl.do_kv_cache_update.assert_called_once()
     update_args = layer.impl.do_kv_cache_update.call_args.args

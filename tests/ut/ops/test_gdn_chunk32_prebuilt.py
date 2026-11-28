@@ -87,6 +87,8 @@ def test_fla_kernel_contract_isolated_by_device_and_chunk_size(
     assert kwargs["use_exp2"] is use_exp2
     assert kwargs["disable_recompute"] is disable_recompute
     assert kwargs.get("use_beta_sigmoid_in_kernel", False) is chunk32_enabled
+    if device_type == AscendDeviceType.A5:
+        assert kwargs["output_beta_eff"] is False
     assert kwargs["use_qk_l2norm_in_kernel"] is kernel_l2norm
     assert kwargs["state_v_first"] is state_v_first
     assert kwargs["layout"] == ("BNSD" if head_first else "BSND")
@@ -201,6 +203,7 @@ class TestChunk32Prebuilt(TestCase):
                     self.assertFalse(kwargs["disable_recompute"])
                     self.assertTrue(kwargs["use_qk_l2norm_in_kernel"])
                     self.assertTrue(kwargs["use_beta_sigmoid_in_kernel"])
+                    self.assertFalse(kwargs["output_beta_eff"])
                     self.assertEqual(kwargs["cu_seqlens"], effective)
                     seen.append(kwargs["chunk_indices"])
                     return torch.zeros(1, tokens, 2, 4), kwargs["initial_state"].clone()
