@@ -503,11 +503,11 @@ class AscendW4A8DynamicFusedMoEMethod(AscendMoEScheme):
         )
 
     def supports_fused_activation(self, activation: MoEActivation | str) -> bool:
-        if activation in (MoEActivation.SITU, MoEActivation.SITU.value) and not get_current_hardware_profile().supports(
-            HardwareCapability.GMM1_SITU_QUANT_MSD
-        ):
+        if not super().supports_fused_activation(activation):
             return False
-        return super().supports_fused_activation(activation)
+        if MoEActivation(activation) == MoEActivation.SITU:
+            return get_current_hardware_profile().supports(HardwareCapability.GMM1_SITU_QUANT_MSD)
+        return True
 
     def apply_gmm1_act_quant(self, mlp_compute_input: MoEMlpComputeInput):
         hidden_states = mlp_compute_input.hidden_states
