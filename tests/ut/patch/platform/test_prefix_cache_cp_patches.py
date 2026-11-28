@@ -278,9 +278,13 @@ def test_real_tail_coordinator_preserves_prefix_hit_and_private_lifecycle(wrappe
         kv_cache_tensors=[],
         kv_cache_groups=[KVCacheGroupSpec(["full"], full), KVCacheGroupSpec(["tail"], group_tail)],
     )
-    resolved_scheduler_size, hash_size = resolve_kv_cache_block_sizes(
-        cfg, _make_vllm_config(enable_prefix_caching=True, dcp=1, prefix_match_unit=16)
-    )
+    config = _make_vllm_config(enable_prefix_caching=True, dcp=1, prefix_match_unit=16)
+    if not vllm_version_is("0.34.0") and scheduler_size == 32:
+        # vLLM #68934 rejects a finer explicit unit for whole-block hits.
+        with pytest.raises(ValueError, match="prefix-cache hits.*scheduler block size"):
+            resolve_kv_cache_block_sizes(cfg, config)
+        config.cache_config.prefix_match_unit = None
+    resolved_scheduler_size, hash_size = resolve_kv_cache_block_sizes(cfg, config)
     assert resolved_scheduler_size == scheduler_size
     coordinator = AscendHybridKVCacheCoordinator(
         cfg,
@@ -298,7 +302,7 @@ def test_real_tail_coordinator_preserves_prefix_hit_and_private_lifecycle(wrappe
     assert len(coordinator.attention_groups) == 1
     full_mgr.allocate_new_blocks("old", 64, 64)
     tail_mgr.allocate_new_blocks("old", 64, 64)
-    hashes = [bytes([i + 1]) * 32 for i in range(4)]
+    hashes = [bytes([i + 1]) * 32 for i in range(64 // hash_size)]
     request = SimpleNamespace(request_id="old", block_hashes=hashes, num_prompt_tokens=65, shared_prefix_boundary=None)
     # Exercise the real coordinator, including main's replay_boundary keyword.
     coordinator.cache_blocks(request, 64)
