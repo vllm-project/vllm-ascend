@@ -3,7 +3,7 @@
 
 import threading
 from types import SimpleNamespace
-from unittest.mock import MagicMock
+from unittest.mock import MagicMock, call
 
 import pytest
 
@@ -158,3 +158,35 @@ def test_compute_boundary_trace_preserves_receive_completion(traced):
             "compute_boundary_wait_begin",
             "compute_boundary_wait_end",
         ]
+
+
+@pytest.mark.parametrize("traced", [False, True])
+def test_shutdown_closes_trace_after_join_and_before_store(traced):
+    lifecycle = MagicMock()
+    lifecycle.receiver.recv_trace = lifecycle.trace if traced else None
+    lifecycle.sender.is_alive.return_value = True
+    lifecycle.receiver.is_alive.return_value = True
+    lifecycle.store.batch_remove_lease.return_value = 0
+    worker = SimpleNamespace(
+        _closed=False,
+        kv_send_thread=lifecycle.sender,
+        kv_recv_thread=lifecycle.receiver,
+        m_store=lifecycle.store,
+        _step_load_keys={"key"},
+    )
+    LayerwiseKVPoolWorker.shutdown(worker)
+    LayerwiseKVPoolWorker.shutdown(worker)
+    expected = [
+        call.sender.stop(),
+        call.receiver.stop(),
+        call.sender.is_alive(),
+        call.sender.join(),
+        call.receiver.is_alive(),
+        call.receiver.join(),
+    ]
+    if traced:
+        expected.append(call.trace.close())
+    expected.extend([call.store.batch_remove_lease(["key"]), call.store.close()])
+    assert lifecycle.mock_calls == expected
+    assert worker._closed
+    assert not worker._step_load_keys

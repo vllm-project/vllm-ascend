@@ -1817,6 +1817,7 @@ class TestKVPoolWorkerRegisterAndTransfer(unittest.TestCase):
         lifecycle = MagicMock()
         worker.kv_send_thread = lifecycle.sender
         worker.kv_recv_thread = lifecycle.receiver
+        worker.kv_recv_thread.recv_trace = None
         worker.kv_send_thread.is_alive.return_value = True
         worker.kv_recv_thread.is_alive.return_value = True
         worker.m_store = lifecycle.store
