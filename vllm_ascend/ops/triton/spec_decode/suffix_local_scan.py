@@ -3,13 +3,14 @@
 """Local history scan kernels and launch wrapper for MRV2 suffix decoding.
 
 Adapted from vLLM #60339, merge 190df0b90007eead441d97d3abf6270f84f2c63e.
-Host launch wrappers retain the upstream positional ABI and derive NPU launch
-metadata from tensors and scalar arguments. Request lifecycle and execution
-ordering remain with the upstream speculator.
 """
 
 import torch
 from vllm.triton_utils import tl, triton
+
+# Distinct negative fill tokens prevent masked loads from matching each other.
+_MASKED_TAIL_TOKEN = tl.constexpr(-2)
+_MASKED_CANDIDATE_TOKEN = tl.constexpr(-1)
 
 
 @triton.jit
@@ -25,12 +26,7 @@ def _suffix_local_scan_kernel(
     MAX_DEPTH: tl.constexpr,
     BLOCK: tl.constexpr,
 ):
-    """Per (request, block): best (match_len, end_pos) packed into one int64.
-
-    end_pos is the exclusive end of an earlier occurrence of the request's
-    suffix in its own history; the draft continues from end_pos. Longer
-    matches win, then later positions.
-    """
+    """Pack the longest, rightmost local match per request and block."""
     b = tl.program_id(0).to(tl.int64)
     blk = tl.program_id(1).to(tl.int64)
     req = tl.load(idx_mapping_ptr + b).to(tl.int64)
@@ -53,10 +49,14 @@ def _suffix_local_scan_kernel(
     for t in range(MAX_DEPTH):
         # Request token t back from its end (newest first).
         tail_pos = seq_len - 1 - t
-        tail_tok = tl.load(row + tl.maximum(tail_pos, 0), mask=tail_pos >= 0, other=-2)
+        tail_tok = tl.load(row + tl.maximum(tail_pos, 0), mask=tail_pos >= 0, other=_MASKED_TAIL_TOKEN)
         src_pos = pos - 1 - t
         load_mask = candidate_mask & (src_pos >= 0) & (tail_pos >= 0)
-        tok = tl.load(row + tl.minimum(tl.maximum(src_pos, 0), token_ids_stride - 1), mask=load_mask, other=-1)
+        tok = tl.load(
+            row + tl.minimum(tl.maximum(src_pos, 0), token_ids_stride - 1),
+            mask=load_mask,
+            other=_MASKED_CANDIDATE_TOKEN,
+        )
         active = active & load_mask & (tok == tail_tok)
         match_len += active.to(tl.int64)
 
@@ -77,12 +77,7 @@ def launch_suffix_local_scan(
     BLOCK: int,
     **launch_options,
 ) -> None:
-    """Launch the NPU history scan using the upstream positional launch ABI.
-
-    Strides come from the actual tensors. The active request count comes
-    from idx_mapping, not the capacity of the history or scratch buffers.
-    Reading tensor metadata requires no device-to-host transfer.
-    """
+    """Scan active request rows using the actual history and scratch strides."""
     launch_options.update(
         MAX_DEPTH=MAX_DEPTH,
         BLOCK=BLOCK,

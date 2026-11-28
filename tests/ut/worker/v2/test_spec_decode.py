@@ -97,8 +97,8 @@ def test_init_speculator_suffix_uses_current_request_state(monkeypatch, enforce_
     req_states = object()
     speculator_cls = _mock_speculator_module(
         monkeypatch,
-        "vllm.v1.worker.gpu.spec_decode.suffix.speculator",
-        "SuffixSpeculator",
+        "vllm_ascend.worker.v2.spec_decode.suffix.speculator",
+        "AscendSuffixSpeculator",
     )
     result = init_speculator(config, device, req_states)
     assert result is speculator_cls.return_value
@@ -249,8 +249,8 @@ def test_mtp_routing_uses_actual_native_config(
         (
             "suffix",
             SuffixSpeculatorConfig.speculator_class,
-            "vllm.v1.worker.gpu.spec_decode.suffix.speculator",
-            "SuffixSpeculator",
+            "vllm_ascend.worker.v2.spec_decode.suffix.speculator",
+            "AscendSuffixSpeculator",
             True,
         ),
         (
@@ -377,18 +377,6 @@ def test_init_speculator_main_actual_native_config_eagle(monkeypatch, method):
 
     assert init_speculator(config, device) is constructor.return_value
     constructor.assert_called_once_with(config, device)
-
-
-def test_init_speculator_main_rejects_unadapted_upstream_speculator():
-    """Unadapted concrete speculator classes fail with an explicit class-level NotImplementedError."""
-    speculator_class = "vllm.v1.worker.gpu.spec_decode.suffix.speculator.SuffixSpeculator"
-    config = _make_config("suffix", speculator_class=speculator_class)
-
-    with pytest.raises(NotImplementedError) as exc_info:
-        init_speculator(config, torch.device("cpu"))
-
-    assert speculator_class in str(exc_info.value)
-    assert "suffix is not supported yet" not in str(exc_info.value)
 
 
 def test_init_speculator_main_rejects_none_speculator_class():

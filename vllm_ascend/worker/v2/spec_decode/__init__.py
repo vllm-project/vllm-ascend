@@ -33,7 +33,7 @@ _NGRAM_SPECULATOR_QUALNAME = "vllm.v1.worker.gpu.spec_decode.ngram.speculator.Ng
 _SUFFIX_SPECULATOR_QUALNAME = "vllm.v1.worker.gpu.spec_decode.suffix.speculator.SuffixSpeculator"
 
 _UPSTREAM_TO_ASCEND_SPECULATOR: dict[str, str] = {
-    _SUFFIX_SPECULATOR_QUALNAME: _SUFFIX_SPECULATOR_QUALNAME,
+    _SUFFIX_SPECULATOR_QUALNAME: "vllm_ascend.worker.v2.spec_decode.suffix.speculator.AscendSuffixSpeculator",
     _NGRAM_SPECULATOR_QUALNAME: _NGRAM_SPECULATOR_QUALNAME,
     "vllm.v1.worker.gpu.spec_decode.extract_hidden_states.ExtractHiddenStatesSpeculator": (
         "vllm.v1.worker.gpu.spec_decode.extract_hidden_states.ExtractHiddenStatesSpeculator"
@@ -89,11 +89,11 @@ def init_speculator(
     target_qualname = _UPSTREAM_TO_ASCEND_SPECULATOR.get(qualname)
     if target_qualname is not None:
         factory = cast(Callable[..., Any], resolve_obj_by_qualname(target_qualname))
-        if target_qualname in (_NGRAM_SPECULATOR_QUALNAME, _SUFFIX_SPECULATOR_QUALNAME):
+        if qualname in (_NGRAM_SPECULATOR_QUALNAME, _SUFFIX_SPECULATOR_QUALNAME):
             if req_states is None:
-                method_name = "suffix" if target_qualname == _SUFFIX_SPECULATOR_QUALNAME else "n-gram"
+                method_name = "suffix" if qualname == _SUFFIX_SPECULATOR_QUALNAME else "n-gram"
                 raise ValueError(f"MRV2 {method_name} speculative decoding requires request states")
-            # Both upstream speculators consume history maintained by MRV2
+            # Both speculators consume history maintained by MRV2
             # postprocess through the current request states.
             return factory(vllm_config, device, req_states)
         return factory(vllm_config, device)

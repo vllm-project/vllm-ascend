@@ -84,3 +84,42 @@ def test_sparse_slots_at_context_limit(max_len, k):
     assert drafts[0].tolist() == _local_draft(history, k, 24)
     assert valid.tolist() == [k, 0]
     assert drafts[1].tolist() == [7] * k
+
+
+@pytest.mark.parametrize(
+    "k,depth,max_len,corpus_enabled",
+    [
+        (1, 1, 300, False),
+        (1, 2, 300, True),
+        (3, 8, 300, False),
+        (3, 8, 300, True),
+        (8, 24, 2048, False),
+        (8, 24, 2048, True),
+    ],
+)
+@pytest.mark.parametrize("adaptive", [False, True])
+def test_kernel_feature_combinations(k, depth, max_len, corpus_enabled, adaptive):
+    """Compile each feature path and check local, corpus and fallback outputs."""
+    spec, rs = _make(k, depth, 8, max_len, 4096 if corpus_enabled else 0, adaptive=adaptive)
+    key = list(range(100, 100 + depth))
+    continuation = list(range(300, 300 + k))
+    if corpus_enabled:
+        _set(rs, 7, [], key + continuation)
+        _finish(spec, rs, {"done": 7})
+
+    # Three sparse slots exercise padded request reductions; histories use
+    # both partial and full scan blocks, and K=3 requires padded draft lanes.
+    local = list(range(1000, 1000 + max_len - 2 * depth - 1)) + key + [700] + key
+    corpus_query = list(range(5000, 5000 + max_len - depth)) + key
+    histories = [local, corpus_query, [991]]
+    slots = [6, 1, 4]
+    for slot, history in zip(slots, histories):
+        _set(rs, slot, [], history)
+    expected = [_local_draft(local, k, depth), continuation if corpus_enabled and depth >= 2 else [], []]
+    drafts, valid = _propose(spec, rs, slots)
+    for batch_idx, (history, reference) in enumerate(zip(histories, expected)):
+        assert valid[batch_idx] == len(reference)
+        assert drafts[batch_idx].tolist() == reference + [history[-1]] * (k - len(reference))
+        if adaptive:
+            confidence = spec.draft_token_confidence_probs[batch_idx].tolist()
+            assert confidence == pytest.approx([0.5] * len(reference) + [0.0] * (k - len(reference)))

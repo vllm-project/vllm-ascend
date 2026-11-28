@@ -13,10 +13,9 @@ if current_platform.device_type != "npu":
     pytest.skip("requires Ascend NPU", allow_module_level=True)
 
 # These tests instantiate the speculator without an NPUWorker.
-from vllm.v1.worker.gpu.spec_decode.suffix.speculator import SuffixSpeculator  # noqa: E402
-
 from vllm_ascend.patch.worker import patch_triton  # noqa: E402, F401
 from vllm_ascend.platform import NPUPlatform  # noqa: E402
+from vllm_ascend.worker.v2.spec_decode.suffix.speculator import AscendSuffixSpeculator  # noqa: E402
 
 NPUPlatform.register_triton_kernel_overrides()
 
@@ -69,7 +68,7 @@ def _make(k, depth, max_reqs, max_len, corpus_tokens, adaptive=False):
         prompt_len=SimpleNamespace(np=np.zeros(max_reqs, dtype=np.int32)),
         req_id_to_index={},
     )
-    return SuffixSpeculator(cfg, DEVICE, req_states), req_states
+    return AscendSuffixSpeculator(cfg, DEVICE, req_states), req_states
 
 
 def _set(req_states, slot, prompt, output):

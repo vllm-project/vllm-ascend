@@ -3,26 +3,37 @@
 """Acceptance observation and bookkeeping for MRV2 suffix decoding.
 
 Adapted from vLLM #60339, merge 190df0b90007eead441d97d3abf6270f84f2c63e.
-Host launch wrappers retain the upstream positional ABI and derive NPU launch
-metadata from tensors and scalar arguments. Request lifecycle and execution
-ordering remain with the upstream speculator.
 """
 
 import torch
 from vllm.triton_utils import tl, triton
 
-# Adaptive verification: acceptance is tracked per (draft source, match-length
-# bucket, position). Match lengths 1-6 get their own bucket, then 7-10, 11-20
-# and 21+. Counts are halved every _STATS_HALF_LIFE steps so the estimate
-# follows the workload.
-_NUM_LEN_BUCKETS = tl.constexpr(9)
-_STATS_HALF_LIFE = 1024
+# Keep upstream bucket boundaries so its [source, length, position] state agrees.
+_EXACT_MATCH_BUCKETS = tl.constexpr(6)
+_MEDIUM_MATCH_MAX = tl.constexpr(10)
+_LONG_MATCH_MAX = tl.constexpr(20)
+_COARSE_MATCH_BUCKETS = tl.constexpr(3)  # Up to 10, up to 20, and above 20.
+_NUM_LEN_BUCKETS = _EXACT_MATCH_BUCKETS + _COARSE_MATCH_BUCKETS
+# Each statistics entry is (accepted, observed).
+_STAT_FIELDS = tl.constexpr(2)
+_OBSERVED_OFFSET = tl.constexpr(1)
+_INVALID_BUCKET = tl.constexpr(-1)
+# Preserve the existing 256-lane clear tile and four-warp reduction geometry.
 _OBSERVE_RESET_BLOCK = 256
+_OBSERVE_NUM_WARPS = 4
 
 
 @triton.jit
 def _len_bucket(L):
-    return tl.where(L <= 6, L - 1, tl.where(L <= 10, 6, tl.where(L <= 20, 7, 8)))
+    return tl.where(
+        L <= _EXACT_MATCH_BUCKETS,
+        L - 1,
+        tl.where(
+            L <= _MEDIUM_MATCH_MAX,
+            _EXACT_MATCH_BUCKETS,
+            tl.where(L <= _LONG_MATCH_MAX, _EXACT_MATCH_BUCKETS + 1, _NUM_LEN_BUCKETS - 1),
+        ),
+    )
 
 
 @triton.jit
@@ -38,12 +49,7 @@ def _suffix_observe_kernel(
     K_PO2: tl.constexpr,
     REQS_PO2: tl.constexpr,
 ):
-    """One program owns each statistics bucket; no contended int64 atomics.
-
-    Reduce batch-local counts in int32, then accumulate in int64. This avoids
-    the divergent early return / vector-atomic path in the GPU observer and
-    gives every TP rank the same integer result.
-    """
+    """Reduce batch counts in int32 and update each bucket in int64."""
     bucket = tl.program_id(0)
     b = tl.arange(0, REQS_PO2)
     req = tl.load(idx_mapping_ptr + b, mask=b < num_reqs, other=0).to(tl.int64)
@@ -51,7 +57,7 @@ def _suffix_observe_kernel(
     valid = tl.load(last_valid_ptr + req)
     sampled = tl.load(num_sampled_ptr + b, mask=b < num_reqs, other=0)
     rejected = tl.load(num_rejected_ptr + b, mask=b < num_reqs, other=0)
-    accepted = sampled - 1
+    accepted = sampled - 1  # Exclude the target model's bonus token.
     verified = accepted + rejected
     if K != K_PO2:
         # The current backend fails on the padded 2D reduction / strided
@@ -68,13 +74,13 @@ def _suffix_observe_kernel(
             )
             num_observed = tl.sum(observed.to(tl.int32), axis=0).to(tl.int64)
             num_accepted = tl.sum((observed & (k < accepted)).to(tl.int32), axis=0).to(tl.int64)
-            stat = stats_ptr + (bucket * K + k) * 2
+            stat = stats_ptr + (bucket * K + k) * _STAT_FIELDS
             # Load both fields before either store; interleaving them also
             # triggers a BiShengHIR pipeline failure on the current backend.
             old_accepted = tl.load(stat)
-            old_observed = tl.load(stat + 1)
+            old_observed = tl.load(stat + _OBSERVED_OFFSET)
             tl.store(stat, old_accepted + num_accepted)
-            tl.store(stat + 1, old_observed + num_observed)
+            tl.store(stat + _OBSERVED_OFFSET, old_observed + num_observed)
     else:
         k = tl.arange(0, K_PO2)
         observed = (
@@ -88,11 +94,11 @@ def _suffix_observe_kernel(
         )
         num_observed = tl.sum(observed.to(tl.int32), axis=0).to(tl.int64)
         num_accepted = tl.sum((observed & (k[None, :] < accepted[:, None])).to(tl.int32), axis=0).to(tl.int64)
-        stat = stats_ptr + (bucket * K + k) * 2
+        stat = stats_ptr + (bucket * K + k) * _STAT_FIELDS
         old_accepted = tl.load(stat, mask=k < K, other=0)
-        old_observed = tl.load(stat + 1, mask=k < K, other=0)
+        old_observed = tl.load(stat + _OBSERVED_OFFSET, mask=k < K, other=0)
         tl.store(stat, old_accepted + num_accepted, mask=k < K)
-        tl.store(stat + 1, old_observed + num_observed, mask=k < K)
+        tl.store(stat + _OBSERVED_OFFSET, old_observed + num_observed, mask=k < K)
 
 
 @triton.jit
@@ -108,7 +114,7 @@ def _suffix_clear_observed_kernel(
     req = tl.load(idx_mapping_ptr + b, mask=b < num_reqs, other=0).to(tl.int64)
     sampled = tl.load(num_sampled_ptr + b, mask=b < num_reqs, other=0)
     bucket = tl.load(last_bucket_ptr + req)
-    tl.store(last_bucket_ptr + req, -1, mask=(b < num_reqs) & (sampled > 0) & (bucket >= 0))
+    tl.store(last_bucket_ptr + req, _INVALID_BUCKET, mask=(b < num_reqs) & (sampled > 0) & (bucket >= 0))
 
 
 def launch_suffix_observe(
@@ -122,12 +128,7 @@ def launch_suffix_observe(
     K_PO2: int,
     **launch_options,
 ) -> None:
-    """Reduce active requests into NPU statistics buckets.
-
-    Preserve the parent observer's consumption semantics. Clearing previous
-    buckets inside the reduction kernel would race the other bucket programs,
-    so it runs as a second launch on the same stream after all reductions.
-    """
+    """Update bucket counts, then clear consumed markers on the same stream."""
     launch_options.update(
         K=K,
         K_PO2=K_PO2,
@@ -135,7 +136,7 @@ def launch_suffix_observe(
     num_reqs = idx_mapping_ptr.shape[0]
     launch_options["K_PO2"] = triton.next_power_of_2(launch_options["K"])
     launch_options["REQS_PO2"] = triton.next_power_of_2(num_reqs)
-    launch_options["num_warps"] = 4
+    launch_options["num_warps"] = _OBSERVE_NUM_WARPS
     _suffix_observe_kernel[(stats_ptr.shape[0],)](
         idx_mapping_ptr,
         num_sampled_ptr,
@@ -152,5 +153,5 @@ def launch_suffix_observe(
         last_bucket_ptr,
         num_reqs,
         BLOCK=_OBSERVE_RESET_BLOCK,
-        num_warps=4,
+        num_warps=_OBSERVE_NUM_WARPS,
     )

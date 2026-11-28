@@ -3,16 +3,25 @@
 """Draft selection and adaptive confidence for MRV2 suffix decoding.
 
 Adapted from vLLM #60339, merge 190df0b90007eead441d97d3abf6270f84f2c63e.
-Host launch wrappers retain the upstream positional ABI and derive NPU launch
-metadata from tensors and scalar arguments. Request lifecycle and execution
-ordering remain with the upstream speculator.
 """
 
 import torch
 from vllm.triton_utils import tl, triton
 
 from vllm_ascend.ops.triton.spec_decode.suffix_corpus import _corpus_draft
-from vllm_ascend.ops.triton.spec_decode.suffix_observe import _NUM_LEN_BUCKETS, _len_bucket
+from vllm_ascend.ops.triton.spec_decode.suffix_observe import (
+    _INVALID_BUCKET,
+    _NUM_LEN_BUCKETS,
+    _OBSERVED_OFFSET,
+    _STAT_FIELDS,
+    _len_bucket,
+)
+
+# Beta(1, 1) smoothing starts valid slots at confidence 1/2.
+_ACCEPTED_PRIOR = tl.constexpr(1.0)
+_OBSERVED_PRIOR = tl.constexpr(2.0)
+# A5 cannot lower the corpus boolean gather with a single internal draft lane.
+_MIN_VOTING_WIDTH = 2
 
 
 @triton.jit
@@ -96,34 +105,31 @@ def _suffix_finalize_kernel(
 
     draft_ok = draft_ok & (num_sampled > 0)
     num_valid = tl.sum(draft_ok.to(tl.int32), axis=0)
-    # Invalid slots fall back to the last sampled token; they are verified as
-    # ordinary (rejectable) drafts, so the fill value only affects efficiency.
+    # Fill invalid slots with the last sampled token.
     out = tl.where(draft_ok, draft, last_tok)
     tl.store(drafts_ptr + b * K + k_iota, out, mask=k_mask)
     tl.store(num_valid_ptr + b, num_valid)
 
     if ADAPTIVE:
-        # Per-position confidence for adaptive verification: the observed
-        # acceptance rate for drafts like this one (Laplace-smoothed); filler
-        # slots get 0 so they are trimmed first.
+        # Filler slots receive zero confidence.
         bucket = source * _NUM_LEN_BUCKETS + _len_bucket(tl.maximum(match_len, 1))
         if K != K_PO2:
             # As in the observer, avoid padded strided statistics accesses
             # for non-power-of-two draft lengths on the current backend.
             for d in tl.static_range(K):
-                stat = stats_ptr + (bucket * K + d) * 2
+                stat = stats_ptr + (bucket * K + d) * _STAT_FIELDS
                 accepted = tl.load(stat).to(tl.float32)
-                observed = tl.load(stat + 1).to(tl.float32)
+                observed = tl.load(stat + _OBSERVED_OFFSET).to(tl.float32)
                 is_valid = tl.sum(tl.where(k_iota == d, draft_ok.to(tl.int32), 0), axis=0) > 0
-                conf = tl.where(is_valid, (accepted + 1.0) / (observed + 2.0), 0.0)
+                conf = tl.where(is_valid, (accepted + _ACCEPTED_PRIOR) / (observed + _OBSERVED_PRIOR), 0.0)
                 tl.store(conf_ptr + b * K + d, conf)
         else:
-            stat = stats_ptr + (bucket * K + k_iota) * 2
+            stat = stats_ptr + (bucket * K + k_iota) * _STAT_FIELDS
             accepted = tl.load(stat, mask=k_mask, other=0).to(tl.float32)
-            observed = tl.load(stat + 1, mask=k_mask, other=0).to(tl.float32)
-            conf = tl.where(draft_ok, (accepted + 1.0) / (observed + 2.0), 0.0)
+            observed = tl.load(stat + _OBSERVED_OFFSET, mask=k_mask, other=0).to(tl.float32)
+            conf = tl.where(draft_ok, (accepted + _ACCEPTED_PRIOR) / (observed + _OBSERVED_PRIOR), 0.0)
             tl.store(conf_ptr + b * K + k_iota, conf, mask=k_mask)
-        tl.store(last_bucket_ptr + req, tl.where(num_valid > 0, bucket, -1).to(tl.int32))
+        tl.store(last_bucket_ptr + req, tl.where(num_valid > 0, bucket, _INVALID_BUCKET).to(tl.int32))
         tl.store(last_valid_ptr + req, num_valid)
 
 
@@ -173,9 +179,7 @@ def launch_suffix_finalize(
         NB_PO2=NB_PO2,
     )
     num_reqs = idx_mapping_ptr.shape[0]
-    # Keep corpus voting matrices two-dimensional for a one-token draft;
-    # A5 cannot lower the unit-width boolean gather in that path.
-    launch_options["K_PO2"] = max(2, triton.next_power_of_2(launch_options["K"]))
+    launch_options["K_PO2"] = max(_MIN_VOTING_WIDTH, triton.next_power_of_2(launch_options["K"]))
     launch_options["DEPTH_PO2"] = triton.next_power_of_2(launch_options["MAX_DEPTH"])
     launch_options["NB_PO2"] = triton.next_power_of_2(num_blocks)
     _suffix_finalize_kernel[(num_reqs,)](
