@@ -1,0 +1,4 @@
+pr: 23521
+entries:
+  - category: bugfix
+    text: Qwen3.8-Flash-Next can use standard GBSA for prefill on CANN builds that reject Union GBSA. Set `enable_qsa_union_prefill` to `false` in `--additional-config` on an affected deployment.

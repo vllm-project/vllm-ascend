@@ -2,10 +2,12 @@
 """QSA request planning and dispatch coverage without requiring a native NPU."""
 
 import ast
+import sys
 from dataclasses import dataclass, replace
 from pathlib import Path
 from types import SimpleNamespace
 from typing import Any
+from unittest.mock import Mock
 
 import pytest
 import torch
@@ -27,7 +29,7 @@ def implementation():
     return namespace
 
 
-def run_stub_batch(implementation, phases, query_lengths, kv_lengths):
+def run_stub_batch(implementation, phases, query_lengths, kv_lengths, *, use_union_gbsa=True):
     starts = [0]
     for length in query_lengths:
         starts.append(starts[-1] + length)
@@ -37,6 +39,9 @@ def run_stub_batch(implementation, phases, query_lengths, kv_lengths):
     calls = []
 
     def gbsa(q, k, v, idx, table, requests, positions, lengths, out):
+        assert torch.equal(requests, row_requests[positions])
+        assert torch.equal(table, block_table)
+        assert torch.equal(lengths, seq_lens)
         calls.append(("gbsa", q.flatten().tolist()))
         out.fill_(7)
         return out
@@ -60,23 +65,28 @@ def run_stub_batch(implementation, phases, query_lengths, kv_lengths):
         qsa_union_gbsa_attention=union,
         qsa_union_gbsa_attention_batch=union_batch,
     )
-    plan = implementation["build_qsa_request_plan"](torch.tensor(starts), total, torch.tensor(phases))
+    block_table = torch.arange(len(phases) * 256).reshape(len(phases), 256)
+    seq_lens = torch.tensor(kv_lengths)
+    options = {} if use_union_gbsa else {"use_union_gbsa": False}
+    plan = implementation["build_qsa_request_plan"](torch.tensor(starts), total, torch.tensor(phases), **options)
     plan = implementation["prepare_qsa_union_batches"](
         plan,
         torch.arange(total, dtype=torch.int32),
-        torch.tensor(kv_lengths),
-        torch.zeros(len(phases), 256),
+        seq_lens,
+        block_table,
     )
-    requests = torch.repeat_interleave(torch.arange(len(phases)), torch.tensor(query_lengths))
+    if not use_union_gbsa:
+        assert plan.prepared_union_batches == ()
+    row_requests = torch.repeat_interleave(torch.arange(len(phases)), torch.tensor(query_lengths))
     implementation["dispatch_qsa_attention"](
         q,
         q,
         q,
         torch.zeros(total, 7),
-        torch.zeros(len(phases), 256),
-        requests,
+        block_table,
+        row_requests,
         torch.arange(total),
-        torch.tensor(kv_lengths),
+        seq_lens,
         out,
         plan,
     )
@@ -116,6 +126,21 @@ def test_union_batches_do_not_include_decode_rows(implementation):
         ("union_batch", list(range(12))),
         ("union_batch", list(range(13, 34))),
         ("gbsa", [12]),
+    ]
+
+
+def test_prefill_compatibility_uses_standard_gbsa_with_original_request_indices(implementation):
+    calls = run_stub_batch(
+        implementation,
+        [False, True, True, True, False],
+        [1, 2, 0, 8, 4],
+        [8192, 2, 0, 131072, 32768],
+        use_union_gbsa=False,
+    )
+    assert calls == [
+        ("gbsa", list(range(1, 11))),
+        ("gbsa", [0]),
+        ("gbsa", [11, 12, 13, 14]),
     ]
 
 
@@ -191,7 +216,7 @@ def test_phase_metadata_required_to_cover_requests(implementation):
         implementation["build_qsa_request_plan"](torch.tensor([0, 1, 2]), 2, torch.tensor([False]))
 
 
-def load_builder():
+def load_builder(*, enable_qsa_union_prefill=True):
     source = MODEL_DIR / "qsa.py"
     builder = next(
         n
@@ -205,8 +230,8 @@ def load_builder():
 
     plans = []
 
-    def plan(*args):
-        plans.append(args)
+    def plan(*args, **kwargs):
+        plans.append((args, kwargs))
         return ("prefill-plan",)
 
     namespace: dict[str, Any] = dict(
@@ -215,6 +240,7 @@ def load_builder():
         AttentionCGSupport=SimpleNamespace(UNIFORM_BATCH="uniform"),
         CommonAttentionMetadata=object,
         build_qsa_request_plan=plan,
+        get_ascend_config=lambda: SimpleNamespace(enable_qsa_union_prefill=enable_qsa_union_prefill),
     )
     exec(compile(ast.Module(body=[builder], type_ignores=[]), str(source), "exec"), namespace)
     return namespace["AscendQSAMetadataBuilder"](), plans
@@ -241,7 +267,43 @@ def test_metadata_builder_uses_phase_flags_for_prefill():
     )
     meta = builder.build(0, common)
     assert meta.block_table == "kept" and meta.qsa_request_plan == ("prefill-plan",)
-    assert plans[0][-1] is common.is_prefilling
+    assert plans[0][0][-1] is common.is_prefilling
+
+
+def test_metadata_builder_propagates_prefill_compatibility_option():
+    builder, plans = load_builder(enable_qsa_union_prefill=False)
+    common = SimpleNamespace(
+        is_prefilling=torch.tensor([True]),
+        query_start_loc_cpu=torch.tensor([0, 8]),
+        num_actual_tokens=8,
+    )
+    builder.build(0, common)
+    assert plans[0][1]["use_union_gbsa"] is False
+
+
+@pytest.mark.parametrize(
+    ("plan", "lookup_expected"),
+    [(None, False), (SimpleNamespace(use_union_gbsa=False), False), (SimpleNamespace(), True)],
+)
+def test_prepare_step_metadata_handles_legacy_and_opt_out_plans(monkeypatch, plan, lookup_expected):
+    monkeypatch.setitem(
+        sys.modules,
+        "vllm_ascend.models.qwen4_exp.attention_dispatch",
+        SimpleNamespace(prepare_qsa_union_batches=Mock()),
+    )
+    monkeypatch.setitem(
+        sys.modules,
+        "vllm_ascend.ops.triton.qwen4_exp.prepare_qsa_visible_lengths_triton",
+        SimpleNamespace(prepare_qsa_visible_lengths=Mock()),
+    )
+    builder, _ = load_builder()
+    layers = Mock()
+    layers.get.return_value = None
+    builder.vllm_config = SimpleNamespace(compilation_config=SimpleNamespace(static_forward_context=layers))
+
+    builder.prepare_step_metadata({"qsa": SimpleNamespace(qsa_request_plan=plan)}, ["qsa"], 1, set())
+
+    assert layers.get.called is lookup_expected
 
 
 def test_metadata_builder_rejects_unknown_phase_instead_of_guessing():

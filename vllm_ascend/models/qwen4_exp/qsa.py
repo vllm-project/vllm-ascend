@@ -36,6 +36,7 @@ from vllm.v1.attention.backend import AttentionCGSupport, AttentionImplBase, Com
 from vllm.v1.kv_cache_interface import AttentionSpec
 from vllm.v1.kv_cache_layout import KVCacheLayout
 
+from vllm_ascend.ascend_config import get_ascend_config
 from vllm_ascend.attention.context_parallel.sfa_dcp_utils import get_sfa_pcp_global_metadata
 from vllm_ascend.attention.utils import (
     maybe_save_kv_layer_to_connector,
@@ -616,7 +617,7 @@ class AscendQSAMetadataBuilder(upstream_qsa.Qwen4ExpQSAMetadataBuilder):
         if main_metadata is None:
             return
         request_plan = getattr(main_metadata, "qsa_request_plan", None)
-        if request_plan is None:
+        if request_plan is None or not getattr(request_plan, "use_union_gbsa", True):
             return
         layer = self.vllm_config.compilation_config.static_forward_context.get(layer_names[0])
         if not hasattr(layer, "indexer"):
@@ -683,6 +684,7 @@ class AscendQSAMetadataBuilder(upstream_qsa.Qwen4ExpQSAMetadataBuilder):
                 common_attn_metadata.query_start_loc_cpu,
                 common_attn_metadata.num_actual_tokens,
                 phases,
+                use_union_gbsa=get_ascend_config().enable_qsa_union_prefill,
             )
         return metadata
 

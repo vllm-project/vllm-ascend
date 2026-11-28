@@ -1,5 +1,5 @@
 # SPDX-License-Identifier: Apache-2.0
-"""Request dispatch for Qwen4Exp: Union GBSA prefill and standard GBSA decode."""
+"""Request dispatch for Qwen4Exp: optional Union GBSA prefill and standard GBSA decode."""
 
 from dataclasses import dataclass, replace
 
@@ -45,6 +45,7 @@ class QSARequestPlan:
     union_batches: tuple[QSAUnionBatch, ...]
     decode_spans: tuple[tuple[int, int], ...]
     prepared_union_batches: tuple[QSAUnionPreparedBatch, ...] = ()
+    use_union_gbsa: bool = True
 
     def __getitem__(self, index: int) -> QSARequest:
         return self.requests[index]
@@ -60,6 +61,8 @@ def build_qsa_request_plan(
     query_start_loc_cpu: torch.Tensor,
     num_actual_tokens: int,
     is_prefilling_cpu: torch.Tensor,
+    *,
+    use_union_gbsa: bool = True,
 ) -> QSARequestPlan:
     """Classify mixed-batch rows once for reuse by every QSA layer."""
     if any(t.device.type != "cpu" for t in (query_start_loc_cpu, is_prefilling_cpu)):
@@ -97,7 +100,7 @@ def build_qsa_request_plan(
         )
         for batch in union_requests
     )
-    return QSARequestPlan(requests_tuple, union_batches, tuple(decode_spans))
+    return QSARequestPlan(requests_tuple, union_batches, tuple(decode_spans), use_union_gbsa=use_union_gbsa)
 
 
 def build_qsa_union_group_row_map(query_starts: tuple[int, ...]) -> tuple[tuple[int, ...], ...]:
@@ -129,6 +132,8 @@ def prepare_qsa_union_batches(
     block_table: torch.Tensor,
 ) -> QSARequestPlan:
     """Materialize request-invariant Union metadata once per model step."""
+    if not request_plan.use_union_gbsa:
+        return request_plan
     prepared: list[QSAUnionPreparedBatch] = []
     for batch in request_plan.union_batches:
         rows = batch.query_end - batch.query_start
@@ -192,6 +197,19 @@ def dispatch_qsa_attention(
 
     for batch_index, batch in enumerate(request_plan.union_batches):
         rows = slice(batch.query_start, batch.query_end)
+        if not request_plan.use_union_gbsa:
+            qsa_gbsa_attention(
+                query[rows],
+                key_cache,
+                value_cache,
+                compact_indices[rows],
+                block_table,
+                token_to_req[rows],
+                logical_positions[rows],
+                seq_lens,
+                output[rows],
+            )
+            continue
         prepared = request_plan.prepared_union_batches[batch_index]
         if len(batch.request_indices) == 1:
             qsa_union_gbsa_attention(
