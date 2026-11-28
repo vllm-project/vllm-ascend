@@ -1,0 +1,16 @@
+pr: 23335
+entries:
+  - category: performance
+    text: >-
+      Eligible Qwen4Exp MTP deployments using RecoverSSM avoid a per-decode-step
+      CPU sequence-length snapshot and its main-thread synchronization.
+      Existing context-parallel, sparse KV offload, and unknown-consumer fallbacks
+      are preserved, including the optional isolated PLE backend.
+  - category: performance
+    text: >-
+      GDN RecoverSSM users can opt into grouped recovery graph replay and
+      Qwen4Exp MTP overlap through gdn_recoverssm_execution_config. Recovery
+      graphs are prepared at startup with measured memory reserved before KV
+      allocation and temporary graph registrations isolated from live caches.
+      Both execution options remain disabled by default; async overlap currently
+      requires PP=PCP=DCP=1 and decode without prefix caching.

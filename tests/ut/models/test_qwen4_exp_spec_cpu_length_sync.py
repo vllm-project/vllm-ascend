@@ -2,6 +2,8 @@
 # SPDX-FileCopyrightText: Copyright contributors to the vLLM project
 """Key regressions for the initialization-time CPU length policy."""
 
+import sys
+from types import ModuleType
 from types import SimpleNamespace as NS
 from unittest.mock import Mock
 
@@ -173,3 +175,121 @@ def test_failed_snapshot_drain_keeps_policy_disabled(runner):
     with pytest.raises(RuntimeError, match="D2H failed"):
         runner.model_state.initialize_spec_cpu_length_sync(runner)
     assert runner.model_state.can_skip_spec_cpu_length_sync() is False
+
+
+@pytest.fixture
+def recover_backend(monkeypatch):
+    # The framework PR is independent: exercise its exact type contract even
+    # when the optional backend has not yet been installed in the test tree.
+    module = ModuleType("vllm_ascend.attention.gdn_recoverssm_metadata")
+
+    class RecoverBackend:
+        pass
+
+    class RecoverBuilder:
+        pass
+
+    module.AscendGDNRecoverSSMAttentionBackend = RecoverBackend
+    module.AscendGDNRecoverSSMMetadataBuilder = RecoverBuilder
+    monkeypatch.setitem(sys.modules, module.__name__, module)
+    return RecoverBackend, RecoverBuilder
+
+
+@pytest.mark.parametrize("owner", ["target", "draft", "both"])
+def test_recoverssm_skips_per_step_length_snapshot(runner, recover_backend, owner):
+    backend, builder = recover_backend
+    group = NS(backend=backend, get_metadata_builder=lambda _: builder())
+    if owner in ("target", "both"):
+        runner.attn_groups[0].append(group)
+    if owner in ("draft", "both"):
+        runner.speculator.attn_groups[0].append(group)
+
+    runner.model_state.initialize_spec_cpu_length_sync(runner)
+    assert runner.model_state.can_skip_spec_cpu_length_sync() is True
+    runner.num_computed_tokens_stream.synchronize.assert_called_once_with()
+
+    from vllm_ascend.worker.v2.model_runner import NPUModelRunner
+
+    event = Mock()
+    event.synchronize.side_effect = AssertionError("per-step snapshot wait")
+    runtime = NS(
+        _can_skip_spec_cpu_length_sync=runner.model_state.can_skip_spec_cpu_length_sync,
+        num_computed_tokens_event=event,
+        speculator=runner.speculator,
+        sync_spec_pp_cpu_counts=False,
+    )
+    scheduler = NS(num_scheduled_tokens={}, scheduled_cached_reqs=NS(req_ids=[]))
+    NPUModelRunner._copy_num_computed_tokens_to_cpu(runtime)
+    NPUModelRunner._update_seq_lens_cpu(runtime, scheduler, [])
+    event.synchronize.assert_not_called()
+
+
+@pytest.mark.parametrize("constraint", ["pcp", "dcp", "offload", "unknown_builder", "builder_subclass"])
+def test_recoverssm_unsafe_consumers_keep_snapshot(runner, recover_backend, constraint):
+    backend, builder_cls = recover_backend
+    builder = builder_cls()
+    if constraint == "pcp":
+        runner.parallel_config.prefill_context_parallel_size = 2
+    elif constraint == "dcp":
+        runner.parallel_config.decode_context_parallel_size = 2
+    elif constraint == "offload":
+        runner.ascend_config.sparse_kv_offload_config.enabled = True
+    elif constraint == "unknown_builder":
+        builder = object()
+    else:
+        builder = type("UnauditedBuilder", (builder_cls,), {})()
+    runner.attn_groups[0].append(NS(backend=backend, get_metadata_builder=lambda _: builder))
+    assert policy.can_skip_qwen_cpu_length_sync(runner) is False
+
+
+def test_missing_recoverssm_backend_preserves_existing_policy(runner, monkeypatch):
+    monkeypatch.setitem(sys.modules, "vllm_ascend.attention.gdn_recoverssm_metadata", None)
+    assert policy.can_skip_qwen_cpu_length_sync(runner) is True
+
+
+def test_isolated_ple_consumer_preserves_cpu_length_optimization(runner):
+    from vllm_ascend.models.qwen4_exp import ple as ple_module
+
+    if not hasattr(ple_module, "AscendPLEBackend"):
+        pytest.skip("optional Qwen4Exp PLE integration is provided by #23310")
+
+    from vllm.v1.attention.backends.short_conv_attn import PleShortConvAttentionMetadataBuilder
+
+    from vllm_ascend.models.qwen4_exp.ple import AscendPLEBackend, AscendPLEMetadataBuilder
+
+    assert AscendPLEMetadataBuilder.build is PleShortConvAttentionMetadataBuilder.build
+    group = NS(backend=AscendPLEBackend, get_metadata_builder=lambda _: object.__new__(AscendPLEMetadataBuilder))
+    runner.attn_groups[0].append(group)
+    runner.model_state.initialize_spec_cpu_length_sync(runner)
+    assert runner.model_state.can_skip_spec_cpu_length_sync() is True
+    runner.num_computed_tokens_stream.synchronize.assert_called_once_with()
+
+
+def test_unaudited_ple_builder_keeps_exact_cpu_lengths(runner):
+    from vllm_ascend.models.qwen4_exp import ple as ple_module
+
+    if not hasattr(ple_module, "AscendPLEBackend"):
+        pytest.skip("optional Qwen4Exp PLE integration is provided by #23310")
+
+    from vllm_ascend.models.qwen4_exp.ple import AscendPLEBackend, AscendPLEMetadataBuilder
+
+    class UnauditedBuilder(AscendPLEMetadataBuilder):
+        pass
+
+    runner.attn_groups[0].append(
+        NS(backend=AscendPLEBackend, get_metadata_builder=lambda _: object.__new__(UnauditedBuilder))
+    )
+    assert policy.can_skip_qwen_cpu_length_sync(runner) is False
+
+
+def test_missing_optional_ple_isolation_preserves_existing_policy(runner, monkeypatch):
+    from vllm_ascend.models.qwen4_exp import ple as ple_module
+
+    if not hasattr(ple_module, "AscendPLEBackend"):
+        pytest.skip("optional Qwen4Exp PLE integration is provided by #23310")
+
+    from vllm_ascend.models.qwen4_exp import ple
+
+    monkeypatch.delattr(ple, "AscendPLEBackend")
+    monkeypatch.delattr(ple, "AscendPLEMetadataBuilder")
+    assert policy.can_skip_qwen_cpu_length_sync(runner) is True

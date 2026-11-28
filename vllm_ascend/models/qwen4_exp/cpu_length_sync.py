@@ -37,6 +37,7 @@ def can_skip_qwen_cpu_length_sync(runner: Any) -> bool:
             AscendGDNHostMetadataBackend,
             AscendGDNHostMetadataBuilder,
         )
+        from vllm_ascend.models.qwen4_exp import ple as ascend_ple
         from vllm_ascend.models.qwen4_exp import qsa as ascend_qsa
         from vllm_ascend.models.qwen4_exp.model_state import AscendQwen4ExpModelState
         from vllm_ascend.models.qwen4_exp.qsa import (
@@ -87,6 +88,26 @@ def can_skip_qwen_cpu_length_sync(runner: Any) -> bool:
             AscendGDNFusedAttentionBackend: (AscendGDNAttentionMetadataBuilder, AscendGDNHostMetadataBuilder),
             PleShortConvAttentionBackend: (PleShortConvAttentionMetadataBuilder,),
         }
+        # PLE's optional GDN-flag isolation changes only construction, not the
+        # audited metadata consumer. Keep the independent CPU-length policy
+        # usable before that framework adaptation is installed as well.
+        ple_backend = getattr(ascend_ple, "AscendPLEBackend", None)
+        ple_builder = getattr(ascend_ple, "AscendPLEMetadataBuilder", None)
+        if isinstance(ple_backend, type) and isinstance(ple_builder, type):
+            allowed_builders[ple_backend] = (ple_builder,)
+        # RecoverSSM also consumes rejection-corrected device lengths. Its
+        # framework integration may be absent; preserve existing fast paths
+        # rather than disabling them because an optional backend is missing.
+        try:
+            from vllm_ascend.attention.gdn_recoverssm_metadata import (
+                AscendGDNRecoverSSMAttentionBackend,
+                AscendGDNRecoverSSMMetadataBuilder,
+            )
+        except ModuleNotFoundError as exc:
+            if exc.name != "vllm_ascend.attention.gdn_recoverssm_metadata":
+                raise
+        else:
+            allowed_builders[AscendGDNRecoverSSMAttentionBackend] = (AscendGDNRecoverSSMMetadataBuilder,)
         target_pairs = tuple(
             (group.backend, type(group.get_metadata_builder(0)))
             for cache_groups in runner.attn_groups

@@ -736,9 +736,10 @@ class NPUWorker(GPUWorker):
         if kv_cache_memory_bytes := self.cache_config.kv_cache_memory_bytes:
             with set_current_vllm_config(self.vllm_config):
                 self.model_runner.profile_run(randomize_inputs=randomize_inputs)
+            kv_cache_memory_bytes = self._reserve_gdn_recovery_memory(kv_cache_memory_bytes)
             logger.info(
                 "Initial free memory %.2f GiB, reserved %.2f GiB for KV Cache "
-                "as specified by kv_cache_memory_bytes, skipping memory profiling. "
+                "after any GDN graph reservation from kv_cache_memory_bytes, skipping memory profiling. "
                 "This does not respect the gpu_memory_utilization config. "
                 "Only use kv_cache_memory_bytes when you want manual control of "
                 "KV cache memory size. If OOM'ed, check the difference of initial "
@@ -799,6 +800,7 @@ class NPUWorker(GPUWorker):
             "isolate vLLM in its own container."
         )
         self.available_kv_cache_memory_bytes = self.requested_memory - profile_result.non_kv_cache_memory
+        self.available_kv_cache_memory_bytes = self._reserve_gdn_recovery_memory(self.available_kv_cache_memory_bytes)
         self.available_kv_cache_memory_bytes = self._scale_kv_cache_memory_for_multi_group(
             self.available_kv_cache_memory_bytes,
         )
@@ -811,6 +813,20 @@ class NPUWorker(GPUWorker):
             self.available_kv_cache_memory_bytes
         )
         return self._apply_kvpp_memory_budget(self.available_kv_cache_memory_bytes)
+
+    def _reserve_gdn_recovery_memory(self, available_bytes: int) -> int:
+        execution = getattr(get_ascend_config(), "gdn_recoverssm_execution_config", None)
+        if execution is None or execution.capture_commit is not True:
+            return available_bytes
+        profile = getattr(self.model_runner, "profile_gdn_recovery_memory", None)
+        with set_current_vllm_config(self.vllm_config):
+            reserve = profile() if callable(profile) else 0
+        self.gdn_recovery_graph_memory_bytes = reserve
+        if reserve and reserve >= available_bytes:
+            raise ValueError(f"GDN graph reserve ({reserve} bytes) leaves no KV cache budget ({available_bytes} bytes)")
+        if reserve:
+            logger.info("KV memory budget: %d bytes minus %d bytes for GDN recovery graphs", available_bytes, reserve)
+        return available_bytes - reserve
 
     def _scale_kv_cache_memory_for_multi_group(self, available_memory: int) -> int:
         """Scale the KV cache budget for vllm main's multi-group layout.
@@ -1069,6 +1085,11 @@ class NPUWorker(GPUWorker):
         npugraph_memory_bytes = 0
         if not self.model_config.enforce_eager:
             npugraph_memory_bytes = self.model_runner.capture_model()
+
+        capture_recovery = getattr(self.model_runner, "capture_gdn_recovery_graphs", None)
+        execution = getattr(get_ascend_config(), "gdn_recoverssm_execution_config", None)
+        if execution is not None and execution.capture_commit is True and callable(capture_recovery):
+            npugraph_memory_bytes += capture_recovery()
 
         # Suggest an optimal --kv-cache-memory value for future runs.
         # Only emitted when we ran full profiling (kv_cache_memory_bytes was not

@@ -234,6 +234,12 @@ class GDNRecoverSSMCommitContext:
     # Device-side int64 table [2, 2, num_layers]: checkpoint/replay,
     # base address/block stride in elements, layer index.
     _state_commit_cache_address_stride_table: torch.Tensor = field(repr=False)
+    _conv_table_views: tuple[torch.Tensor, ...] = field(init=False, repr=False)
+
+    def __post_init__(self) -> None:
+        # Cache view objects once rather than creating four new Python Tensor
+        # wrappers at every post-sampling commit (also used by merged groups).
+        self._conv_table_views = tuple(self._conv_cache_address_stride_table.unbind(0))
 
     @classmethod
     def create(
@@ -329,10 +335,7 @@ class GDNRecoverSSMCommitContext:
         if commit_conv:
             compact_conv_state(
                 reference.conv,
-                self._conv_cache_address_stride_table[0],
-                self._conv_cache_address_stride_table[1],
-                self._conv_cache_address_stride_table[2],
-                self._conv_cache_address_stride_table[3],
+                *self._conv_table_views,
                 state_indices,
                 plan.commit_lens,
                 plan.final_state_indices,
