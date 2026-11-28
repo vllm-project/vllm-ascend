@@ -48,8 +48,26 @@ def load_mla_cache_context_rows(cache_k, cache_v, block_table, seq_lens, seq_off
     return load_mla_cache_rows_by_slots(cache_k, cache_v, slots)
 
 
+def _is_block_contiguous_mla_component(cache) -> bool:
+    """Return whether each physical block is a dense row-major slice supported by native PA gather."""
+    block_elements = cache.shape[1] * cache.shape[-1]
+    return (
+        cache.shape[1] > 0
+        and cache.shape[-1] > 0
+        and cache.stride(-1) == 1
+        and cache.stride(1) == cache.shape[-1]
+        and (cache.shape[0] <= 1 or cache.stride(0) >= block_elements)
+    )
+
+
 def try_load_strided_mla_cache(cache_k, cache_v, block_table, seq_lens, seq_offset, key, value) -> bool:
-    """Handle validated strided 4D FP16/BF16 ND caches with one physical head."""
+    """Handle validated intra-block strided 4D FP16/BF16 ND caches with one physical head.
+
+    Component-major / block-outermost (BLHNC) caches whose individual blocks are
+    internally contiguous (``stride(1) == head_dim`` and ``stride(-1) == 1``) stay
+    on native ``torch_npu.npu_gather_pa_kv_cache``, which gathers block-strided
+    single-head ND MLA pages directly without whole-pool copies.
+    """
     if (
         cache_k.ndim != 4
         or cache_v.ndim != 4
@@ -59,6 +77,7 @@ def try_load_strided_mla_cache(cache_k, cache_v, block_table, seq_lens, seq_offs
         or cache_v.dtype != cache_k.dtype
         or cache_k.device.type != "npu"
         or (cache_k.is_contiguous() and cache_v.is_contiguous())
+        or (_is_block_contiguous_mla_component(cache_k) and _is_block_contiguous_mla_component(cache_v))
     ):
         return False
     # Formats 0/2 are NCHW/ND; keep NZ and other layouts on the native reader path.
