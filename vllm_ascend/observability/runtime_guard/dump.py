@@ -521,10 +521,13 @@ def _slice_blocks(tensor: torch.Tensor, block_ids: list[int]) -> tuple[torch.Ten
     for i, block_id in enumerate(valid):
         out[i].copy_(tensor[block_id], non_blocking=pin_memory)
     if pin_memory:
+        # Sync the source tensor's device (not the process current device):
+        # copies run on ``tensor.device``; argument-free synchronize waits on
+        # whatever is current and can return before the D2H finishes.
         if device_type == "npu":
-            torch.npu.synchronize()
+            torch.npu.synchronize(tensor.device)
         else:
-            torch.cuda.synchronize()
+            torch.cuda.synchronize(tensor.device)
     return out, valid
 
 

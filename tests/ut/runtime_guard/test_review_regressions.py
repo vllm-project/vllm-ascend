@@ -1654,8 +1654,12 @@ def test_v19e_queue_fail_refunds_quota():
     quota.refund.assert_called_once_with(consume_quota=True)
 
 
-def test_v19f_multi_job_arm_refunds_once_when_all_fail(tmp_path: Path):
-    """Same arm_id + consume_quota: all skips → single refund (not N)."""
+def test_v19f_multi_job_arm_keeps_quota_when_skip_marker_written(tmp_path: Path):
+    """Same arm_id + empty block_ids: dump_skipped tree counts as dumped → no refund.
+
+    Quota semantics: once drain creates a dump directory / skip marker, the arm
+    keeps its auto_max_times unit even when D2H cannot run (empty_block_ids).
+    """
     from vllm_ascend.observability.runtime_guard.processor import RuntimeGuardProcessor
     from vllm_ascend.observability.runtime_guard.state import RequestGuardStore
 
@@ -1686,6 +1690,49 @@ def test_v19f_multi_job_arm_refunds_once_when_all_fail(tmp_path: Path):
             },
         ]
         RuntimeGuardProcessor._run_kv_dumps(proc, jobs)
+        quota.refund.assert_not_called()
+        assert (tmp_path / "token_repeat" / "r1").is_dir()
+        assert (tmp_path / "token_repeat" / "r2").is_dir()
+    finally:
+        RequestGuardStore.reset_for_tests()
+
+
+def test_v19f2_multi_job_arm_refunds_once_when_no_dump_tree(tmp_path: Path):
+    """Same arm_id: if skip markers cannot be written, refund once (not N)."""
+    from vllm_ascend.observability.runtime_guard.processor import RuntimeGuardProcessor
+    from vllm_ascend.observability.runtime_guard.state import RequestGuardStore
+
+    RequestGuardStore.reset_for_tests()
+    try:
+        RequestGuardStore.get().mark_finished(["r1", "r2"], wave=0)
+        quota = MagicMock()
+        runner = SimpleNamespace(tp_rank=0, dp_rank=0, dcp_rank=0, dcp_size=1)
+        proc = SimpleNamespace(
+            runner=runner,
+            runtime_config=SimpleNamespace(dump_root=lambda: str(tmp_path)),
+            action_executor=SimpleNamespace(_kv_reader=MagicMock(), submit_heavy=None),
+            quota=quota,
+        )
+        arm = "arm-shared"
+        jobs = [
+            {
+                "req_id": "r1",
+                "incident_type": "token_repeat",
+                "consume_quota": True,
+                "arm_id": arm,
+            },
+            {
+                "req_id": "r2",
+                "incident_type": "token_repeat",
+                "consume_quota": True,
+                "arm_id": arm,
+            },
+        ]
+        with patch(
+            "vllm_ascend.observability.runtime_guard.processor_dump.write_kv_dump_skipped",
+            return_value=None,
+        ):
+            RuntimeGuardProcessor._run_kv_dumps(proc, jobs)
         quota.refund.assert_called_once_with(consume_quota=True)
     finally:
         RequestGuardStore.reset_for_tests()
