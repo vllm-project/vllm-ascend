@@ -469,6 +469,10 @@ class NPUWorker(GPUWorker):
             weight_transfer_engine.shutdown()
 
         if model_runner := getattr(self, "model_runner", None):
+            from vllm_ascend.worker.v2.kv_connector import C8VScaleKVConnector
+
+            if isinstance(getattr(model_runner, "kv_connector", None), C8VScaleKVConnector):
+                model_runner.kv_connector = model_runner.kv_connector.release_cache_views()
             shutdown_fn = getattr(model_runner, "shutdown", None)
             if callable(shutdown_fn):
                 shutdown_fn()
@@ -1271,6 +1275,10 @@ class NPUWorker(GPUWorker):
             kv_cache_config,
             kv_cache_allocation_context=self._maybe_get_memory_pool_context(tag="kv_cache"),
         )
+
+        from vllm_ascend.worker.v2.kv_connector import maybe_wrap_c8_v_scale_connector
+
+        maybe_wrap_c8_v_scale_connector(self.model_runner, kv_cache_config, self.vllm_config.kv_transfer_config)
 
         # MRV2's scheduler emits new_block_ids_to_zero whenever this flag is
         # set, so its worker-side consumer must use the same condition.

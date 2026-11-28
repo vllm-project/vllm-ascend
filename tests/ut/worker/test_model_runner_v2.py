@@ -2163,7 +2163,9 @@ def test_copy_num_computed_tokens_to_cpu_records_event():
 
 def _c8_mxfp_runner(layers: dict, num_blocks: int = 2) -> NPUModelRunner:
     runner = NPUModelRunner.__new__(NPUModelRunner)
-    runner.kv_cache_config = SimpleNamespace(num_blocks=num_blocks)
+    runner.kv_cache_config = SimpleNamespace(
+        num_blocks=num_blocks, kv_cache_groups=[SimpleNamespace(layer_names=list(layers))]
+    )
     runner.compilation_config = SimpleNamespace(static_forward_context=layers)
     runner.vllm_config = SimpleNamespace(
         cache_config=SimpleNamespace(cache_dtype="mxfp8"),
