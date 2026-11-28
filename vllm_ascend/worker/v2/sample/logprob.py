@@ -68,7 +68,7 @@ def _topk_log_softmax_kernel(
 
         candidate_logits = tl.load(row_ptr + candidate_ids, mask=candidate_mask)
         candidate_logits = candidate_logits.to(tl.float32)
-        token_logprobs = candidate_logits - lse - max_val
+        token_logprobs = candidate_logits - max_val - lse
         tl.store(output_ptr + req_idx * topk + candidate_offsets, token_logprobs, mask=candidate_mask)
 
 
