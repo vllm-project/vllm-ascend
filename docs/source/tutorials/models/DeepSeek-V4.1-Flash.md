@@ -1292,6 +1292,9 @@ vLLM Ascend revision.
     - `MooncakeConnectorV2` transfers KV cache between the two roles using its
       default non-layerwise pull mode.
       `kv_role` must be `kv_producer` on Prefill and `kv_consumer` on Decode.
+      For a symmetric bidirectional deployment where every engine is both
+      Prefill and Decode, use `kv_both`; see
+      [Section 5.2.3](#523-bidirectional-pd-with-kv_both).
       `kv_port` must be reachable and must not conflict with another service.
     - Both roles use DSpark with five speculative tokens. Prefill runs the target
       model in eager mode. Decode uses `FULL_DECODE_ONLY` for the target model
@@ -1665,6 +1668,45 @@ vLLM Ascend revision.
     INFO:     Waiting for application startup.
     INFO:     Application startup complete.
     ```
+
+#### 5.2.3 Bidirectional PD with `kv_both`
+
+Instead of dedicating one instance to Prefill and another to Decode, two
+identical instances can each act as both roles. Configure every engine with
+`kv_role: "kv_both"` and declare the same symmetric layout in both `prefill`
+and `decode`:
+
+```json
+{
+  "kv_connector": "MooncakeHybridConnector",
+  "kv_role": "kv_both",
+  "kv_port": "36010",
+  "kv_connector_extra_config": {
+    "prefill": {"dp_size": 2, "tp_size": 8, "pp_size": 1},
+    "decode": {"dp_size": 2, "tp_size": 8, "pp_size": 1}
+  }
+}
+```
+
+Requirements and limits:
+
+- `prefill.tp_size`, `decode.tp_size`, and the engine's local TP size must be
+  equal, and `prefill.pp_size` and `decode.pp_size` must equal the engine's
+  local PP size. A `kv_both` engine is therefore self-symmetric, and every
+  instance that exchanges KV cache must use the same layout.
+- A `kv_both` engine must run with `prefill_context_parallel_size=1`. PCP is
+  supported only on a dedicated `kv_producer` engine.
+- Asymmetric layouts, such as DP2/TP8 on one instance and DP1/TP16 on the
+  other, are not supported with `kv_both`. The connector requires
+  `prefill_tp_size >= decode_tp_size`, so one direction of such a pair would
+  violate that contract. Keep asymmetric deployments on
+  `kv_producer`/`kv_consumer`.
+- DP size is not part of the transfer routing today. Keep `prefill.dp_size` and
+  `decode.dp_size` identical so the configuration states one unambiguous
+  layout.
+- `kv_port` must be reachable from the peer instances. Different instances may
+  reuse the same port number because each engine binds it inside its own
+  network namespace.
 
 ### 5.3 1P1D Deployment with Memcache KV Cache Pool
 
