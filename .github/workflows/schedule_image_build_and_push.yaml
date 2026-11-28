@@ -72,7 +72,9 @@ jobs:
             {name: "A3 openEuler",   dockerfile: "Dockerfile.a3.openEuler",  suffix: "a3-openeuler",  soc: "a3"},
             {name: "310P openEuler", dockerfile: "Dockerfile.310p.openEuler",suffix: "310p-openeuler",soc: "310p"},
             {name: "A5 openEuler",   dockerfile: "Dockerfile.a5.openEuler",  suffix: "a5-openeuler",  soc: "950"},
-            {name: "A5 UBX openEuler", dockerfile: "Dockerfile.a5.ubx.openEuler", suffix: "a5-ubx-openeuler", soc: "950"}
+            {name: "A5 UBX openEuler", dockerfile: "Dockerfile.a5.ubx.openEuler", suffix: "a5-ubx-openeuler", soc: "950"},
+            {name: "A5 PCIe Ubuntu", dockerfile: "Dockerfile.a5.PCIe",       suffix: "a5-pcie",       soc: "950"},
+            {name: "A5 PCIe openEuler", dockerfile: "Dockerfile.a5.PCIe.openEuler", suffix: "a5-pcie-openeuler", soc: "950"}
           ]')
           echo "build_meta=$MATRIX" >> "$GITHUB_OUTPUT"
 
@@ -82,7 +84,7 @@ jobs:
     if: ${{ !(github.event_name == 'pull_request' && !contains(github.event.pull_request.labels.*.name, 'image-build')) }}
     strategy:
       fail-fast: false
-      max-parallel: 10
+      max-parallel: 12
       matrix:
         build_meta: ${{ fromJSON(needs.setup-matrix.outputs.build_meta) }}
     uses: ./.github/workflows/_schedule_image_build.yaml

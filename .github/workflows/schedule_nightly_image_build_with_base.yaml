@@ -51,7 +51,7 @@ on:
           - releases/v0.20.2rc
           - releases/v0.18.0
       chips:
-        description: 'Chips to build (JSON array: ["a2","a3","310p","a5","a5-ubx"]). Default builds all except the opt-in variants; pass a subset to limit the build.'
+        description: 'Chips to build (JSON array: ["a2","a3","310p","a5","a5-ubx","a5-pcie"]). Default builds all except the opt-in variants; pass a subset to limit the build.'
         required: false
         default: '["a2","a3","310p","a5"]'
         type: string
@@ -86,7 +86,9 @@ jobs:
             {target:"a3",   os:"openeuler", soc:"a3",   dockerfile:"Dockerfile.a3.openEuler",   suffix:"a3-openeuler"},
             {target:"310p", os:"openeuler", soc:"310p", dockerfile:"Dockerfile.310p.openEuler", suffix:"310p-openeuler"},
             {target:"a5",   os:"openeuler", soc:"950",  dockerfile:"Dockerfile.a5.openEuler",   suffix:"a5-openeuler"},
-            {target:"a5-ubx", os:"openeuler", soc:"950", dockerfile:"Dockerfile.a5.ubx.openEuler", suffix:"a5-ubx-openeuler"}
+            {target:"a5-ubx", os:"openeuler", soc:"950", dockerfile:"Dockerfile.a5.ubx.openEuler", suffix:"a5-ubx-openeuler"},
+            {target:"a5-pcie", os:"ubuntu", soc:"950", dockerfile:"Dockerfile.a5.PCIe", suffix:"a5-pcie"},
+            {target:"a5-pcie", os:"openeuler", soc:"950", dockerfile:"Dockerfile.a5.PCIe.openEuler", suffix:"a5-pcie-openeuler"}
           ]')
           FILTERED=$(echo "$ALL" | jq -c --argjson chips "$CHIPS" \
             '[.[] | select(.target as $t | $chips | index($t))]')
