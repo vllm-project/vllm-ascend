@@ -218,8 +218,8 @@ class AscendKVCacheConfigBuilder(DefaultKVCacheConfigBuilder):
             config = self._place_native_replicated_draft_pools(vllm_config, kv_cache_groups, pools, num_blocks)
         elif _has_deepseek_v4_layout(legacy_groups):
             config = _place_deepseek_v4_cache(vllm_config, kv_cache_groups, legacy_groups, num_blocks)
-        else:
-            config = get_qwen4_exp_kv_cache_config(vllm_config, legacy_groups, 0, num_blocks=num_blocks)
+        elif (qwen_pool_bytes := get_qwen4_exp_pool_bytes_per_block(legacy_groups)) is not None:
+            config = get_qwen4_exp_kv_cache_config(vllm_config, legacy_groups, num_blocks * qwen_pool_bytes)
         if config is None:
             config = super().get_kv_cache_config_from_groups(vllm_config, kv_cache_groups, num_blocks)
         config.kv_cache_groups = kv_cache_groups

@@ -242,6 +242,7 @@ def test_core_applies_capacity_and_converges_worker_layouts(monkeypatch, overrid
         num_gpu_blocks_override=override, prefix_cache_retention_interval=None, enable_extensible_kv_cache=False
     )
     config.model_config.original_max_model_len = config.model_config.max_model_len = 16
+    config.max_in_flight_tokens = config.model_config.max_model_len
     config.parallel_config = SimpleNamespace(tensor_parallel_size=1, decode_context_parallel_size=1)
     spec = MLAAttentionSpec(
         block_size=16, num_kv_heads=1, head_size=16, dtype=torch.bfloat16, model_version="deepseek_v4"
