@@ -15,6 +15,7 @@ MAX_BATCHED_TOKENS = 16384
 
 
 @pytest.mark.e2e_model("Qwen/Qwen3.5-27B")
+@pytest.mark.parametrize("hccl_mode", ["AIV", "AI_CPU"])
 @pytest.mark.e2e_coverage(
     arch="dense",
     feature="mtp,aclgraph,chunked_prefill,long_sequence",
@@ -25,7 +26,9 @@ MAX_BATCHED_TOKENS = 16384
     graph_mode="full_decode_only",
 )
 @wait_until_npu_memory_free()
-def test_qwen35_pp_mtp_full_decode_only() -> None:
+def test_qwen35_pp_mtp_full_decode_only(monkeypatch, hccl_mode: str) -> None:
+    # Exercise both the host-feedback path and the existing device transport.
+    monkeypatch.setenv("HCCL_OP_EXPANSION_MODE", hccl_mode)
     port = get_open_port()
     server_args = [
         "--trust-remote-code",

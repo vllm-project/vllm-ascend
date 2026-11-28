@@ -946,6 +946,17 @@ class NPUWorker(GPUWorker):
         intermediate_tensors = None
         forward_pass = scheduler_output.total_num_scheduled_tokens > 0
         if forward_pass and not get_pp_group().is_first_rank:
+            # Do not let the next AIV receive overtake token feedback needed
+            # by the previous stage before it can send the next hidden states.
+            if (
+                self.use_v2_model_runner
+                and self.vllm_config.scheduler_config.async_scheduling
+                and envs_ascend.HCCL_OP_EXPANSION_MODE == "AIV"
+            ):
+                pp_handler = getattr(self.model_runner, "pp_handler", None)
+                if pp_handler is None:
+                    raise RuntimeError("AIV asynchronous pipeline receive requires a PP feedback handler")
+                torch.npu.current_stream(self.device).wait_stream(pp_handler.broadcast_stream)
             if enable_sp(self.vllm_config):
                 all_gather_group = None
             else:
@@ -987,6 +998,17 @@ class NPUWorker(GPUWorker):
 
     @torch.inference_mode()
     def sample_tokens(self, grammar_output: "GrammarOutput") -> ModelRunnerOutput | AsyncModelRunnerOutput:
+        # PPHandler propagates this main-stream send dependency to its
+        # feedback stream before receiving sampled tokens and drafts.
+        if (
+            self.use_v2_model_runner
+            and envs_ascend.HCCL_OP_EXPANSION_MODE == "AIV"
+            and self._pp_send_work
+            and not self.model_runner.is_last_pp_rank
+        ):
+            for handle in self._pp_send_work:
+                handle.wait()
+            self._pp_send_work = []
         output = self.model_runner.sample_tokens(grammar_output)
         return output
 
