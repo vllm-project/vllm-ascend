@@ -1,0 +1,4 @@
+pr: 23258
+entries:
+  - category: performance
+    text: Reduced routing overhead for eligible A2 local W8A8 MoE inference with fused SwiGLU by avoiding a separate expert-count cumulative sum. No configuration change is required.

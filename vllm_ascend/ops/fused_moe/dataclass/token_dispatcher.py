@@ -22,9 +22,12 @@ from typing import TYPE_CHECKING, Generic, TypeVar
 
 import numpy as np
 import torch
+from vllm.model_executor.layers.fused_moe.activation import MoEActivation
 
 from vllm_ascend.ops.fused_moe.dataclass.moe_quant import MoEQuantParams
 from vllm_ascend.ops.fused_moe.dataclass.router_input import MoeRouterInput
+from vllm_ascend.ops.fused_moe.moe_utils import enable_fusion_gmmswigluquant
+from vllm_ascend.quantization.quant_type import QuantType
 
 if TYPE_CHECKING:
     from vllm_ascend.ops.fused_moe.dataclass.fused_experts import MoEFusedExpertsInput
@@ -72,6 +75,8 @@ class MoETokenDispatchInput:
     topk_ids: torch.Tensor
     routing: MoeRouterInput
     quant: MoEQuantParams
+    # Consumer preference only. Each dispatcher retains its topology contract.
+    prefer_cumulative_group_list: bool = False
 
 
 @dataclass(frozen=True, slots=True)
@@ -94,4 +99,10 @@ def build_token_dispatch_input(
         topk_ids=fused_experts_input.topk_ids,
         routing=fused_experts_input.routing,
         quant=fused_experts_input.quant,
+        prefer_cumulative_group_list=(
+            fused_experts_input.quant.quant_type == QuantType.W8A8
+            and fused_experts_input.activation in (MoEActivation.SILU, "silu")
+            and not fused_experts_input.dynamic_eplb
+            and enable_fusion_gmmswigluquant()
+        ),
     )

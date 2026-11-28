@@ -57,6 +57,9 @@ class HardwareCapability(Enum):
     # Legacy default: replace vLLM's custom-op list with ``["all"]`` during
     # platform configuration. Runtime extension loading is a separate contract.
     AUTO_ENABLE_CUSTOM_OPS = auto()
+    # Local INT8 routing can emit cumulative expert boundaries consumed by
+    # fused SwiGLU GMM1 and grouped GMM2 without a separate count conversion.
+    MOE_INT8_CUMULATIVE_GROUP_LIST = auto()
     # Register ATB extension entry points eagerly during worker construction.
     ATB_EXTENSIONS = auto()
     # Run the ATB matmul warmup that avoids first-request cache-write latency.
@@ -433,6 +436,7 @@ _HARDWARE_PROFILES: Mapping[AscendDeviceType, HardwareProfile] = MappingProxyTyp
             native_weight_formats=_INT4_WEIGHT_FORMATS,
             capabilities=_STANDARD_CAPABILITIES
             | {
+                HardwareCapability.MOE_INT8_CUMULATIVE_GROUP_LIST,
                 HardwareCapability.FLASH_ATTN_NPU_3,
                 HardwareCapability.MM_REDUCE_SCATTER_BF16,
                 HardwareCapability.QWEN4EXP_HC_GATE_MIX_ROW_BLOCK,
