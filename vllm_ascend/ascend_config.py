@@ -688,6 +688,7 @@ class AscendConfig:
         default_factory=lambda: os.path.join(os.path.expanduser("~"), "ascend", "log", "vllm_ascend")
     )
     dump_config_path: str | None = None
+    dump_on_profile_run: bool = False
     runtime_config_path: str | None = None
     runtime_config_hot_reload: bool = False
     # Runtime object constructed in init_ascend_config (not from additional_config dict).
@@ -791,6 +792,11 @@ class AscendConfig:
         from vllm.compilation.breakable_cudagraph import is_breakable_cudagraph_enabled
 
         vc = vllm_config
+        if self.dump_on_profile_run:
+            if not self.dump_config_path:
+                raise ValueError("dump_on_profile_run requires dump_config or dump_config_path.")
+            if not vc.use_v2_model_runner:
+                raise ValueError("dump_on_profile_run requires Model Runner V2.")
         validate_expert_offload_config(self.expert_offload_config, vc, self)
         if self.shared_engram is not None and self.shared_engram.backend in ("a2", "a5"):
             if getattr(vc, "shutdown_timeout", 0) <= 0:

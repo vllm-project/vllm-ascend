@@ -325,6 +325,8 @@ class NPUModelRunner(GPUModelRunner):
 
                 self.debugger = PrecisionDebugger(dump_cfg)
             else:
+                if self.ascend_config.dump_on_profile_run:
+                    raise ValueError("dump_on_profile_run requires eager msprobe dumping (use --enforce-eager).")
                 try:
                     from msprobe.pytorch import AclGraphDumper
                 except Exception as exc:
@@ -783,7 +785,7 @@ class NPUModelRunner(GPUModelRunner):
             get_kv_transfer_group().handle_preemptions(kv_connector_metadata)
 
         dump_forward = dummy_run or scheduler_output.total_num_scheduled_tokens > 0
-        # Eager PrecisionDebugger is started only for real scheduler steps.
+        # The optional eager profile dump window is managed by profile_run().
         # Graph dumping is already active from load_model(), so dummy forwards
         # only need to flush the graph dumper below without writing a step.
         if dump_forward and not dummy_run:
@@ -905,10 +907,15 @@ class NPUModelRunner(GPUModelRunner):
                         **profile_kwargs,
                     )
             self.max_num_tokens = profile_tokens
+            dump_on_profile_run = self.ascend_config.dump_on_profile_run
             try:
+                if dump_on_profile_run:
+                    self._start_dump_data()
                 super().profile_run(**profile_kwargs)
             finally:
                 self.max_num_tokens = global_tokens
+                if dump_on_profile_run:
+                    self._finalize_dump_data()
 
     def gather_batch_req_state(self, scheduler_output: SchedulerOutput, dummy_run: bool):
         batch_state, uniform_token_count = super().gather_batch_req_state(scheduler_output, dummy_run)
@@ -1664,14 +1671,19 @@ class NPUModelRunner(GPUModelRunner):
         self.debugger.start(self.model, **kwargs)
         self._debugger_started = True
 
-    def _finalize_dump_data(self, **kwargs) -> None:
+    def _finalize_dump_data(self, *, dump: bool = True) -> None:
         if self.debugger is None or not self._debugger_started:
             return
         if hasattr(self.debugger, "stop"):
+            # An eager profile owns its dump window across dummy forwards.
+            if not dump:
+                return
             self.debugger.stop()
             self._debugger_started = False
-
-        self.debugger.step(**kwargs)
+        elif not dump:
+            self.debugger.step(dump=False)
+            return
+        self.debugger.step()
 
     @staticmethod
     def _log_adaptive_verification_costs(manager: Any) -> None:

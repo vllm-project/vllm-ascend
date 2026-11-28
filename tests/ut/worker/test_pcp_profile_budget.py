@@ -18,6 +18,10 @@ from vllm_ascend.worker.v2.pcp_manager import AscendPCPManager
 
 def make_runner(tokens=16384, pcp=16, requests=64, query=4, method="mtp", dcp=1):
     runner = NPUModelRunner.__new__(NPUModelRunner)
+    runner.ascend_config = SimpleNamespace(
+        sparse_kv_offload_config=SimpleNamespace(enabled=False),
+        dump_on_profile_run=False,
+    )
     runner.max_num_tokens = tokens
     runner.max_num_reqs = requests
     runner.vllm_config = SimpleNamespace(
@@ -90,7 +94,6 @@ def test_local_dummy_preserves_actual_upstream_request_count(tokens, requests):
 @pytest.mark.parametrize("method", ["mtp", "dspark", "dflash"])
 def test_profile_temporarily_sets_budget_and_restores_on_failure(fail, method):
     runner = make_runner(requests=512, method=method)
-    runner.ascend_config = SimpleNamespace(sparse_kv_offload_config=SimpleNamespace(enabled=False))
     runner._dummy_run = Mock()
 
     def profile(self, **kwargs):
@@ -117,7 +120,6 @@ def test_profile_temporarily_sets_budget_and_restores_on_failure(fail, method):
 @pytest.mark.parametrize("capacity,reserve", [(4096, False), (1024, True)])
 def test_mc2_reservation_compares_the_selected_profile_budget(capacity, reserve):
     runner = make_runner(requests=512)
-    runner.ascend_config = SimpleNamespace(sparse_kv_offload_config=SimpleNamespace(enabled=False))
     runner.get_model = Mock()
     runner._dummy_run = Mock()
     with (

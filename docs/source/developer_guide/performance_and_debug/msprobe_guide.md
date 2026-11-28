@@ -144,6 +144,34 @@ graph mode:
      --additional-config '{"dump_config_path": "/data/msprobe_config.json"}' &
    ```
 
+### 3.1 Compare weights across an RL weight update
+
+With Model Runner V2, enable `dump_on_profile_run` to capture the startup
+profile as the first msprobe step. Use eager mode and an L0 statistics dump to
+capture module parameter summaries.
+
+```bash
+VLLM_USE_V2_MODEL_RUNNER=1 vllm serve Qwen/Qwen2.5-0.5B-Instruct \
+  --load-format dummy --enforce-eager \
+  --weight-transfer-config '{"backend": "hccl"}' \
+  --additional-config '{
+    "dump_on_profile_run": true,
+    "dump_config": {
+      "task": "statistics",
+      "level": "L0",
+      "dump_path": "/data/msprobe_weights",
+      "step": [0, 1]
+    }
+  }'
+```
+
+Use the weight-transfer backend for your RL setup and finish the weight update
+before sending the first inference request. Compare the `parameters` entries
+for the same module and rank in `step0` (startup) and `step1` (first request
+step). With the option enabled, msprobe step filters include the startup step.
+The dump covers modules executed in each forward and also collects activation
+statistics. Capture can increase startup time and the measured peak memory.
+
 ## 4. Send requests and collect dumps
 
 1. Send inference requests as usual, for example:

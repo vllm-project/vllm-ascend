@@ -4,7 +4,7 @@ from datetime import timedelta
 from pathlib import Path
 from types import SimpleNamespace
 from typing import Any
-from unittest.mock import MagicMock, Mock, patch
+from unittest.mock import MagicMock, Mock, call, patch
 
 import numpy as np
 import pytest
@@ -48,6 +48,7 @@ from vllm_ascend.worker.v2.utils import C8KVBlockZeroer
 def _make_runner(*args, **kwargs):
     runner = NPUModelRunner.__new__(NPUModelRunner)
     runner.ascend_config = SimpleNamespace(
+        dump_on_profile_run=False,
         scheduler_config=SimpleNamespace(),
         sparse_kv_offload_config=SimpleNamespace(enabled=False),
         kvpp_config=SimpleNamespace(size=1),
@@ -1833,6 +1834,52 @@ def test_profile_run_skips_mc2_dummy_without_capacity():
     ):
         runner.profile_run()
     runner._dummy_run.assert_not_called()
+
+
+@pytest.mark.parametrize("enabled,fail_profile", [(False, False), (True, False), (True, True)])
+def test_profile_run_dump_lifecycle(enabled, fail_profile):
+    debugger = Mock(spec=["start", "stop", "step"])
+    runner = _make_dump_runner(debugger)
+    runner.ascend_config.dump_on_profile_run = enabled
+
+    def warmup(*args, **kwargs):
+        assert not runner._debugger_started
+
+    runner._dummy_run = Mock(side_effect=warmup)
+
+    def profile(**kwargs):
+        assert runner._debugger_started is enabled
+        runner._finalize_dump_data(dump=False)
+        assert runner._debugger_started is enabled
+        if fail_profile:
+            raise RuntimeError("profile failed")
+
+    with (
+        patch("vllm_ascend.worker.v2.model_runner.get_mc2_tokens_capacity", return_value=4),
+        patch("vllm_ascend.worker.v2.model_runner.select_moe_comm_method", return_value=MoECommType.MC2),
+        patch("vllm_ascend.worker.v2.model_runner.disable_compilation", return_value=nullcontext()),
+        patch.object(runner, "get_model", return_value=runner.model),
+        patch("vllm_ascend.worker.v2.model_runner.override_mrv2_in_profile_run", return_value=nullcontext()),
+        patch.object(GPUModelRunner, "profile_run", side_effect=profile),
+    ):
+        if fail_profile:
+            with pytest.raises(RuntimeError, match="profile failed"):
+                runner.profile_run()
+        else:
+            runner.profile_run()
+
+    assert not runner._debugger_started
+    runner._dummy_run.assert_called_once()
+    assert debugger.mock_calls == ([call.start(runner.model), call.stop(), call.step()] if enabled else [])
+    if not fail_profile:
+        debugger.reset_mock()
+        runner._start_dump_data(scheduled_tokens={"request": 4})
+        runner._finalize_dump_data()
+        assert debugger.mock_calls == [
+            call.start(runner.model, scheduled_tokens={"request": 4}),
+            call.stop(),
+            call.step(),
+        ]
 
 
 def test_profile_run_reserves_sparse_offload_topk_buffers():
